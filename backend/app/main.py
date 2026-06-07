@@ -300,7 +300,7 @@ ASK_PROMPT = """Inspect this project and answer the user's question.
 
 You are in Ask mode. First read CHAT_HISTORY.md for prior conversation context. Answer in clear, practical language. You may read project files and run read-only inspection commands as needed. Do not edit source files and do not create commits.
 
-Append your answer to CHAT_HISTORY.md under a markdown header of the form `### Dualith Answer - <timestamp>` so the discussion thread stays complete.
+Do not write to CHAT_HISTORY.md yourself. Dualith stores your answer in the conversation after the run finishes.
 
 If the user asks for implementation or file changes, explain that Build mode should be used for edits and give a short implementation plan instead. If no specific question is provided, summarize the current project status and useful next questions.
 """
@@ -1925,7 +1925,15 @@ async def project_record(project_path: Path, name: str | None = None) -> dict[st
     active_runs = []
     for mode in active_agents:
         state = active_agent_runs[f"{project_name}:{mode}"]
-        active_runs.append({"mode": mode, "runner": state["runner"], "model": state.get("model", ""), "reasoning": state.get("reasoning", "medium")})
+        active_runs.append({
+            "mode": mode,
+            "runner": state["runner"],
+            "model": state.get("model", ""),
+            "reasoning": state.get("reasoning", "medium"),
+            "started_at": state.get("started_at", ""),
+            "last_output_at": state.get("last_output_at", state.get("started_at", "")),
+            "usage_id": state.get("usage_id", ""),
+        })
 
     if "builder" in active_agents or "lead" in active_agents:
         agent_state = "BUILDER_ACTIVE"
@@ -2300,6 +2308,77 @@ def output_action(action: str, text: str) -> str:
     return "CODEX_LOG"
 
 
+def command_progress_message(command: str) -> str | None:
+    lower = command.lower()
+    if not lower:
+        return None
+    if "git status" in lower or "git diff" in lower or "git log" in lower:
+        return "I'm checking the project status."
+    if "get-content" in lower or "type " in lower or "cat " in lower:
+        return "I'm reading the project files."
+    if "rg " in lower or "select-string" in lower or "get-childitem" in lower or "dir " in lower:
+        return "I'm looking through the project structure."
+    if "invoke-webrequest" in lower or "curl " in lower or "localhost" in lower or "127.0.0.1" in lower:
+        return "I'm checking the running app."
+    if "npm run" in lower or "pnpm " in lower or "yarn " in lower:
+        return "I'm running a project check."
+    if "python " in lower or "pytest" in lower:
+        return "I'm running a backend check."
+    if "apply_patch" in lower:
+        return "I'm updating the files."
+    return "I'm using the terminal to check the project."
+
+
+def concise_agent_progress(text: str) -> str | None:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("{") or cleaned.startswith("["):
+        return None
+    first_sentence = re.split(r"(?<=[.!?])\s+", cleaned, maxsplit=1)[0].strip()
+    if len(first_sentence) > 180:
+        first_sentence = first_sentence[:177].rstrip() + "..."
+    if not first_sentence:
+        return None
+    if first_sentence.lower().startswith(("error", "traceback")):
+        return "I hit a snag and I'm checking what happened."
+    return first_sentence
+
+
+def runner_progress_message(raw_text: str) -> str | None:
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return concise_agent_progress(raw_text)
+
+    if not isinstance(parsed, dict):
+        return None
+
+    event_type = str(parsed.get("type", ""))
+    if event_type == "thread.started":
+        return "I'm starting a fresh work thread."
+    if event_type == "turn.started":
+        return "I'm starting the next step."
+
+    item = parsed.get("item")
+    if not isinstance(item, dict):
+        return None
+
+    item_type = str(item.get("type", ""))
+    if item_type == "command_execution":
+        command = str(item.get("command", ""))
+        if event_type == "item.started" or str(item.get("status", "")) == "in_progress":
+            return command_progress_message(command)
+        if event_type == "item.completed" and item.get("exit_code") not in (0, None):
+            return "That check hit a snag, so I'm adjusting."
+        return None
+    if item_type == "agent_message":
+        return concise_agent_progress(str(item.get("text", "")))
+    if item_type == "file_change":
+        return "I'm updating files in the project."
+    return None
+
+
 def runner_reasoning_arg(runner: str, reasoning: str) -> str:
     if runner == "codex" and reasoning == "extra-high":
         return "xhigh"
@@ -2568,6 +2647,30 @@ def resolve_round_runner(assigned: str, partner: str) -> tuple[str, bool]:
     raise HTTPException(status_code=429, detail="Both runners are over their configured quota reserve.")
 
 
+def runner_default_model(runner: str) -> str:
+    return DEFAULT_RUNNER_MODELS.get(runner, DEFAULT_RUNNER_MODELS["codex"])
+
+
+def runner_accepts_model(runner: str, model: str) -> bool:
+    lower = model.lower()
+    if runner == "codex":
+        return lower.startswith(("gpt-", "o"))
+    if runner == "claude":
+        return any(name in lower for name in ("claude", "sonnet", "opus", "haiku"))
+    return False
+
+
+def resolve_team_step_model(role: str, assigned_runner: str, executing_runner: str, requested_lead_model: str) -> str:
+    """Resolve a Team step model without leaking one runner's model to another."""
+    if executing_runner not in RUNNER_COMMANDS:
+        executing_runner = "codex"
+    if role == "lead" and assigned_runner == executing_runner:
+        requested_model = clean_model(requested_lead_model)
+        if requested_model and runner_accepts_model(executing_runner, requested_model):
+            return requested_model
+    return runner_default_model(executing_runner)
+
+
 async def stream_agent_output(project_path: Path, stream: Any, action: str, usage_record: dict[str, Any], lines: list[str]) -> None:
     if not stream:
         return
@@ -2577,11 +2680,19 @@ async def stream_agent_output(project_path: Path, stream: Any, action: str, usag
         if not text:
             continue
         lines.append(text)
+        key = agent_run_key(str(usage_record.get("project", "")), str(usage_record.get("mode", "")))
+        if key in active_agent_runs:
+            active_agent_runs[key]["last_output_at"] = utc_now()
         usage_record["output_lines"] = int(usage_record.get("output_lines") or 0) + 1
         usage_record["output_chars"] = int(usage_record.get("output_chars") or 0) + len(text)
         update_usage_metrics(usage_record, text)
         entry = record_event(output_action(action, text), f"{relative_path(project_path)} :: {text[:240]}")
-        await broadcast("agent_event", entry)
+        progress = runner_progress_message(text)
+        if progress:
+            progress_entry = record_event("RUN_PROGRESS", f"{relative_path(project_path)} :: {progress}")
+            await broadcast("agent_event", progress_entry)
+        else:
+            await broadcast("agent_event", entry)
 
 
 async def run_agent_process(project_name: str, agent: str, runner: str, model: str, reasoning: str, run_prompt: str, project_path: Path, partner: str = "") -> None:
@@ -2634,6 +2745,7 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             "model": model,
             "reasoning": reasoning,
             "started_at": usage_record["started_at"],
+            "last_output_at": usage_record["started_at"],
             "usage_id": usage_record["id"],
         }
         entry = record_event(
@@ -2663,8 +2775,13 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         if agent == "ask" and status == "ok" and content.strip():
             append_chat_history(project_path, f"### Dualith Answer - {utc_now()}\n\n{content.strip()}\n\n")
             await broadcast("chat_event", record_event("CHAT_ANSWER", f"{relative_path(project_path)} :: ask answer"))
-        action = str(config["exit_action"]) if code == 0 else str(config["error_action"])
-        exit_entry = record_event(action, f"{relative_path(project_path)} :: exited {code}")
+        if status == "stopped":
+            action = "CODEX_STOPPED" if runner == "codex" else "CLAUDE_STOPPED"
+            exit_message = "stopped before a final answer"
+        else:
+            action = str(config["exit_action"]) if status == "ok" else str(config["error_action"])
+            exit_message = f"exited {code}"
+        exit_entry = record_event(action, f"{relative_path(project_path)} :: {exit_message}")
         await broadcast("agent_event", exit_entry)
     except FileNotFoundError:
         finish_usage_record(usage_record, "error", None)
@@ -2803,6 +2920,8 @@ def team_snapshot(project_name: str) -> dict[str, Any] | None:
         "round": state.get("round", 0),
         "lead": state.get("lead", ""),
         "teammate": state.get("teammate", ""),
+        "lead_model": state.get("lead_model", ""),
+        "teammate_model": state.get("teammate_model", ""),
     }
 
 
@@ -2816,18 +2935,26 @@ async def set_team_state(project_name: str, project_path: Path, message_type: st
     await broadcast(message_type, entry)
 
 
-async def run_team_step(project_name: str, role: str, runner: str, model: str, reasoning: str, project_path: Path, partner: str) -> None:
+async def run_team_step(project_name: str, role: str, runner: str, assigned_runner: str, model: str, reasoning: str, project_path: Path, partner: str) -> None:
     """Run one lead or teammate turn with an explicit runner (role decoupled from runner)."""
     if runner not in RUNNER_COMMANDS:
         runner = "codex"
-    resolved_model = clean_model(model) or DEFAULT_RUNNER_MODELS[runner]
+    resolved_model = resolve_team_step_model(role, assigned_runner, runner, model)
     await run_agent_process(project_name, role, runner, resolved_model, clean_reasoning(reasoning), "", project_path, partner)
 
 
 async def run_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int) -> None:
     lead, teammate, reason = team_runners(runner_pref)
     team_resume_events[project_name] = asyncio.Event()
-    active_teams[project_name] = {"status": "running", "step": "starting", "round": 0, "lead": lead, "teammate": teammate}
+    active_teams[project_name] = {
+        "status": "running",
+        "step": "starting",
+        "round": 0,
+        "lead": lead,
+        "teammate": teammate,
+        "lead_model": runner_default_model(lead),
+        "teammate_model": runner_default_model(teammate),
+    }
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
     record_event("TEAM_ROUTED", f"{relative_path(project_path)} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason}")
 
@@ -2865,8 +2992,9 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
             lead_runner, lead_covered = resolve_round_runner(lead, teammate)
             if lead_covered:
                 record_event("TEAM_TAKEOVER", f"{relative_path(project_path)} :: {RUNNER_COMMANDS[lead_runner]['label']} covers LEAD (over reserve: {RUNNER_COMMANDS[lead]['label']})")
-            await set_team_state(project_name, project_path, "team_event", status="running", step="lead", round=round_no)
-            await run_team_step(project_name, "lead", lead_runner, model, reasoning, project_path, teammate)
+            lead_model = resolve_team_step_model("lead", lead, lead_runner, model)
+            await set_team_state(project_name, project_path, "team_event", status="running", step="lead", round=round_no, lead_model=lead_model)
+            await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate)
 
             # Lead may have HALTed by writing a question — loop back to the gate.
             if parse_human_input(project_path)["blocked"]:
@@ -2885,8 +3013,9 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 # Honesty marker in the relay: one runner is reviewing its own work this round.
                 over_runner = lead if lead_covered else teammate
                 append_agent_chat(project_path, f"### Note - {utc_now()}\n\n{RUNNER_COMMANDS[teammate_runner]['label']} is performing a self-review this round because {RUNNER_COMMANDS[over_runner]['label']} is over quota reserve. Independence is reduced.\n\n")
-            await set_team_state(project_name, project_path, "team_event", status="running", step="teammate", round=round_no)
-            await run_team_step(project_name, "teammate", teammate_runner, model, reasoning, project_path, lead_runner)
+            teammate_model = resolve_team_step_model("teammate", teammate, teammate_runner, model)
+            await set_team_state(project_name, project_path, "team_event", status="running", step="teammate", round=round_no, teammate_model=teammate_model)
+            await run_team_step(project_name, "teammate", teammate_runner, teammate, model, reasoning, project_path, lead_runner)
 
             if parse_human_input(project_path)["blocked"]:
                 continue

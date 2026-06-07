@@ -14,6 +14,9 @@ type ActiveRun = {
   runner: RunnerId;
   model?: string;
   reasoning?: ReasoningLevel;
+  started_at?: string;
+  last_output_at?: string;
+  usage_id?: string;
 };
 type AgentStartOptions = {
   runner: RunnerId;
@@ -42,6 +45,8 @@ type TeamState = {
   round: number;
   lead: RunnerId;
   teammate: RunnerId;
+  lead_model?: string;
+  teammate_model?: string;
 };
 
 type DevServerState = {
@@ -222,6 +227,7 @@ type EventPayload =
 
 type SetupMode = "new" | "import";
 type MobilePanel = "projects" | "system" | null;
+type MobileView = "chat" | "preview" | "projects" | "system";
 type ImportFile = File & { webkitRelativePath?: string };
 type DirectoryInputProps = InputHTMLAttributes<HTMLInputElement> & {
   directory?: string;
@@ -484,6 +490,7 @@ function humanVerb(action: string): string {
     DEV_SERVER_LOG: "Preview",
     DEV_SERVER_ERR: "Preview issue",
     DEV_SERVER_STOPPED: "Preview stopped",
+    RUN_PROGRESS: "Working",
     GIT_OK: "Saved",
     GIT_ERR: "Save error",
     GIT_LOG: "Committed",
@@ -550,6 +557,7 @@ function friendlyProgressFromEvent(entry: ConsoleEntry, project: ProjectRecord):
   const lower = message.toLowerCase();
   const action = entry.action;
 
+  if (action === "RUN_PROGRESS") return stripRawEventText(message) || null;
   if (action === "DEV_SERVER_STARTED") return "I'm starting the project preview.";
   if (action === "DEV_SERVER_READY") return `The preview is ready${project.dev_server?.url ? ` at ${project.dev_server.url}` : ""}.`;
   if (action === "DEV_SERVER_STOPPED") return "I stopped the project preview.";
@@ -584,7 +592,13 @@ function friendlyProgressFromEvent(entry: ConsoleEntry, project: ProjectRecord):
 function activityTimeline(project: ProjectRecord | null, events: ConsoleEntry[], latest: AgentResult | null) {
   if (!project) return [];
   const items: { id: string; text: string; time: string; tone: "active" | "ok" | "warn" | "error" }[] = [];
-  const recent = events.slice(-40);
+  const activeRun = newestActiveRun(project);
+  const activeStarted = activeRun ? activeRunTimeValue(activeRun) : 0;
+  const recent = events.filter((entry) => {
+    if (!activeRun) return true;
+    if (activeStarted) return eventTimeValue(entry) >= activeStarted;
+    return !entry.action.endsWith("_STOPPED") && !entry.action.endsWith("_EXIT");
+  }).slice(-40);
   for (const entry of recent) {
     const text = friendlyProgressFromEvent(entry, project);
     if (!text) continue;
@@ -596,9 +610,9 @@ function activityTimeline(project: ProjectRecord | null, events: ConsoleEntry[],
   if (project.dev_server?.status === "running" && project.dev_server.url) {
     items.push({ id: `preview-${project.dev_server.url}`, text: `The project preview is live at ${project.dev_server.url}.`, time: project.dev_server.started_at, tone: "ok" });
   }
-  if (latest?.status === "stopped") {
+  if (!activeRun && latest?.status === "stopped") {
     items.push({ id: `result-${latest.id}`, text: "I stopped the run before it finished.", time: latest.ended_at, tone: "warn" });
-  } else if (latest?.status === "error") {
+  } else if (!activeRun && latest?.status === "error") {
     items.push({ id: `result-${latest.id}`, text: "The run hit a problem. I kept the technical details in the log.", time: latest.ended_at, tone: "error" });
   }
   return items.slice(-8);
@@ -1276,13 +1290,59 @@ function resultTimeValue(result: AgentResult) {
   return new Date(result.ended_at || result.started_at).getTime() || 0;
 }
 
+function eventTimeValue(event: ConsoleEntry) {
+  return new Date(event.timestamp).getTime() || 0;
+}
+
+function activeRunTimeValue(run: ActiveRun) {
+  return new Date(run.started_at || "").getTime() || 0;
+}
+
+function activeRunOutputTimeValue(run: ActiveRun) {
+  return new Date(run.last_output_at || run.started_at || "").getTime() || 0;
+}
+
+function isRunStale(run: ActiveRun) {
+  const lastOutput = activeRunOutputTimeValue(run);
+  return Boolean(lastOutput && Date.now() - lastOutput > 3 * 60 * 1000);
+}
+
+function useRunHeartbeat(active: boolean) {
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!active) return undefined;
+    const timer = window.setInterval(() => setTick((value) => value + 1), 30_000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+
+  return tick;
+}
+
+function newestActiveRun(project: ProjectRecord | null) {
+  const runs = project?.active_runs ?? [];
+  if (!runs.length) return null;
+  return runs.reduce<ActiveRun | null>((latest, run) => {
+    if (!latest || activeRunTimeValue(run) >= activeRunTimeValue(latest)) return run;
+    return latest;
+  }, null);
+}
+
 function latestResultForProject(project: ProjectRecord | null, results: AgentResult[]) {
   if (!project) return null;
-  return results.reduce<AgentResult | null>((latest, result) => {
+  const latestResult = results.reduce<AgentResult | null>((latest, result) => {
     if (result.project !== project.name) return latest;
     if (!latest || resultTimeValue(result) >= resultTimeValue(latest)) return result;
     return latest;
   }, null);
+  const activeRun = newestActiveRun(project);
+  const activeStarted = activeRun ? activeRunTimeValue(activeRun) : 0;
+  if (latestResult && activeRun && (!activeStarted || activeStarted >= resultTimeValue(latestResult))) return null;
+  return latestResult;
+}
+
+function latestProgressEvent(projectEvents: ConsoleEntry[], after = 0) {
+  return [...projectEvents].reverse().find((entry) => entry.action === "RUN_PROGRESS" && (!after || eventTimeValue(entry) >= after));
 }
 
 function friendlyRunLabel(mode: RunRole, runner: RunnerId) {
@@ -1303,36 +1363,82 @@ function safeResultBody(result: AgentResult) {
   return result.content?.trim() || "";
 }
 
-function ActivityTimeline({ project, projectEvents, latest }: { project: ProjectRecord | null; projectEvents: ConsoleEntry[]; latest: AgentResult | null }) {
-  const items = useMemo(() => activityTimeline(project, projectEvents, latest), [project, projectEvents, latest]);
-  if (!items.length) return null;
-  const toneClass = (tone: "active" | "ok" | "warn" | "error") =>
-    tone === "ok" ? "text-ok" : tone === "warn" ? "text-warn" : tone === "error" ? "text-danger" : "text-accent";
-  const dotClass = (tone: "active" | "ok" | "warn" | "error") =>
-    tone === "ok" ? "bg-ok" : tone === "warn" ? "bg-warn" : tone === "error" ? "bg-danger" : "bg-accent";
+function progressToneClass(tone: "active" | "ok" | "warn" | "error") {
+  if (tone === "ok") return "text-ok";
+  if (tone === "warn") return "text-warn";
+  if (tone === "error") return "text-danger";
+  return "text-accent";
+}
+
+function progressDotClass(tone: "active" | "ok" | "warn" | "error") {
+  if (tone === "ok") return "bg-ok";
+  if (tone === "warn") return "bg-warn";
+  if (tone === "error") return "bg-danger";
+  return "bg-accent";
+}
+
+function LiveWorkingBubble({ project, projectEvents }: { project: ProjectRecord | null; projectEvents: ConsoleEntry[] }) {
+  const activeRun = newestActiveRun(project);
+  useRunHeartbeat(Boolean(activeRun));
+  const items = useMemo(() => activityTimeline(project, projectEvents, null), [project, projectEvents]);
+  if (!project || !activeRun) return null;
+
+  const visible = items.length
+    ? items.slice(-4)
+    : [{ id: "starting", text: "I'm getting oriented.", time: activeRun.started_at ?? "", tone: "active" as const }];
+  const stale = isRunStale(activeRun);
+  const staleItem = stale
+    ? { id: "stale", text: "No new activity for a few minutes. You can stop the run if it looks stuck.", time: activeRun.last_output_at ?? activeRun.started_at ?? "", tone: "warn" as const }
+    : null;
+  const displayed = staleItem && visible[visible.length - 1]?.id !== "stale" ? [...visible.slice(-3), staleItem] : visible;
+  const runner = activeRun.runner === "auto" ? undefined : activeRun.runner;
 
   return (
-    <div className="dualith-activity-card">
-      <div className="mb-2 text-[10px] font-medium uppercase tracking-widest text-zinc-600">What I am doing</div>
-      <div className="space-y-2">
-        {items.map((item) => (
-          <div key={item.id} className="flex gap-2 text-xs leading-5">
-            <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 ${dotClass(item.tone)}`} />
-            <span className="min-w-0 flex-1 text-zinc-400">{item.text}</span>
-            {item.time && <span className="shrink-0 text-[10px] tabular-nums text-zinc-700">{timestampLabel(item.time)}</span>}
-          </div>
-        ))}
+    <AgentBubble runner={runner} label={`Working - ${friendlyRunLabel(activeRun.mode, activeRun.runner)}`} timestamp={activeRun.last_output_at || activeRun.started_at}>
+      <div className="dualith-live-work">
+        <div className="dualith-live-work__meta">
+          <span className="dualith-live-pulse" aria-hidden="true" />
+          <span>{modeLabels[activeRun.mode]} is running.</span>
+        </div>
+        <div className="dualith-live-work__steps">
+          {displayed.map((item) => (
+            <div key={item.id} className="dualith-live-work__step">
+              <span className={`dualith-live-work__dot ${progressDotClass(item.tone)}`} />
+              <span className="min-w-0 flex-1">{item.text}</span>
+              {item.time && <span className={`dualith-live-work__time ${progressToneClass(item.tone)}`}>{timestampLabel(item.time)}</span>}
+            </div>
+          ))}
+        </div>
       </div>
-    </div>
+    </AgentBubble>
+  );
+}
+
+function RunStatusBubble({ project, latest }: { project: ProjectRecord | null; latest: AgentResult | null }) {
+  if (!project || !latest || newestActiveRun(project)) return null;
+  if (latest.status !== "stopped" && !(latest.status === "error" && latest.mode === "ask")) return null;
+
+  const body = latest.status === "stopped"
+    ? "You stopped the run before it finished. I kept the raw details in the Log panel."
+    : safeResultBody(latest);
+
+  return (
+    <AgentBubble runner={latest.runner} label={`${modeLabels[latest.mode]} - ${runnerLabels[latest.runner]}`} timestamp={latest.ended_at}>
+      <div className="mb-2 font-medium text-zinc-200">{friendlyResultIntro(latest)}</div>
+      <div className="text-zinc-500">{body}</div>
+    </AgentBubble>
   );
 }
 
 function ActivityFeed({ project, projectEvents, results }: { project: ProjectRecord | null; projectEvents: ConsoleEntry[]; results: AgentResult[] }) {
   const activeAgents = project?.active_agents ?? [];
   const activeRuns = project?.active_runs ?? [];
-  const active = project?.agent_state === "BUILDER_ACTIVE" || activeAgents.length > 0;
+  const active = project?.agent_state === "BUILDER_ACTIVE" || activeAgents.length > 0 || activeRuns.length > 0;
   const currentRun = activeRuns[0];
+  const runHeartbeat = useRunHeartbeat(Boolean(currentRun));
+  const currentRunStarted = currentRun ? activeRunTimeValue(currentRun) : 0;
   const latestResult = useMemo(() => latestResultForProject(project, results), [project, results]);
+  const progressEvent = useMemo(() => latestProgressEvent(projectEvents, currentRunStarted), [projectEvents, currentRunStarted]);
   const lifecycleEvent = useMemo(() => {
     return [...projectEvents].reverse().find((entry) =>
       entry.action.endsWith("_STARTED") || entry.action.endsWith("_EXIT") || entry.action.endsWith("_STOPPED") || entry.action.endsWith("_ERR")
@@ -1353,10 +1459,19 @@ function ActivityFeed({ project, projectEvents, results }: { project: ProjectRec
     if (currentRun) {
       return {
         label: "Working",
-        detail: "Waiting for the final answer.",
-        tone: "active" as const,
-        time: "",
+        detail: isRunStale(currentRun) ? "No new activity for a few minutes." : "The live update is in the chat.",
+        tone: isRunStale(currentRun) ? "warn" as const : "active" as const,
+        time: currentRun.last_output_at || progressEvent?.timestamp || currentRun.started_at || "",
       };
+    }
+    if (latestResult?.status === "stopped") {
+      return { label: "Stopped", detail: "You stopped the run before it finished.", tone: "warn" as const, time: latestResult.ended_at };
+    }
+    if (latestResult?.status === "error") {
+      return { label: "Needs attention", detail: "The run hit a problem.", tone: "error" as const, time: latestResult.ended_at };
+    }
+    if (latestResult?.status === "ok") {
+      return { label: "Finished", detail: "The answer is ready below.", tone: "ok" as const, time: latestResult.ended_at };
     }
     if (!lifecycleEvent) return { label: "Idle", detail: "Ask a question, start a build, or run an audit.", tone: "muted" as const, time: "" };
 
@@ -1371,7 +1486,7 @@ function ActivityFeed({ project, projectEvents, results }: { project: ProjectRec
       return { label: "Needs attention", detail: "The run hit a problem.", tone: "error" as const, time: lifecycleEvent.timestamp };
     }
     return { label: "Started", detail: "Dualith handed the request to the agent.", tone: "active" as const, time: lifecycleEvent.timestamp };
-  }, [currentRun, lifecycleEvent, project]);
+  }, [currentRun, latestResult, lifecycleEvent, project, progressEvent, runHeartbeat]);
   const toneClass =
     status.tone === "active"
       ? "border-cyan-900/70 text-accent"
@@ -1682,18 +1797,20 @@ function ConversationThread({ project, projectEvents, results }: { project: Proj
   const messages = useMemo(() => parseChatHistory(project?.chat_history ?? ""), [project?.chat_history]);
   const teamMessages = useMemo(() => parseAgentChat(project?.agent_chat ?? ""), [project?.agent_chat]);
   const latest = useMemo(() => latestResultForProject(project, results), [project, results]);
-  // Surface the latest build/audit result as an agent message (Ask results already live in chat history).
-  const latestRunMessage = latest && latest.mode !== "ask" ? latest : null;
+  const activeRun = newestActiveRun(project);
+  // Surface real build/audit answers as agent messages. Stopped runs stay in the
+  // short status bubble so they do not look like a fresh answer.
+  const latestRunMessage = latest && latest.mode !== "ask" && latest.status !== "stopped" ? latest : null;
+  const statusBubbleVisible = Boolean(latest?.status === "stopped" || (latest?.status === "error" && latest.mode === "ask"));
   const lead = project?.team?.lead;
   const teammate = project?.team?.teammate;
-  const timelineItems = useMemo(() => activityTimeline(project, projectEvents, latest), [project, projectEvents, latest]);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, teamMessages.length, latest?.id, latest?.status, project?.name]);
+  }, [messages.length, teamMessages.length, latest?.id, latest?.status, activeRun?.usage_id, activeRun?.last_output_at, project?.name]);
 
-  const isEmpty = messages.length === 0 && teamMessages.length === 0 && !latestRunMessage && timelineItems.length === 0;
+  const isEmpty = messages.length === 0 && teamMessages.length === 0 && !latestRunMessage && !activeRun && !statusBubbleVisible;
 
   return (
     <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
@@ -1710,7 +1827,6 @@ function ConversationThread({ project, projectEvents, results }: { project: Proj
         </div>
       ) : (
         <div className="dualith-thread">
-          <ActivityTimeline project={project} projectEvents={projectEvents} latest={latest} />
           {messages.map((message, index) =>
             message.role === "user" ? (
               <UserBubble key={`m-${index}`} message={message} />
@@ -1730,6 +1846,7 @@ function ConversationThread({ project, projectEvents, results }: { project: Proj
           {teamMessages.map((message, index) => (
             <TeamBubble key={`t-${index}`} message={message} lead={lead} teammate={teammate} />
           ))}
+          <LiveWorkingBubble project={project} projectEvents={projectEvents} />
           {latestRunMessage && (
             <AgentBubble runner={latestRunMessage.runner} label={`${modeLabels[latestRunMessage.mode]} · ${runnerLabels[latestRunMessage.runner]}`} timestamp={latestRunMessage.ended_at}>
               <div className="mb-2 font-medium text-zinc-200">{friendlyResultIntro(latestRunMessage)}</div>
@@ -1740,6 +1857,7 @@ function ConversationThread({ project, projectEvents, results }: { project: Proj
               )}
             </AgentBubble>
           )}
+          <RunStatusBubble project={project} latest={latest} />
         </div>
       )}
     </div>
@@ -1838,6 +1956,7 @@ function ChatComposer({
   const activeRuns = project?.active_runs ?? [];
   const teamRunning = Boolean(project?.team);
   const pipelineRunning = Boolean(project?.pipeline);
+  const activeTeam = project?.team ?? null;
   const selectedRun = activeRuns.find((run) => run.mode === mode);
   const anyAgentRun = activeRuns[0];
   const activeKind: "pipeline" | "team" | "agent" | null = pipelineRunning ? "pipeline" : teamRunning ? "team" : anyAgentRun ? "agent" : null;
@@ -1846,6 +1965,13 @@ function ChatComposer({
   // In Team mode the runner choice picks the LEAD; the other runner assists.
   const teamLead = runner === "auto" ? "auto" : runner;
   const teamTeammate = runner === "codex" ? "claude" : runner === "claude" ? "codex" : "auto";
+  const teamLeadModel = teamLead === "auto" ? "runner default" : modelChoice || defaultModelByRunner[teamLead] || "default";
+  const teamTeammateModel = teamTeammate === "auto" ? "runner default" : defaultModelByRunner[teamTeammate] || "default";
+  const teamLeadSummary = teamLead === "auto" ? "Auto lead / runner default" : `Lead: ${runnerLabels[teamLead]} / ${teamLeadModel}`;
+  const teamReviewSummary = teamTeammate === "auto" ? "Review: runner default" : `Review: ${runnerLabels[teamTeammate]} / ${teamTeammateModel}`;
+  const settingsLabel = mode === "team"
+    ? `${teamLead === "auto" ? "Auto lead" : runnerLabels[teamLead]} + ${teamTeammate === "auto" ? "review" : runnerLabels[teamTeammate]}`
+    : `${runnerLabels[runner]} / ${modelLabel}`;
 
   useEffect(() => {
     setModelChoice(defaultModelByRunner[runner]);
@@ -1903,16 +2029,19 @@ function ChatComposer({
   const formClass = "h-8 min-w-0 rounded-md border border-line-hard bg-bg px-2 text-zinc-300 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-600";
   const runLabel = autoLoop && mode !== "ask" && mode !== "team" ? "Run auto loop" : `Run ${modeLabels[mode]}`;
   const stopLabel = activeKind === "pipeline" ? "Stop auto loop" : activeKind === "team" ? "Stop team run" : "Stop run";
+  const activeTeamDetail = activeTeam
+    ? `Team run is active: Lead ${runnerLabels[activeTeam.lead]} / ${activeTeam.lead_model || defaultModelByRunner[activeTeam.lead] || "default"}; Review ${runnerLabels[activeTeam.teammate]} / ${activeTeam.teammate_model || defaultModelByRunner[activeTeam.teammate] || "default"}.`
+    : "Team run is active.";
   const activeDetail = activeKind === "pipeline"
     ? "Auto loop is running."
     : activeKind === "team"
-      ? "Team run is active."
+      ? activeTeamDetail
       : anyAgentRun
         ? `${modeLabels[anyAgentRun.mode]} is running.`
         : "";
 
   return (
-    <section className="shrink-0 px-4 pb-4 pt-2">
+    <section className="dualith-composer-shell shrink-0 px-4 pb-4 pt-2">
       <div className="mx-auto w-full" style={{ maxWidth: "var(--dualith-chat-max)" }}>
         <div className="dualith-composer relative px-2 pb-2 pt-2">
           <textarea
@@ -1965,7 +2094,7 @@ function ChatComposer({
                 );
               })}
               <button type="button" onClick={() => setSettingsOpen((v) => !v)} className={`${chip(settingsOpen)} inline-flex items-center gap-1`} title="Run settings">
-                {runnerLabels[runner]} · {modelLabel}
+                {settingsLabel}
               </button>
             </div>
             <div className="flex items-center gap-1.5">
@@ -2015,7 +2144,7 @@ function ChatComposer({
           ) : activeDetail ? (
             <span className="text-warn">{activeDetail} The Stop button ends the active work.</span>
           ) : mode === "team" ? (
-            <span className="text-accent">{teamLead === "auto" ? "Auto picks the lead" : `${runnerLabels[teamLead]} leads`} · {teamTeammate === "auto" ? "other assists" : `${runnerLabels[teamTeammate]} assists`} · Enter to start</span>
+            <span className="text-accent">{teamLeadSummary}; {teamReviewSummary}; Enter to start</span>
           ) : autoLoop && mode !== "ask" ? (
             <span className="text-warn">Auto loop runs build and review until it passes or you stop it.</span>
           ) : (
@@ -2240,19 +2369,28 @@ function ProjectPreviewPanel({
   project,
   appStatus,
   onDevServerAction,
+  mobileActive = false,
 }: {
   project: ProjectRecord | null;
   appStatus: AppStatus;
   onDevServerAction: (projectName: string, action: DevServerAction) => Promise<void>;
+  mobileActive?: boolean;
 }) {
   const [pending, setPending] = useState<DevServerAction | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [inlineOpen, setInlineOpen] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
   const server = project?.dev_server;
   const status = server?.status ?? "stopped";
   const running = status === "running" || status === "starting";
   const url = server?.url ?? "";
   const reserved = server?.reserved_ports?.join(", ") || "3000, 4000";
+  const canToggleInline = running && url && !mobileActive;
+
+  useEffect(() => {
+    if (!running || !url) setInlineOpen(false);
+    else if (mobileActive) setInlineOpen(true);
+  }, [mobileActive, running, url]);
 
   const act = async (action: DevServerAction) => {
     if (!project) return;
@@ -2284,7 +2422,7 @@ function ProjectPreviewPanel({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {url && (
+          {running && url && inlineOpen && (
             <button
               type="button"
               onClick={() => setReloadKey((value) => value + 1)}
@@ -2293,15 +2431,24 @@ function ProjectPreviewPanel({
               Reload
             </button>
           )}
-          {url && (
+          {running && url && (
             <a
               href={url}
               target="_blank"
               rel="noreferrer"
-              className="border border-line-hard px-2 py-1 text-[10px] text-accent outline-none hover:bg-cyan-950/30 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+              className="border border-cyan-800 px-2 py-1 text-[10px] text-accent outline-none hover:bg-cyan-950/30 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
             >
-              Open
+              Open tab
             </a>
+          )}
+          {canToggleInline && (
+            <button
+              type="button"
+              onClick={() => setInlineOpen((value) => !value)}
+              className="border border-line-hard px-2 py-1 text-[10px] text-zinc-400 outline-none hover:text-zinc-200 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+            >
+              {inlineOpen ? "Hide inline" : "Show inline"}
+            </button>
           )}
           {running ? (
             <button
@@ -2329,8 +2476,8 @@ function ProjectPreviewPanel({
           {errorText || server?.last_error}
         </div>
       )}
-      {running && url && (
-        <div className="h-64 border-t border-line-hard bg-black">
+      {running && url && inlineOpen && (
+        <div className="dualith-preview-frame border-t border-line-hard bg-black">
           <iframe
             key={`${url}-${reloadKey}`}
             title={`${project?.name ?? "Project"} preview`}
@@ -2419,6 +2566,8 @@ function TeamPane({ project, onStart, onStop }: {
   };
 
   const tone = team?.status === "blocked" ? "amber" : team?.status === "error" ? "red" : running ? "cyan" : "muted";
+  const leadModel = team ? team.lead_model || defaultModelByRunner[team.lead] || "default" : "";
+  const teammateModel = team ? team.teammate_model || defaultModelByRunner[team.teammate] || "default" : "";
 
   return (
     <div className="border-t border-line">
@@ -2429,7 +2578,7 @@ function TeamPane({ project, onStart, onStop }: {
       <div className="border-t border-line-hard px-4 py-3 text-xs">
         <p className="mb-3 leading-relaxed text-zinc-500">
           {team
-            ? `${runnerLabels[team.lead]} leads · ${runnerLabels[team.teammate]} reviews · ${team.step || "running"}${team.round ? ` · round ${team.round}` : ""}`
+            ? `${runnerLabels[team.lead]} / ${leadModel} leads; ${runnerLabels[team.teammate]} / ${teammateModel} reviews; ${team.step || "running"}${team.round ? `; round ${team.round}` : ""}`
             : "Two agents collaborate: a lead implements, a teammate reviews each round until sign-off. Pick the lead with the runner chips."}
         </p>
         {errorText && <p className="mb-2 text-[11px] text-danger">Error: {errorText}</p>}
@@ -2500,12 +2649,13 @@ function DetailsDrawer({ project, onClose, onPipelineStart, onPipelineStop, onTe
 }
 
 function WorkspaceColumn({
-  project, projectEvents, results, appStatus, onAgentAction, onPipelineStart, onPipelineStop, onTeamStart, onTeamStop, onDevServerAction, onHumanAnswer, onClearChat, onClearAgentChat, runnerHealth,
+  project, projectEvents, results, appStatus, mobileView, onAgentAction, onPipelineStart, onPipelineStop, onTeamStart, onTeamStop, onDevServerAction, onHumanAnswer, onClearChat, onClearAgentChat, runnerHealth,
 }: {
   project: ProjectRecord | null;
   projectEvents: ConsoleEntry[];
   results: AgentResult[];
   appStatus: AppStatus;
+  mobileView: MobileView;
   onAgentAction: (projectName: string, agent: AgentMode, action: "start" | "stop", options?: AgentStartOptions) => Promise<void>;
   onPipelineStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
   onPipelineStop: (projectName: string) => Promise<void>;
@@ -2524,13 +2674,14 @@ function WorkspaceColumn({
   const hasHistory = Boolean(project?.chat_history?.trim());
   const hasAgentChat = Boolean(project?.agent_chat?.trim());
   const noteCount = project?.claude_todos?.length ?? 0;
+  const teamBadge = team ? `team ${team.status} / r${team.round} / ${runnerLabels[team.lead]}+${runnerLabels[team.teammate]}` : "";
 
   return (
     <main className={`relative flex min-h-0 flex-col border-r ${blocked ? "dualith-blocked border-warn" : "border-line"}`}>
       <div className="flex h-9 shrink-0 items-center justify-between gap-3 border-b border-line px-3">
         <div className="flex min-w-0 items-center gap-2">
           <span className="shrink-0 text-xs font-medium uppercase tracking-widest text-zinc-400">{project ? project.name : "Conversation"}</span>
-          {team && <Badge label={`team ${team.status} · r${team.round} · ${runnerLabels[team.lead]}↔${runnerLabels[team.teammate]}`} tone={team.status === "blocked" ? "amber" : team.status === "error" ? "red" : "cyan"} />}
+          {team && <Badge label={teamBadge} tone={team.status === "blocked" ? "amber" : team.status === "error" ? "red" : "cyan"} />}
           {!team && pipeline && <Badge label={`pipeline ${pipeline.status}`} tone={pipeline.status === "blocked" ? "amber" : pipeline.status === "error" ? "red" : "cyan"} />}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -2554,10 +2705,16 @@ function WorkspaceColumn({
         </div>
       </div>
       <ActivityFeed project={project} projectEvents={projectEvents} results={results} />
-      <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} />
-      <ConversationThread project={project} projectEvents={projectEvents} results={results} />
-      {blocked && project && <HumanInputPane project={project} onSubmit={onHumanAnswer} />}
-      <ChatComposer project={project} onAgentAction={onAgentAction} onPipelineStart={onPipelineStart} onPipelineStop={onPipelineStop} onTeamStart={onTeamStart} onTeamStop={onTeamStop} runnerHealth={runnerHealth} />
+      <div className={`dualith-mobile-pane dualith-mobile-pane--preview ${mobileView === "preview" ? "is-mobile-active" : ""}`}>
+        <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive={mobileView === "preview"} />
+      </div>
+      <div className={`dualith-mobile-pane dualith-mobile-pane--chat ${mobileView === "chat" ? "is-mobile-active" : ""}`}>
+        <ConversationThread project={project} projectEvents={projectEvents} results={results} />
+        {blocked && project && <HumanInputPane project={project} onSubmit={onHumanAnswer} />}
+      </div>
+      <div className={`dualith-mobile-composer-pane ${mobileView === "chat" ? "is-mobile-active" : ""}`}>
+        <ChatComposer project={project} onAgentAction={onAgentAction} onPipelineStart={onPipelineStart} onPipelineStop={onPipelineStop} onTeamStart={onTeamStart} onTeamStop={onTeamStop} runnerHealth={runnerHealth} />
+      </div>
       {detailsOpen && (
         <DetailsDrawer project={project} onClose={() => setDetailsOpen(false)} onPipelineStart={onPipelineStart} onPipelineStop={onPipelineStop} onTeamStart={onTeamStart} onTeamStop={onTeamStop} />
       )}
@@ -3180,7 +3337,21 @@ function SettingsMenu({ theme, setTheme, density, setDensity }: {
 
 // Root
 
-export default function Home() {
+function DualithBootShell() {
+  return (
+    <div className="dualith-boot-shell bg-bg text-zinc-300">
+      <div className="dualith-boot-card">
+        <DualithLogo />
+        <div>
+          <div className="text-xs font-medium uppercase tracking-widest text-zinc-300">Starting Dualith</div>
+          <div className="mt-2 text-xs text-zinc-600">Preparing the command center...</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DualithApp() {
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
   const [globalCommits, setGlobalCommits] = useState<string[]>([]);
@@ -3196,6 +3367,7 @@ export default function Home() {
   const [setupMode, setSetupMode] = useState<SetupMode>("new");
   const [systemCollapsed, setSystemCollapsed] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
+  const [mobileView, setMobileView] = useState<MobileView>("chat");
   const [socketStatus, setSocketStatus] = useState("Connecting...");
   const [loading, setLoading] = useState(true);
   const { theme, setTheme, density, setDensity } = useAppearance();
@@ -3352,6 +3524,18 @@ export default function Home() {
     setSetupMode(mode);
     setSetupOpen(true);
     setMobilePanel(null);
+    setMobileView("projects");
+  }, []);
+
+  const openMobileView = useCallback((view: MobileView) => {
+    setMobileView(view);
+    if (view === "projects") {
+      setMobilePanel("projects");
+    } else if (view === "system") {
+      setMobilePanel("system");
+    } else {
+      setMobilePanel(null);
+    }
   }, []);
 
   const handleSetupCreated = useCallback(async (name: string) => {
@@ -3375,7 +3559,7 @@ export default function Home() {
   const errored = socketStatus === "Connection error";
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-bg text-zinc-300">
+    <div className="dualith-app-shell h-screen w-screen overflow-hidden bg-bg text-zinc-300">
       <header className={`dualith-topbar border-b border-line text-xs ${systemCollapsed ? "dualith-topbar--system-collapsed" : ""}`}>
         <div className="flex items-center border-r border-line px-3">
           <DualithLogo />
@@ -3386,8 +3570,8 @@ export default function Home() {
             {appStatus.phone_url ? ` | Phone: ${appStatus.phone_url}` : ""}
           </span>
           <div className="dualith-mobile-actions">
-            <button type="button" onClick={() => setMobilePanel("projects")} className="border border-line-hard px-2 py-1 text-[10px] text-accent">Projects</button>
-            <button type="button" onClick={() => setMobilePanel("system")} className="border border-line-hard px-2 py-1 text-[10px] text-accent">System</button>
+            <button type="button" onClick={() => openMobileView("projects")} className="border border-line-hard px-2 py-1 text-[10px] text-accent">Projects</button>
+            <button type="button" onClick={() => openMobileView("system")} className="border border-line-hard px-2 py-1 text-[10px] text-accent">System</button>
           </div>
         </div>
         <div className="flex items-center justify-between gap-2 px-3">
@@ -3409,19 +3593,22 @@ export default function Home() {
           type="button"
           aria-label="Close drawer"
           className="dualith-drawer-backdrop"
-          onClick={() => setMobilePanel(null)}
+          onClick={() => openMobileView("chat")}
         />
       )}
-      <div className={`dualith-main-grid ${systemCollapsed ? "dualith-main-grid--system-collapsed" : ""}`}>
+      <div className={`dualith-main-grid ${systemCollapsed ? "dualith-main-grid--system-collapsed" : ""}`} data-mobile-view={mobileView}>
         <div className={`dualith-rail-slot dualith-project-slot ${mobilePanel === "projects" ? "is-open" : ""}`}>
           <RegistryColumn
             projects={projects}
             selectedName={selectedName}
             loading={loading}
-            onSelect={setSelectedName}
+            onSelect={(name) => {
+              setSelectedName(name);
+              openMobileView("chat");
+            }}
             onOpenSetup={() => openSetup("new")}
             onDelete={deleteProject}
-            onCloseMobile={() => setMobilePanel(null)}
+            onCloseMobile={() => openMobileView("chat")}
           />
         </div>
         <WorkspaceColumn
@@ -3429,6 +3616,7 @@ export default function Home() {
           projectEvents={projectEvents}
           results={results}
           appStatus={appStatus}
+          mobileView={mobileView}
           onAgentAction={runAgentAction}
           onPipelineStart={startPipeline}
           onPipelineStop={stopPipeline}
@@ -3450,10 +3638,22 @@ export default function Home() {
             onStatusRefresh={refreshStatus}
             collapsed={systemCollapsed}
             onCollapsedChange={setSystemCollapsed}
-            onCloseMobile={() => setMobilePanel(null)}
+            onCloseMobile={() => openMobileView("chat")}
           />
         </div>
       </div>
+      <nav className="dualith-mobile-tabs" aria-label="Dualith mobile navigation">
+        {(["chat", "preview", "projects", "system"] as MobileView[]).map((view) => (
+          <button
+            key={view}
+            type="button"
+            onClick={() => openMobileView(view)}
+            className={mobileView === view ? "is-active" : ""}
+          >
+            {view[0].toUpperCase() + view.slice(1)}
+          </button>
+        ))}
+      </nav>
       <ProjectSetupModal
         open={setupOpen}
         mode={setupMode}
@@ -3466,4 +3666,14 @@ export default function Home() {
       />
     </div>
   );
+}
+
+export default function Home() {
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  return mounted ? <DualithApp /> : <DualithBootShell />;
 }

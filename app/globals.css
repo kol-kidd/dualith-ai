@@ -613,6 +613,29 @@ select option:disabled {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--dualith-cyan) 14%, transparent);
 }
 
+.dualith-preview-frame {
+  height: min(42vh, 28rem);
+  min-height: 12rem;
+  max-height: 70vh;
+  resize: vertical;
+  overflow: auto;
+  position: relative;
+}
+
+.dualith-preview-frame::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  width: 18px;
+  height: 10px;
+  pointer-events: none;
+  background:
+    linear-gradient(135deg, transparent 0 48%, color-mix(in srgb, var(--dualith-cyan) 70%, var(--dualith-line)) 50% 56%, transparent 58%),
+    linear-gradient(135deg, transparent 0 64%, color-mix(in srgb, var(--dualith-cyan) 52%, var(--dualith-line)) 66% 72%, transparent 74%);
+  opacity: 0.75;
+}
+
 /* Right slide-over drawer for secondary detail. */
 .dualith-overlay {
   position: absolute;
@@ -665,4 +688,281 @@ select option:disabled {
 
 .dualith-hitl {
   font-variant-ligatures: none;
+}
+
+.dualith-app-shell,
+.dualith-boot-shell {
+  min-height: 100dvh;
+}
+
+.dualith-boot-shell {
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.dualith-boot-card {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  max-width: 22rem;
+  border: 1px solid var(--dualith-line);
+  border-radius: 14px;
+  background: var(--dualith-surface);
+  padding: 1rem;
+}
+
+.dualith-mobile-tabs {
+  display: none;
+}
+
+.dualith-mobile-pane,
+.dualith-mobile-composer-pane {
+  display: contents;
+}
+
+.dualith-live-work {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.dualith-live-work__meta,
+.dualith-live-work__step {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.dualith-live-work__meta {
+  font-size: 0.75rem;
+  color: var(--dualith-text-muted);
+}
+
+.dualith-live-work__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-size: 0.82rem;
+  color: var(--dualith-text-soft);
+}
+
+.dualith-live-work__dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  flex: 0 0 auto;
+}
+
+.dualith-live-work__time {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  opacity: 0.75;
+}
+
+.dualith-live-pulse {
+  width: 0.45rem;
+  height: 0.45rem;
+  flex: 0 0 auto;
+  background: var(--dualith-cyan);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--dualith-cyan) 42%, transparent);
+  animation: dualith-live-pulse 1.6s ease-out infinite;
+}
+
+@keyframes dualith-live-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--dualith-cyan) 42%, transparent); }
+  70% { box-shadow: 0 0 0 0.45rem transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+@media (max-width: 860px) {
+  html,
+  body {
+    width: 100%;
+    min-height: 100dvh;
+    overflow: hidden;
+  }
+
+  .dualith-app-shell {
+    height: 100dvh;
+    width: 100vw;
+    overflow: hidden;
+    padding-bottom: calc(58px + env(safe-area-inset-bottom));
+  }
+
+  .dualith-topbar {
+    height: 54px;
+    grid-template-columns: 1fr;
+  }
+
+  .dualith-topbar > :nth-child(2),
+  .dualith-topbar > :nth-child(3) {
+    display: none;
+  }
+
+  .dualith-mobile-actions {
+    display: none;
+  }
+
+  .dualith-main-grid,
+  .dualith-main-grid--system-collapsed {
+    display: block;
+    height: calc(100dvh - 54px - 58px - env(safe-area-inset-bottom));
+    overflow: hidden;
+  }
+
+  .dualith-main-grid > main {
+    height: 100%;
+    min-height: 0;
+    border-right: 0;
+  }
+
+  .dualith-main-grid > main > .dualith-mobile-pane,
+  .dualith-main-grid > main > .dualith-mobile-composer-pane {
+    display: none;
+  }
+
+  .dualith-main-grid > main > .dualith-mobile-pane.is-mobile-active,
+  .dualith-main-grid > main > .dualith-mobile-composer-pane.is-mobile-active {
+    display: flex;
+    width: 100%;
+  }
+
+  .dualith-mobile-pane--chat {
+    min-height: 0;
+    flex: 1 1 auto;
+    flex-direction: column;
+  }
+
+  .dualith-mobile-pane--preview {
+    min-height: 0;
+    flex: 1 1 auto;
+    flex-direction: column;
+    overflow: auto;
+  }
+
+  .dualith-mobile-pane--preview > section {
+    min-height: 100%;
+  }
+
+  .dualith-mobile-composer-pane {
+    flex: 0 0 auto;
+  }
+
+  .dualith-thread {
+    max-width: none;
+    gap: 1rem;
+    padding: 1rem 0.85rem 1.25rem;
+    font-size: 0.875rem;
+    line-height: 1.62;
+  }
+
+  .dualith-msg__bubble {
+    max-width: 96%;
+    border-radius: 12px;
+    padding: 0.78rem 0.85rem;
+  }
+
+  .dualith-msg--agent .dualith-msg__bubble {
+    width: 100%;
+  }
+
+  .dualith-msg__role {
+    max-width: 100%;
+    flex-wrap: wrap;
+    letter-spacing: 0.12em;
+  }
+
+  .dualith-composer-shell {
+    position: sticky;
+    bottom: 0;
+    z-index: 24;
+    padding: 0.55rem 0.7rem 0.7rem;
+    background: linear-gradient(to top, var(--dualith-bg) 76%, transparent);
+  }
+
+  .dualith-composer {
+    border-radius: 14px;
+  }
+
+  .dualith-composer textarea {
+    min-height: 44px;
+    font-size: 0.875rem;
+  }
+
+  .dualith-composer button,
+  .dualith-composer select {
+    min-height: 40px;
+  }
+
+  .dualith-composer [title="Run settings"] {
+    display: none;
+  }
+
+  .dualith-preview-frame {
+    height: calc(100dvh - 220px);
+    max-height: none;
+    min-height: 18rem;
+    resize: none;
+  }
+
+  .dualith-project-slot,
+  .dualith-system-slot {
+    top: 54px;
+    bottom: calc(58px + env(safe-area-inset-bottom));
+    width: 100vw;
+    max-width: none;
+    transform: translateY(100%);
+  }
+
+  .dualith-project-slot,
+  .dualith-system-slot {
+    left: 0;
+    right: 0;
+  }
+
+  .dualith-project-slot.is-open,
+  .dualith-system-slot.is-open {
+    transform: translateY(0);
+  }
+
+  .dualith-drawer-backdrop {
+    top: 54px;
+    bottom: calc(58px + env(safe-area-inset-bottom));
+  }
+
+  .dualith-mobile-tabs {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 50;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.35rem;
+    border-top: 1px solid var(--dualith-line);
+    background: color-mix(in srgb, var(--dualith-surface) 96%, black);
+    padding: 0.45rem 0.55rem calc(0.45rem + env(safe-area-inset-bottom));
+  }
+
+  .dualith-mobile-tabs button {
+    min-height: 44px;
+    border: 1px solid var(--dualith-line-hard);
+    border-radius: 10px;
+    color: var(--dualith-text-muted);
+    background: var(--dualith-bg);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+
+  .dualith-mobile-tabs button.is-active {
+    border-color: color-mix(in srgb, var(--dualith-cyan) 64%, var(--dualith-line));
+    background: color-mix(in srgb, var(--dualith-cyan) 14%, var(--dualith-surface));
+    color: var(--dualith-text-strong);
+  }
+
+  * {
+    max-width: 100%;
+  }
 }
