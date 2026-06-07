@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -70,6 +70,33 @@ const apiHost = env.DUALITH_API_HOST ?? "127.0.0.1";
 const webHost = env.DUALITH_WEB_HOST ?? "127.0.0.1";
 const apiBaseUrl = env.NEXT_PUBLIC_API_BASE_URL ?? `http://${apiHost === "0.0.0.0" ? "127.0.0.1" : apiHost}:${apiPort}`;
 
+function clearStaleNextDevOutput() {
+  const nextDir = path.join(root, ".next");
+  const resolvedNextDir = path.resolve(nextDir);
+  const resolvedRoot = path.resolve(root);
+  const appDir = path.join(nextDir, "server", "app");
+  const appPage = path.join(appDir, "page.js");
+  const appManifest = path.join(appDir, "page_client-reference-manifest.js");
+  const pagesDir = path.join(nextDir, "server", "pages");
+  const documentPage = path.join(pagesDir, "_document.js");
+  const errorPage = path.join(pagesDir, "_error.js");
+
+  if (!existsSync(nextDir)) {
+    return;
+  }
+
+  const missingAppEntrypoint = existsSync(appManifest) && !existsSync(appPage);
+  const missingPagesEntrypoints = existsSync(pagesDir) && (!existsSync(documentPage) || !existsSync(errorPage));
+
+  if (missingAppEntrypoint || missingPagesEntrypoints) {
+    if (path.basename(resolvedNextDir) !== ".next" || !resolvedNextDir.startsWith(resolvedRoot + path.sep)) {
+      throw new Error(`Refusing to remove unexpected Next output path: ${resolvedNextDir}`);
+    }
+    rmSync(resolvedNextDir, { recursive: true, force: true });
+    console.log("[dualith] Cleared stale Next output before starting dev server.");
+  }
+}
+
 // Prefer .venv (local), fall back to PYTHON env var, then system python.
 // Some shells provide a global PYTHON that cannot import this app's FastAPI deps.
 const venvPython = path.join(root, ".venv", "Scripts", isWindows ? "python.exe" : "python");
@@ -136,6 +163,7 @@ if (lanMode) {
   console.log(`[dualith] API URL: ${env.NEXT_PUBLIC_API_BASE_URL}`);
 }
 
+clearStaleNextDevOutput();
 children.push(spawnProc(process.execPath, [nextCli, "dev", "--hostname", webHost, "--port", webPort]));
 
 let shuttingDown = false;
