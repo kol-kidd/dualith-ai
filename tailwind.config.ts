@@ -6,6 +6,7 @@ const config: Config = {
     extend: {
       colors: {
         bg: "var(--dualith-bg)",
+        surface: "var(--dualith-surface)",
         line: "var(--dualith-line)",
         "line-hard": "var(--dualith-line-hard)",
         text: "var(--dualith-text)",

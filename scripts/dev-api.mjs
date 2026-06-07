@@ -13,6 +13,7 @@ const bundledPython = path.join(
   "python",
   "python.exe"
 );
+const venvPython = path.join(root, ".venv", "Scripts", process.platform === "win32" ? "python.exe" : "python");
 
 function loadEnvLocal(filePath) {
   if (!existsSync(filePath)) {
@@ -39,7 +40,7 @@ function loadEnvLocal(filePath) {
   return entries;
 }
 
-const python = env.PYTHON ?? (existsSync(bundledPython) ? bundledPython : "python");
+const python = existsSync(venvPython) ? venvPython : env.PYTHON ?? (existsSync(bundledPython) ? bundledPython : "python");
 const api = spawn(python, ["backend/run_server.py"], {
   cwd: root,
   stdio: "inherit",

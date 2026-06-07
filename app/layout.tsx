@@ -3,7 +3,10 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Dualith Command Center",
-  description: "Dense local command center for AI agent workspace orchestration."
+  description: "Dense local command center for AI agent workspace orchestration.",
+  icons: {
+    icon: "/dualith-mark.svg",
+  },
 };
 
 export default function RootLayout({
@@ -12,8 +15,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body>{children}</body>
+    <html lang="en" suppressHydrationWarning>
+      <body suppressHydrationWarning>{children}</body>
     </html>
   );
 }
