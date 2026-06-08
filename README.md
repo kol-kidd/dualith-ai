@@ -2,55 +2,72 @@
 
 # Dualith
 
-Dualith is a local AI workspace command center for coordinating builder and auditor agents across your projects. It gives you one dense dashboard for creating or importing workspaces, launching Codex or Claude against those workspaces, watching project activity, streaming agent logs, and tracking local usage or quota status.
+Dualith is a local AI workspace that orchestrates Codex and Claude as a multi-agent engineering team inside your real project folders. You describe the outcome; the agents plan, implement, test, and review it — while you watch the conversation unfold in a single chat interface.
 
-It is designed for developers who want AI agents to work inside real project folders without losing sight of what is running, what changed, and which project needs attention.
+## What It Does
 
-## What Dualith Does
+- **Chat or Build** — two modes. Chat answers questions about your project. Build routes to the multi-agent team.
+- **Multi-agent pipeline** — Lead implements, Tester runs your build/lint/test commands, Teammate reviews. Loops until approved or the circuit breaker trips.
+- **Plan toggle** — turn Plan on and the Planner writes a step-by-step spec for you to approve before any code is written. Turn it off and the agents decide autonomously: ask one clarifying question if the request is ambiguous, or go straight to building if it's clear.
+- **PM clarification** — when a request is ambiguous and Plan is off, the PM agent asks one focused question via the HITL gate before the team starts.
+- **Visible agent dialogue** — Lead and Teammate updates appear as readable chat bubbles, written for a person watching over their shoulder, not as internal reports.
+- **Subagent permission** — Lead and Builder agents can spawn parallel subagents for large or naturally parallel tasks.
+- **Circuit breaker** — if the Tester reports three consecutive failures, the run stops and the error is surfaced in the chat thread.
+- **Image attachments** — paste, drag-drop, or pick images; they land in `.dualith/attachments/` and are injected into the agent prompt as disk paths.
+- **Git operations** — commit, push, merge, tag, stash. Say it in the chat and the Lead handles it. Dualith also creates automatic checkpoint commits after successful build runs.
+- **HITL gate** — any agent can pause mid-run and ask a question. You answer in the chat thread; the run continues.
+- **Usage tracking** — token counts, cost, quota reserves, and runner health visible in the System panel.
+- **Auto runner routing** — Codex-heavy, Claude-heavy, Balanced, or Registry auto. Falls back to the other runner when the preferred one is over its reserve.
 
-Dualith combines a Next.js frontend with a FastAPI backend:
+## Agent Pipeline
 
-- Tracks local project workspaces in a `.dualith` registry.
-- Creates new projects with initial agent-facing files and Git bootstrap.
-- Imports existing project folders while skipping heavy/generated directories.
-- Runs builder and auditor workflows through Codex or Claude.
-- Routes normal chat requests into the right workflow automatically, including a lead/reviewer team for build work.
-- Streams filesystem, Git, and agent events into the UI through WebSockets.
-- Tracks agent run history, token usage, runner status, and quota reserves.
-- Refines rough project ideas into structured specs through the Claude CLI.
+```
+User message
+  ↓
+Intent classifier (LLM → keyword fallback)
+  ↓
+┌──────────────┬──────────────────────────────────┐
+│  Chat        │  Ask agent (read-only)            │
+├──────────────┼──────────────────────────────────┤
+│  Build       │  Lead → Tester → Teammate (loop)  │
+│  Plan ON     │  Planner → [user approves] → Team │
+│  Ambiguous   │  PM → [HITL if needed] → Team     │
+│  Audit       │  Auditor (read-only review)       │
+└──────────────┴──────────────────────────────────┘
+```
 
-## How It Helps
-
-Dualith is useful when you want AI coding agents to behave like part of a local development loop instead of one-off chat sessions.
-
-- **Centralized control:** start, stop, inspect, and audit agent runs from one UI.
-- **Project visibility:** see tracked workspaces, recent events, commits, and active runs.
-- **Automatic team routing:** describe the outcome once; Dualith picks Ask, Audit, or the multi-agent Team workflow.
-- **Quota awareness:** keep a reserve for Codex and Claude usage before starting new runs.
-- **Local-first operation:** project state, usage, quota, and status files live in `.dualith`.
+**Agents:**
+| Agent | Role | Sandbox |
+|---|---|---|
+| Ask | Read-only conversation | read-only |
+| PM | Clarify ambiguous requests, write SPEC.md | read-only |
+| Planner | Write PLAN.md for user approval | read-only |
+| Lead | Implement against spec, update PLAN.md | full-auto |
+| Tester | Run build/lint/test commands, write FEEDBACK.md | full-auto |
+| Teammate | Review lead's work, approve or request changes | read-only |
+| Builder | Single-pass implementation (pipeline mode) | full-auto |
+| Auditor | Single-pass review, write FEEDBACK.md | read-only |
 
 ## Architecture
 
-- **Frontend:** Next.js app in `app/`, served on `http://localhost:3200` by default.
-- **Backend:** FastAPI app in `backend/app/main.py`, served on `http://127.0.0.1:4200` by default.
-- **Local state:** `.dualith/` stores project registry, usage history, quota settings, and status cache.
-- **Project root:** `DUALITH_PROJECTS_ROOT` controls where new/imported projects are created.
-- **Agent runners:** Codex and Claude commands are configured through environment variables.
+- **Frontend:** Next.js 15 App Router in `app/`, served on `http://localhost:3200`.
+- **Backend:** FastAPI in `backend/app/main.py`, served on `http://127.0.0.1:4200`.
+- **Agent runners:** Codex CLI and Claude CLI launched as subprocesses; output streamed over WebSocket.
+- **Local state:** `.dualith/` stores project registry, usage history, quota settings, attachments, and status cache.
+- **Project files:** each workspace gets `SPEC.md`, `PLAN.md`, `FEEDBACK.md`, `AGENT_CHAT.md`, `CHAT_HISTORY.md`, `HUMAN_INPUT.md`, `PRODUCT.md`, `DESIGN.md`, `CLAUDE.md`.
 
-The frontend talks to the backend over HTTP and WebSockets. The backend watches registered project folders, records events, starts agent subprocesses, and broadcasts snapshots back to the UI.
+The frontend and backend communicate over HTTP (actions) and WebSocket (live snapshots). The backend watches registered project folders with Watchdog, records filesystem/Git events, manages agent subprocess lifecycles, and broadcasts state on every change.
 
 ## Prerequisites
 
-Install these before running Dualith locally:
-
-- Node.js with npm.
-- Python 3.
-- Codex CLI, if you want to use the Codex runner.
-- Claude CLI, if you want to use the Claude runner or spec refinement.
+- Node.js with npm
+- Python 3
+- Codex CLI (`codex`) — for the Codex runner
+- Claude CLI (`claude`) — for the Claude runner, Planner, PM, Tester, and Teammate
 
 ## Installation
 
-Clone the repo, then install the JavaScript dependencies:
+Clone the repo, then install JavaScript dependencies:
 
 ```powershell
 npm install
@@ -62,175 +79,99 @@ Create your local environment file:
 Copy-Item .env.local.example .env.local
 ```
 
-Install the Python backend dependencies. A local virtual environment is recommended:
+Install Python backend dependencies (virtual environment recommended):
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
 ```
 
-If you prefer another Python environment, install the same requirements there:
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
 ## Environment Variables
 
-Edit `.env.local` after copying the example file.
+Edit `.env.local` after copying the example.
 
 | Variable | Purpose |
-| --- | --- |
-| `NEXT_PUBLIC_API_BASE_URL` | Backend API URL used by the frontend. Defaults to `http://127.0.0.1:4200`. |
-| `DUALITH_PROJECTS_ROOT` | Root folder where Dualith creates and imports projects, for example `D:\Git`. |
-| `DUALITH_CODEX_COMMAND` | Codex executable or command path. |
-| `DUALITH_CODEX_ARGS` | Base arguments used when starting Codex. |
-| `DUALITH_CODEX_MODEL_ARGS` | Format string for passing the selected model to Codex. |
-| `DUALITH_CODEX_REASONING_ARGS` | Format string for passing reasoning effort to Codex. |
-| `DUALITH_CODEX_STATUS_COMMAND` | Command used for Codex status refresh. |
-| `DUALITH_CODEX_STATUS_ARGS` | Arguments used for Codex status refresh. |
-| `DUALITH_CLAUDE_COMMAND` | Claude executable or command path. |
-| `DUALITH_CLAUDE_ARGS` | Base arguments used when starting Claude. |
-| `DUALITH_CLAUDE_MODEL_ARGS` | Format string for passing the selected model to Claude. |
-| `DUALITH_CLAUDE_REASONING_ARGS` | Format string for passing reasoning options to Claude. |
-| `DUALITH_CLAUDE_STATUS_COMMAND` | Command used for Claude status refresh. |
-| `DUALITH_CLAUDE_STATUS_ARGS` | Arguments used for Claude status refresh. |
+|---|---|
+| `NEXT_PUBLIC_API_BASE_URL` | Backend API URL. Defaults to `http://127.0.0.1:4200`. |
+| `DUALITH_PROJECTS_ROOT` | Root folder for new and imported projects. |
+| `DUALITH_CODEX_COMMAND` | Codex executable path. |
+| `DUALITH_CODEX_ARGS` | Base args for Codex. |
+| `DUALITH_CODEX_MODEL_ARGS` | Model arg format string for Codex. |
+| `DUALITH_CODEX_REASONING_ARGS` | Reasoning arg format string for Codex. |
+| `DUALITH_CODEX_STATUS_COMMAND` | Command for Codex status refresh. |
+| `DUALITH_CODEX_STATUS_ARGS` | Args for Codex status refresh. |
+| `DUALITH_CLAUDE_COMMAND` | Claude executable path. |
+| `DUALITH_CLAUDE_ARGS` | Base args for Claude. |
+| `DUALITH_CLAUDE_MODEL_ARGS` | Model arg format string for Claude. |
+| `DUALITH_CLAUDE_REASONING_ARGS` | Reasoning arg format string for Claude. |
+| `DUALITH_CLAUDE_STATUS_COMMAND` | Command for Claude status refresh. |
+| `DUALITH_CLAUDE_STATUS_ARGS` | Args for Claude status refresh. |
 | `DUALITH_STATUS_TIMEOUT_SECONDS` | Timeout for status refresh commands. |
 
-The example file is set up for a Windows-style projects root:
-
-```env
-DUALITH_PROJECTS_ROOT=D:\Git
-```
-
-Change that path if your projects live somewhere else.
-
 ## Running Locally
-
-Run the frontend and backend together:
 
 ```powershell
 npm run dev
 ```
 
-Open the app at:
+Frontend: `http://localhost:3200`  
+Backend: `http://127.0.0.1:4200`
 
-```text
-http://localhost:3200
-```
-
-The backend API runs at:
-
-```text
-http://127.0.0.1:4200
-```
-
-You can also run the two processes separately:
+Run separately:
 
 ```powershell
 npm run dev:api
 npm run dev:web
 ```
 
-For LAN mode, use:
+LAN mode (binds to local network, prints phone URL):
 
 ```powershell
 npm run dev:lan
 ```
 
-This binds Dualith to your local network and prints the phone URL, typically `http://<your-lan-ip>:3200`.
-
 ## Auto-Start On Windows
 
-Dualith can start automatically when you log in to Windows. The startup helper runs LAN mode and writes logs to `.tmp/dualith-startup.log`:
-
-```powershell
-.\scripts\start-dualith-lan.ps1
-```
-
-Register or refresh the Windows Task Scheduler entry:
+Start Dualith automatically at login:
 
 ```powershell
 .\scripts\register-dualith-startup.ps1
 ```
 
-The task is named `Dualith LAN` and runs `npm run dev:lan` in the background at user logon.
+This registers a Task Scheduler entry named `Dualith LAN` that runs `npm run dev:lan` at user logon. Logs go to `.tmp/dualith-startup.log`.
 
-If Windows denies Task Scheduler registration in a non-admin shell, use the current-user Startup folder fallback:
+If Task Scheduler registration is blocked (non-admin shell), use the Startup folder fallback:
 
 ```powershell
 .\scripts\create-dualith-startup-shortcut.ps1
 ```
 
-This creates `Dualith LAN.lnk` in your Windows Startup folder and points it at the same LAN startup helper.
+## Usage
 
-## Usage Workflow
+1. **Create or import a project.** Dualith registers the workspace and creates agent-facing files.
+2. **Chat** — ask questions, check status, or get explanations. The Ask agent reads the project and responds conversationally.
+3. **Build** — describe the outcome. With Plan off, the team starts immediately (or PM asks one clarifying question if the request is ambiguous). With Plan on, the Planner writes a spec first — approve it to start building.
+4. **Watch the conversation.** Lead updates and Teammate reviews appear as readable bubbles in the chat thread.
+5. **Answer questions.** If an agent hits a blocking ambiguity it pauses and asks you directly. Type your answer and the run continues.
+6. **Git operations.** Say "commit the changes", "push to main", "tag v1.0" — Lead handles it.
 
-1. **Create or import a project.** Dualith registers the workspace under `.dualith/projects.json`.
-2. **Refine the goal if needed.** The refine action uses the Claude CLI to turn a rough idea into a structured project spec.
-3. **Send the task.** Dualith routes questions to Ask, review requests to Audit, and build/change requests to the multi-agent Team workflow.
-4. **Watch events.** Filesystem changes, Git events, active agents, logs, usage, and quota status stream into the UI.
-5. **Stop or rerun agents as needed.** Active runs are tracked in the dashboard and recorded in local usage history.
-
-Auto runner mode uses the saved runner policy from the Limits panel. Codex-heavy uses Codex as the implementation lead and Claude as reviewer; Claude-heavy flips that pairing; Balanced picks the runner with the most quota headroom; Registry auto uses the agent defaults. If the preferred runner is over its configured quota reserve, Dualith falls back to the other runner when available.
-
-Builder and lead runs do not ask the agent to write Git metadata directly. After a successful run, Dualith creates the Git checkpoint from the backend process when the repository was clean before the run. If the working tree was already dirty, Dualith skips the automatic checkpoint to avoid mixing unrelated changes.
-
-Project imports skip common generated or heavy directories, including `.git`, `node_modules`, `.next`, `dist`, `build`, `.venv`, `__pycache__`, `.cache`, and `.turbo`.
-
-## Build And Production Commands
-
-Create an optimized Next.js build:
+## Build And Production
 
 ```powershell
 npm run build
-```
-
-Start the built Next.js app:
-
-```powershell
 npm run start
 ```
 
-For production-style use, make sure the FastAPI backend is also running and that `NEXT_PUBLIC_API_BASE_URL` points to it.
+Make sure the FastAPI backend is running and `NEXT_PUBLIC_API_BASE_URL` points to it.
 
 ## Troubleshooting
 
-### API Port Is Already In Use
+**Port already in use** — stop the process on port `4200` and rerun `npm run dev`.
 
-The combined dev script checks `NEXT_PUBLIC_API_BASE_URL`. If port `4200` is already occupied by another server, stop that process and rerun:
+**Python dependencies missing** — reinstall: `.\.venv\Scripts\python -m pip install -r requirements.txt`
 
-```powershell
-npm run dev
-```
+**Codex or Claude not found** — confirm the CLI is on `PATH`, or set `DUALITH_CODEX_COMMAND` / `DUALITH_CLAUDE_COMMAND` in `.env.local`.
 
-### Python Dependencies Are Missing
+**Status refresh does not parse limits** — configure fallback quota values in the System panel. Dualith uses them for Auto runner routing even without a parseable CLI limit.
 
-If the backend fails to import FastAPI, Uvicorn, Watchdog, Pydantic, or multipart support, reinstall:
-
-```powershell
-.\.venv\Scripts\python -m pip install -r requirements.txt
-```
-
-### Codex Or Claude Cannot Start
-
-Confirm the CLI is installed and available on `PATH`, or point the relevant environment variable to the executable:
-
-```env
-DUALITH_CODEX_COMMAND=codex
-DUALITH_CLAUDE_COMMAND=claude
-```
-
-### Status Refresh Does Not Parse Limits
-
-Dualith can still show local usage estimates even when a CLI status output does not expose a parseable limit. Configure fallback quota values in the UI to keep Auto routing useful.
-
-### Projects Are Created In The Wrong Folder
-
-Update `DUALITH_PROJECTS_ROOT` in `.env.local`:
-
-```env
-DUALITH_PROJECTS_ROOT=D:\Git
-```
-
-Restart Dualith after changing environment variables.
+**Projects created in the wrong folder** — update `DUALITH_PROJECTS_ROOT` in `.env.local` and restart.

@@ -5,11 +5,11 @@ import type { ChangeEvent, FormEvent, InputHTMLAttributes, ReactNode } from "rea
 
 type AgentState = "IDLE" | "BUILDER_ACTIVE";
 type AuditState = "PENDING" | "CLEAN" | "ATTENTION";
-type AgentMode = "ask" | "builder" | "auditor" | "team";
+type AgentMode = "chat" | "build";
 type RunnerId = "auto" | "codex" | "claude";
 type RunnerPolicyId = "auto" | "codex-heavy" | "claude-heavy" | "balanced";
 type RefineRunnerId = Exclude<RunnerId, "auto">;
-type RunRole = AgentMode | "lead" | "teammate";
+type RunRole = AgentMode | "ask" | "builder" | "auditor" | "team" | "lead" | "teammate" | "planner" | "pm" | "tester";
 type ActiveRun = {
   mode: RunRole;
   runner: RunnerId;
@@ -84,6 +84,7 @@ type ProjectRecord = {
   dev_server?: DevServerState;
   agent_chat?: string;
   memory?: Record<string, unknown>;
+  plan_pending?: boolean;
 };
 
 type ConsoleEntry = {
@@ -111,7 +112,7 @@ type UsageModelTotal = UsageTotals & {
 type UsageRun = {
   id: string;
   project: string;
-  mode: AgentMode;
+  mode: RunRole;
   runner: RunnerId;
   model: string;
   reasoning: ReasoningLevel;
@@ -129,7 +130,7 @@ type UsageRun = {
 type AgentResult = {
   id: string;
   project: string;
-  mode: AgentMode;
+  mode: RunRole;
   runner: RunnerId;
   model: string;
   reasoning: ReasoningLevel;
@@ -271,10 +272,8 @@ const directoryInputProps: DirectoryInputProps = { directory: "", webkitdirector
 const skippedImportDirs = new Set([".git", "node_modules", ".next", "dist", "build", ".venv", "__pycache__", ".cache", ".turbo"]);
 const defaultProjectsRoot = "D:/Git";
 const agentModes: { id: AgentMode; label: string }[] = [
-  { id: "ask", label: "Ask" },
-  { id: "builder", label: "Build" },
-  { id: "auditor", label: "Audit" },
-  { id: "team", label: "Team" },
+  { id: "chat", label: "Chat" },
+  { id: "build", label: "Build" },
 ];
 const runners: { id: RunnerId; label: string }[] = [
   { id: "auto", label: "Auto" },
@@ -290,18 +289,21 @@ const runnerPolicies: { id: RunnerPolicyId; label: string; description: string }
 const runnerPolicyLabels = Object.fromEntries(runnerPolicies.map((policy) => [policy.id, policy.label])) as Record<RunnerPolicyId, string>;
 const runnerPolicyDescriptions = Object.fromEntries(runnerPolicies.map((policy) => [policy.id, policy.description])) as Record<RunnerPolicyId, string>;
 const modeLabels: Record<RunRole, string> = {
+  chat: "Chat",
+  build: "Build",
   ask: "Ask",
   builder: "Build",
   auditor: "Audit",
   team: "Team",
   lead: "Lead",
   teammate: "Teammate",
+  planner: "Planner",
+  pm: "PM",
+  tester: "Tester",
 };
 const modePromptPlaceholders: Record<AgentMode, string> = {
-  ask: "Ask about this project...",
-  builder: "Tell the builder what to work on...",
-  auditor: "Tell the auditor what to check...",
-  team: "Describe the task for the team to build together...",
+  chat: "Ask about this project...",
+  build: "Describe what you want to build...",
 };
 const runnerLabels: Record<RunnerId, string> = {
   auto: "Auto",
@@ -881,7 +883,7 @@ function SetupForm({
           id={nameId}
           value={name}
           onChange={(e) => onNameChange(e.target.value)}
-          className="h-8 bg-transparent px-3 text-zinc-200 outline-none placeholder:text-zinc-700 selection:bg-cyan-900 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+          className="h-8 bg-transparent px-3 text-text-strong outline-none placeholder:text-text-faint selection:bg-accent focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
           placeholder="my-project"
           pattern="[A-Za-z0-9._-]+"
           spellCheck={false}
@@ -1771,15 +1773,16 @@ function FormattedAgentOutput({ content }: { content: string }) {
 }
 
 type ChatMessage = {
-  role: "user" | "agent";
+  role: "user" | "agent" | "plan" | "circuit-breaker";
   title: string;
   timestamp: string;
   body: string;
-  kind: "ask" | "kickoff" | "answer";
+  attachments: string[]; // filenames extracted from _Attached: ..._ suffix
+  kind: "ask" | "kickoff" | "answer" | "plan" | "circuit-breaker";
 };
 
 type TeamMessage = {
-  role: "task" | "lead" | "teammate" | "note";
+  role: "task" | "lead" | "teammate" | "tester" | "plan" | "note";
   title: string;
   timestamp: string;
   body: string;
@@ -1799,6 +1802,8 @@ function parseAgentChat(raw: string): TeamMessage[] {
     const [, timestamp = ""] = header.split(/\s+-\s+/);
     if (lower.startsWith("lead")) messages.push({ role: "lead", title: header.split(/\s+-\s+/)[0], timestamp, body });
     else if (lower.startsWith("teammate")) messages.push({ role: "teammate", title: header.split(/\s+-\s+/)[0], timestamp, body });
+    else if (lower.startsWith("tester")) messages.push({ role: "tester", title: "Tester", timestamp, body });
+    else if (lower.startsWith("plan")) messages.push({ role: "plan", title: "Plan", timestamp, body });
     else if (lower.startsWith("task")) messages.push({ role: "task", title: "Team task", timestamp, body });
     else if (lower.startsWith("note")) messages.push({ role: "note", title: "Note", timestamp, body });
     else messages.push({ role: "lead", title: header.split(/\s+-\s+/)[0] || "Agent", timestamp, body });
@@ -1822,6 +1827,38 @@ function TeamBubble({ message, lead, teammate }: { message: TeamMessage; lead?: 
       </div>
     );
   }
+  if (message.role === "tester") {
+    const passed = /TESTER:\s*PASSED/i.test(message.body);
+    const failed = /TESTER:\s*FAILED/i.test(message.body);
+    const displayBody = message.body.replace(/\nTESTER:\s*(PASSED|FAILED)\s*$/i, "").trim();
+    return (
+      <div className="dualith-msg dualith-msg--agent">
+        <span className="dualith-msg__role text-[11px]">
+          <span className="opacity-50">⚙</span> Tester
+          {passed && <span className="ml-2 text-ok">✓ passed</span>}
+          {failed && <span className="ml-2 text-danger">✕ failed</span>}
+          {message.timestamp && ` · ${timestampLabel(message.timestamp)}`}
+        </span>
+        {displayBody && (
+          <div className="dualith-msg__bubble border-l-2 border-line-hard text-xs text-muted">
+            <FormattedAgentOutput content={displayBody} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (message.role === "plan") {
+    return (
+      <div className="dualith-msg dualith-msg--agent">
+        <span className="dualith-msg__role text-accent">Plan · {message.timestamp && timestampLabel(message.timestamp)}</span>
+        <div className="dualith-msg__bubble border border-accent/20 bg-accent/5">
+          <FormattedAgentOutput content={message.body} />
+        </div>
+      </div>
+    );
+  }
+
   const isLead = message.role === "lead";
   const runner = isLead ? lead : teammate;
   const approved = /TEAMMATE:\s*APPROVED/i.test(message.body);
@@ -1829,13 +1866,29 @@ function TeamBubble({ message, lead, teammate }: { message: TeamMessage; lead?: 
   // Strip the verdict line from display — it's a machine signal, not prose
   const displayBody = message.body.replace(/\nTEAMMATE:\s*(APPROVED|CHANGES REQUESTED)\s*$/i, "").trim();
 
-  // Lead (builder) rounds are internal — show as a quiet progress tick, not a full bubble
+  // Lead (builder) rounds — show as a full readable bubble (softer than Teammate)
   if (isLead) {
+    return (
+      <div className="dualith-msg dualith-msg--agent">
+        <span className="dualith-msg__role">
+          {runner && <RunnerMascot runner={runner} size={16} />}
+          {runner ? runnerLabels[runner] : "Lead"}
+          {message.timestamp && ` · ${timestampLabel(message.timestamp)}`}
+        </span>
+        <div className="dualith-msg__bubble border-l-2 border-line">
+          <FormattedAgentOutput content={displayBody} />
+        </div>
+      </div>
+    );
+  }
+
+  // Dead code below (kept for type narrowing) — was the old tick render
+  if (false) {
     const firstLine = displayBody.split("\n").find((l) => l.trim()) ?? "Completed a round.";
     return (
       <div className="mx-auto w-full py-0.5" style={{ maxWidth: "var(--dualith-chat-max)" }}>
         <div className="flex items-center gap-1.5 text-[11px] text-muted">
-          {runner && <RunnerMascot runner={runner} size={12} />}
+          {runner && <RunnerMascot runner={runner as RunnerId} size={12} />}
           <span className="opacity-30">↳</span>
           <span>{firstLine.replace(/^[-*]\s*/, "")}</span>
           {message.timestamp && <span className="opacity-50">· {timestampLabel(message.timestamp)}</span>}
@@ -1870,29 +1923,54 @@ function parseChatHistory(raw: string): ChatMessage[] {
   for (const section of sections) {
     const newline = section.indexOf("\n");
     const header = (newline === -1 ? section : section.slice(0, newline)).trim();
-    const body = (newline === -1 ? "" : section.slice(newline + 1)).trim();
+    const rawBody = (newline === -1 ? "" : section.slice(newline + 1)).trim();
     const lower = header.toLowerCase();
     const [, timestamp = ""] = header.split(/\s+-\s+/);
+    // Extract _Attached: file1, file2_ suffix written by the backend
+    const attachMatch = rawBody.match(/_Attached:\s*([^_]+)_\s*$/);
+    const attachments = attachMatch
+      ? attachMatch[1].split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    const body = attachMatch ? rawBody.slice(0, attachMatch.index).trim() : rawBody;
     if (lower.startsWith("user query")) {
-      messages.push({ role: "user", title: "You", timestamp, body, kind: "ask" });
+      messages.push({ role: "user", title: "You", timestamp, body, attachments, kind: "ask" });
     } else if (lower.startsWith("team kickoff")) {
-      messages.push({ role: "user", title: "Team kickoff", timestamp, body, kind: "kickoff" });
+      messages.push({ role: "user", title: "Team kickoff", timestamp, body, attachments, kind: "kickoff" });
     } else if (lower.startsWith("pipeline kickoff")) {
-      messages.push({ role: "user", title: "Pipeline kickoff", timestamp, body, kind: "kickoff" });
+      messages.push({ role: "user", title: "Pipeline kickoff", timestamp, body, attachments, kind: "kickoff" });
     } else if (lower.startsWith("dualith answer")) {
-      messages.push({ role: "agent", title: "Dualith", timestamp, body, kind: "answer" });
+      messages.push({ role: "agent", title: "Dualith", timestamp, body, attachments: [], kind: "answer" });
+    } else if (lower.startsWith("plan")) {
+      messages.push({ role: "plan", title: "Plan", timestamp, body, attachments: [], kind: "plan" });
+    } else if (lower.startsWith("plan feedback")) {
+      messages.push({ role: "user", title: "Plan feedback", timestamp, body, attachments: [], kind: "kickoff" });
+    } else if (lower.startsWith("circuit breaker")) {
+      messages.push({ role: "circuit-breaker", title: "Circuit Breaker", timestamp, body, attachments: [], kind: "circuit-breaker" });
     } else {
-      messages.push({ role: "agent", title: header.split(/\s+-\s+/)[0] || "Dualith", timestamp, body, kind: "answer" });
+      messages.push({ role: "agent", title: header.split(/\s+-\s+/)[0] || "Dualith", timestamp, body, attachments: [], kind: "answer" });
     }
   }
   return messages;
 }
 
-function UserBubble({ message }: { message: ChatMessage }) {
+function UserBubble({ message, projectName }: { message: ChatMessage; projectName: string }) {
   return (
     <div className="dualith-msg dualith-msg--user">
       <span className="dualith-msg__role">{message.title}{message.timestamp && ` · ${timestampLabel(message.timestamp)}`}</span>
-      <div className="dualith-msg__bubble whitespace-pre-wrap text-zinc-200">{message.body}</div>
+      {message.body && <div className="dualith-msg__bubble whitespace-pre-wrap text-zinc-200">{message.body}</div>}
+      {message.attachments.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {message.attachments.map((filename) => (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              key={filename}
+              src={`${apiBase}/api/projects/${encodeURIComponent(projectName)}/attachments/${encodeURIComponent(filename)}`}
+              alt={filename}
+              className="h-20 w-20 rounded-md border border-line-hard object-cover opacity-90"
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1909,7 +1987,7 @@ function AgentBubble({ runner, label, timestamp, children }: { runner?: RunnerId
   );
 }
 
-function ConversationThread({ project, projectEvents, results }: { project: ProjectRecord | null; projectEvents: ConsoleEntry[]; results: AgentResult[] }) {
+function ConversationThread({ project, projectEvents, results, onApprovePlan }: { project: ProjectRecord | null; projectEvents: ConsoleEntry[]; results: AgentResult[]; onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void> }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const messages = useMemo(() => parseChatHistory(project?.chat_history ?? ""), [project?.chat_history]);
   const teamMessages = useMemo(() => parseAgentChat(project?.agent_chat ?? ""), [project?.agent_chat]);
@@ -1944,16 +2022,67 @@ function ConversationThread({ project, projectEvents, results }: { project: Proj
         </div>
       ) : (
         <div className="dualith-thread">
-          {messages.map((message, index) =>
-            message.role === "user" ? (
-              <UserBubble key={`m-${index}`} message={message} />
-            ) : (
+          {messages.map((message, index) => {
+            if (message.role === "user") {
+              return <UserBubble key={`m-${index}`} message={message} projectName={project?.name ?? ""} />;
+            }
+            if (message.role === "plan") {
+              const isPending = project?.plan_pending && index === messages.length - 1;
+              return (
+                <div key={`m-${index}`} className="dualith-msg dualith-msg--agent">
+                  <span className="dualith-msg__role text-accent">
+                    Plan{message.timestamp && ` · ${timestampLabel(message.timestamp)}`}
+                  </span>
+                  <div className="dualith-msg__bubble border border-accent/20 bg-accent/5">
+                    <FormattedAgentOutput content={message.body} />
+                  </div>
+                  {isPending && onApprovePlan && project && (
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void onApprovePlan(project.name, true)}
+                        className="rounded-full bg-accent/90 px-4 py-1.5 text-[12px] font-medium text-bg hover:bg-accent"
+                      >
+                        Build
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const comment = prompt("What should be changed in the plan?");
+                          if (comment !== null && project) void onApprovePlan(project.name, false, comment);
+                        }}
+                        className="rounded-full border border-line px-4 py-1.5 text-[12px] font-medium text-muted hover:border-line-hard hover:text-text"
+                      >
+                        Revise
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            }
+            if (message.role === "circuit-breaker") {
+              return (
+                <div key={`m-${index}`} className="dualith-msg dualith-msg--agent">
+                  <span className="dualith-msg__role text-danger">⚡ Circuit Breaker</span>
+                  <div className="dualith-msg__bubble border-l-2 border-danger/40 text-sm">
+                    <FormattedAgentOutput content={message.body} />
+                  </div>
+                </div>
+              );
+            }
+            return (
               <AgentBubble key={`m-${index}`} runner={latest?.runner} label={message.title} timestamp={message.timestamp}>
                 <FormattedAgentOutput content={message.body} />
               </AgentBubble>
-            )
+            );
+          })}
+          {teamMessages.length > 0 && (
+            <div className="mx-auto w-full flex items-center gap-2 py-2" style={{ maxWidth: "var(--dualith-chat-max)" }}>
+              <div className="h-px flex-1 bg-line" />
+              <span className="text-[10px] text-muted tracking-wide">agents working</span>
+              <div className="h-px flex-1 bg-line" />
+            </div>
           )}
-          {teamMessages.length > 0 && <div className="h-px bg-line" />}
           {teamMessages.map((message, index) => (
             <TeamBubble key={`t-${index}`} message={message} lead={lead} teammate={teammate} />
           ))}
@@ -2071,7 +2200,7 @@ function ChatComposer({
   project, onSendChat, onStopChat, runnerHealth,
 }: {
   project: ProjectRecord | null;
-  onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[] }) => Promise<void>;
+  onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean }) => Promise<void>;
   onStopChat: (projectName: string) => Promise<void>;
   runnerHealth: RunnerHealth;
 }) {
@@ -2082,6 +2211,7 @@ function ChatComposer({
   const [pendingAction, setPendingAction] = useState<"start" | "stop" | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [planMode, setPlanMode] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -2155,7 +2285,7 @@ function ChatComposer({
     setErrorText(null);
     try {
       const attachmentPaths = await uploadAttachments(project.name);
-      await onSendChat(project.name, { runner, model: modelChoice, reasoning, prompt: runPrompt, attachmentPaths });
+      await onSendChat(project.name, { runner, model: modelChoice, reasoning, prompt: runPrompt, attachmentPaths, planMode });
       setRunPrompt("");
       clearAttachments();
     } catch (error) {
@@ -2276,6 +2406,15 @@ function ChatComposer({
                   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
                 </svg>
               </button>
+              <button
+                type="button"
+                disabled={pendingAction !== null || isRunning}
+                onClick={() => setPlanMode((v) => !v)}
+                className={`${chip(planMode)} inline-flex items-center gap-1`}
+                title={planMode ? "Plan mode: agent writes a plan for you to approve before building" : "Autonomous mode: agent decides whether to ask or build"}
+              >
+                {planMode ? "Plan ✓" : "Plan"}
+              </button>
             </div>
             <div className="flex items-center gap-1.5">
               {isRunning ? (
@@ -2350,7 +2489,7 @@ function AgentControls({
   onAgentAction: (projectName: string, agent: AgentMode, action: "start" | "stop", options?: AgentStartOptions) => Promise<void>;
   runnerHealth: RunnerHealth;
 }) {
-  const [mode, setMode] = useState<AgentMode>("ask");
+  const [mode, setMode] = useState<AgentMode>("chat");
   const [runner, setRunner] = useState<RunnerId>("codex");
   const [modelChoice, setModelChoice] = useState(defaultModelByRunner.codex);
   const [reasoning, setReasoning] = useState<ReasoningLevel>(defaultReasoningByRunner.codex);
@@ -2403,7 +2542,7 @@ function AgentControls({
     }`;
   const controlClass = "h-8 border-l border-line px-3 text-accent outline-none transition-colors duration-150 hover:bg-zinc-900 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-700";
   const formClass = "h-8 min-w-0 border-l border-line bg-bg px-3 text-zinc-300 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60";
-  const startLabel = mode === "ask" ? "Ask" : "Start";
+  const startLabel = mode === "chat" ? "Ask" : "Start";
 
   return (
     <section className="shrink-0 border-b border-line text-xs">
@@ -2543,7 +2682,7 @@ function HumanInputPane({ project, onSubmit }: { project: ProjectRecord; onSubmi
           type="button"
           disabled={pending || !answer.trim()}
           onClick={() => void submit()}
-          className="h-8 shrink-0 border border-warn px-4 text-warn outline-none transition-colors hover:bg-amber-950/40 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-warn disabled:text-zinc-700"
+          className="h-8 shrink-0 border border-warn px-4 text-warn outline-none transition-colors hover:bg-amber-950/40 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-warn disabled:text-text-faint"
         >
           {pending ? "..." : "Answer & Resume"}
         </button>
@@ -2642,7 +2781,7 @@ function ProjectPreviewPanel({
               type="button"
               disabled={!project || pending !== null}
               onClick={() => void act("stop")}
-              className="border border-amber-800 px-2 py-1 text-[10px] text-warn outline-none hover:bg-amber-950/30 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-warn disabled:text-zinc-700"
+              className="border border-amber-800 px-2 py-1 text-[10px] text-warn outline-none hover:bg-amber-950/30 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-warn disabled:text-text-faint"
             >
               {pending === "stop" ? "Stopping..." : "Stop preview"}
             </button>
@@ -2651,7 +2790,7 @@ function ProjectPreviewPanel({
               type="button"
               disabled={!project || pending !== null}
               onClick={() => void act(status === "error" ? "restart" : "start")}
-              className="border border-cyan-800 px-2 py-1 text-[10px] text-accent outline-none hover:bg-cyan-950/30 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-700"
+              className="border border-cyan-800 px-2 py-1 text-[10px] text-accent outline-none hover:bg-cyan-950/30 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-text-faint"
             >
               {pending ? "Starting..." : status === "error" ? "Restart preview" : "Start preview"}
             </button>
@@ -2720,7 +2859,7 @@ function PipelinePane({ project, onStart, onStop }: {
           type="button"
           disabled={!project || pending}
           onClick={() => void act(running ? "stop" : "start")}
-          className={`h-9 w-full rounded-md border outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-700 ${running ? "border-amber-800 text-warn hover:bg-amber-950/30" : "border-cyan-800 text-accent hover:bg-cyan-950/30"}`}
+          className={`h-9 w-full rounded-md border outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-text-faint ${running ? "border-amber-800 text-warn hover:bg-amber-950/30" : "border-cyan-800 text-accent hover:bg-cyan-950/30"}`}
         >
           {pending ? "..." : running ? "Stop pipeline" : "Run pipeline"}
         </button>
@@ -2773,7 +2912,7 @@ function TeamPane({ project, onStart, onStop }: {
           type="button"
           disabled={!project || pending}
           onClick={() => void act(running ? "stop" : "start")}
-          className={`h-9 w-full rounded-md border outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-700 ${running ? "border-amber-800 text-warn hover:bg-amber-950/30" : "border-cyan-800 text-accent hover:bg-cyan-950/30"}`}
+          className={`h-9 w-full rounded-md border outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-text-faint ${running ? "border-amber-800 text-warn hover:bg-amber-950/30" : "border-cyan-800 text-accent hover:bg-cyan-950/30"}`}
         >
           {pending ? "..." : running ? "Stop team" : "Run team (auto lead)"}
         </button>
@@ -2839,15 +2978,16 @@ function DetailsDrawer({ project, appStatus, onClose, onPipelineStart, onPipelin
 }
 
 function WorkspaceColumn({
-  project, projectEvents, results, appStatus, mobileView, onSendChat, onStopChat, onAgentAction, onPipelineStart, onPipelineStop, onTeamStart, onTeamStop, onDevServerAction, onHumanAnswer, onClearChat, onClearAgentChat, runnerHealth,
+  project, projectEvents, results, appStatus, mobileView, onSendChat, onStopChat, onAgentAction, onPipelineStart, onPipelineStop, onTeamStart, onTeamStop, onDevServerAction, onHumanAnswer, onClearChat, onClearAgentChat, onApprovePlan, runnerHealth,
 }: {
   project: ProjectRecord | null;
   projectEvents: ConsoleEntry[];
   results: AgentResult[];
   appStatus: AppStatus;
   mobileView: MobileView;
-  onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[] }) => Promise<void>;
+  onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean }) => Promise<void>;
   onStopChat: (projectName: string) => Promise<void>;
+  onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
   onAgentAction: (projectName: string, agent: AgentMode, action: "start" | "stop", options?: AgentStartOptions) => Promise<void>;
   onPipelineStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
   onPipelineStop: (projectName: string) => Promise<void>;
@@ -2880,7 +3020,12 @@ function WorkspaceColumn({
           {(hasHistory || hasAgentChat) && project && (
             <button
               type="button"
-              onClick={() => { if (hasHistory) void onClearChat(project.name); if (hasAgentChat) void onClearAgentChat(project.name); }}
+              onClick={() => {
+                void (async () => {
+                  if (hasHistory) await onClearChat(project.name);
+                  if (hasAgentChat) await onClearAgentChat(project.name);
+                })();
+              }}
               className="border border-line-hard px-2 py-1 text-[10px] text-zinc-500 outline-none transition-colors hover:text-warn focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
             >
               Clear chat
@@ -2900,7 +3045,7 @@ function WorkspaceColumn({
         <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive={mobileView === "preview"} />
       </div>
       <div className={`dualith-mobile-pane dualith-mobile-pane--chat ${mobileView === "chat" ? "is-mobile-active" : ""}`}>
-        <ConversationThread project={project} projectEvents={projectEvents} results={results} />
+        <ConversationThread project={project} projectEvents={projectEvents} results={results} onApprovePlan={onApprovePlan} />
         {blocked && project && <HumanInputPane project={project} onSubmit={onHumanAnswer} />}
       </div>
       <div className={`dualith-mobile-composer-pane ${mobileView === "chat" ? "is-mobile-active" : ""}`}>
@@ -3539,7 +3684,7 @@ function SettingsMenu({ theme, setTheme, density, setDensity }: {
                 key={option.id}
                 type="button"
                 onClick={() => setTheme(option.id)}
-                className={`flex items-center gap-2 rounded-md border px-2 py-1.5 text-[11px] outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${theme === option.id ? "border-cyan-700 bg-cyan-950/40 text-zinc-100" : "border-line-hard text-zinc-400 hover:text-zinc-200"}`}
+                className={`flex items-center gap-2 rounded-md border px-2 py-1.5 text-[11px] outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${theme === option.id ? "border-cyan-700 bg-cyan-950/40 text-text-strong" : "border-line-hard text-text-muted hover:text-text-strong"}`}
               >
                 <span className="h-3 w-3 rounded-full" style={{ background: option.swatch }} />
                 {option.label}
@@ -3553,7 +3698,7 @@ function SettingsMenu({ theme, setTheme, density, setDensity }: {
                 key={option.id}
                 type="button"
                 onClick={() => setDensity(option.id)}
-                className={`rounded-md border px-2 py-1.5 text-[11px] outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${density === option.id ? "border-cyan-700 bg-cyan-950/40 text-zinc-100" : "border-line-hard text-zinc-400 hover:text-zinc-200"}`}
+                className={`rounded-md border px-2 py-1.5 text-[11px] outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${density === option.id ? "border-cyan-700 bg-cyan-950/40 text-text-strong" : "border-line-hard text-text-muted hover:text-text-strong"}`}
               >
                 {option.label}
               </button>
@@ -3636,7 +3781,10 @@ function DualithApp() {
 
     const connect = () => {
       const socket = new WebSocket(`${wsBase}/ws`);
-      socket.addEventListener("open", () => setSocketStatus("Live"));
+      socket.addEventListener("open", () => {
+        setSocketStatus("Live");
+        refreshProjects(); // Force snapshot fetch on (re)connect — clears stale runs after backend restart
+      });
       socket.addEventListener("close", () => {
         setSocketStatus("Reconnecting...");
         if (!closed) reconnectTimer = window.setTimeout(connect, 1500);
@@ -3653,7 +3801,17 @@ function DualithApp() {
       closed = true;
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
     };
-  }, [applySnapshot]);
+  }, [applySnapshot, refreshProjects]);
+
+  // Periodic heartbeat poll — re-syncs state every 30 s independent of WebSocket.
+  // Guards against silent socket drops, missed broadcasts, or any scenario where
+  // the backend resets in-memory state without the frontend receiving an event.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      refreshProjects().catch(() => { /* ignore — connection error already shown in topbar */ });
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, [refreshProjects]);
 
   const deleteProject = useCallback(async (name: string) => {
     const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(name)}`, { method: "DELETE" });
@@ -3698,8 +3856,8 @@ function DualithApp() {
     applySnapshot(await response.json(), projectName);
   }, [applySnapshot]);
 
-  const sendChat = useCallback(async (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[] }) => {
-    const body = { runner: options.runner, model: options.model, reasoning: options.reasoning, prompt: options.prompt, attachment_paths: options.attachmentPaths ?? [] };
+  const sendChat = useCallback(async (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean }) => {
+    const body = { runner: options.runner, model: options.model, reasoning: options.reasoning, prompt: options.prompt, attachment_paths: options.attachmentPaths ?? [], plan_mode: options.planMode ?? false };
     const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3709,11 +3867,31 @@ function DualithApp() {
     applySnapshot(await response.json(), projectName);
   }, [applySnapshot]);
 
-  const stopChat = useCallback(async (projectName: string) => {
-    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat/stop`, { method: "POST" });
+  const approvePlan = useCallback(async (projectName: string, approved: boolean, comment?: string) => {
+    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat/plan-approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved, comment: comment ?? "" }),
+    });
     if (!response.ok) throw new Error(await readErrorMessage(response));
     applySnapshot(await response.json(), projectName);
   }, [applySnapshot]);
+
+  const stopChat = useCallback(async (projectName: string) => {
+    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat/stop`, { method: "POST" });
+    if (response.ok) {
+      // Apply the stop response snapshot (backend force-evicts stale state before responding).
+      applySnapshot(await response.json(), projectName);
+    } else {
+      const msg = await readErrorMessage(response);
+      // 404 = nothing was running — backend already has clean state, just refresh.
+      if (response.status === 404) {
+        await refreshProjects(projectName);
+      } else {
+        throw new Error(msg);
+      }
+    }
+  }, [applySnapshot, refreshProjects]);
 
   const clearChatHistory = useCallback(async (projectName: string) => {
     const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat/clear`, { method: "POST" });
@@ -3898,6 +4076,7 @@ function DualithApp() {
           onHumanAnswer={submitHumanAnswer}
           onClearChat={clearChatHistory}
           onClearAgentChat={clearAgentChat}
+          onApprovePlan={approvePlan}
           runnerHealth={runnerHealth}
         />
         <div className={`dualith-rail-slot dualith-system-slot ${mobilePanel === "system" ? "is-open" : ""}`}>

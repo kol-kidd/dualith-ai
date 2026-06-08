@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -167,6 +167,8 @@ active_pipelines: dict[str, dict[str, Any]] = {}
 pipeline_resume_events: dict[str, asyncio.Event] = {}
 active_teams: dict[str, dict[str, Any]] = {}
 team_resume_events: dict[str, asyncio.Event] = {}
+plan_approval_events: dict[str, asyncio.Event] = {}
+plan_approval_results: dict[str, dict[str, Any]] = {}
 active_dev_servers: dict[str, dict[str, Any]] = {}
 runner_health: dict[str, dict[str, Any]] = {
     "codex": {"ready": False, "version": "", "error": ""},
@@ -229,6 +231,31 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "sandbox": "read-only",
         "default_runner": "claude",
     },
+    # Multi-agent spec pipeline roles (Phase 1)
+    "planner": {
+        "label": "Planner",
+        "role": "planning",
+        "capabilities": ["spec-reading", "plan-writing"],
+        "prompt": "planner",
+        "sandbox": "read-only",
+        "default_runner": "claude",
+    },
+    "pm": {
+        "label": "PM",
+        "role": "clarification",
+        "capabilities": ["spec-reading", "clarification"],
+        "prompt": "pm",
+        "sandbox": "read-only",
+        "default_runner": "claude",
+    },
+    "tester": {
+        "label": "Tester",
+        "role": "testing",
+        "capabilities": ["build-runner", "test-runner", "lint"],
+        "prompt": "tester",
+        "sandbox": "workspace-write",
+        "default_runner": "claude",
+    },
 }
 
 ORCHESTRATION_WORKFLOWS: dict[str, dict[str, Any]] = {
@@ -274,6 +301,20 @@ ORCHESTRATION_WORKFLOWS: dict[str, dict[str, Any]] = {
         "kind": "team",
         "agents": ["lead", "teammate"],
         "description": "Lead implements; teammate reviews each round until sign-off.",
+        "max_rounds": TEAM_MAX_ROUNDS,
+    },
+    "plan-first": {
+        "label": "Plan First",
+        "kind": "plan-team",
+        "agents": ["planner", "lead", "teammate"],
+        "description": "Planner writes a plan for user approval, then team builds.",
+        "max_rounds": TEAM_MAX_ROUNDS,
+    },
+    "pm-clarify": {
+        "label": "PM Clarify",
+        "kind": "pm-team",
+        "agents": ["pm", "lead", "teammate"],
+        "description": "PM clarifies ambiguous request, then team builds.",
         "max_rounds": TEAM_MAX_ROUNDS,
     },
 }
@@ -451,7 +492,75 @@ description: Build against SPEC.md, leave audit notes for Claude, and let Dualit
 
 Build against SPEC.md, leave audit notes for Claude, and let Dualith create Git checkpoints.
 """
-CLAUDE_TEXT = "# Claude Auditor\n\nAudit generated changes, write findings to CLAUDE_TODO.md, and record AUDIT PASSED when clean.\n"
+PROJECT_PRODUCT_TEXT = """---
+name: Dualith Managed Project
+register: product
+---
+
+# Product Context
+
+This project is managed by Dualith. Treat SPEC.md, AGENT_CHAT.md, and the latest user prompt as the source of truth for what the product should do and who it serves.
+
+Use product-register defaults unless SPEC.md clearly asks for a landing page, portfolio, brand campaign, or other brand-register surface. Design should serve the user's task first.
+
+## UI Design Standard
+
+Use the Impeccable standard for frontend work:
+
+- Shape the workflow and information hierarchy before broad styling.
+- Preserve existing tokens, components, and conventions before inventing new ones.
+- Avoid generic AI UI tells: purple-blue gradients, Inter-only defaults, nested card grids, side-stripe cards, gradient text, decorative glassmorphism, and gray text on colored backgrounds.
+- Keep contrast, focus states, touch targets, loading states, error states, empty states, and responsive behavior production-ready.
+- Do not copy Dualith's own visual system unless SPEC.md asks for a local command-center UI.
+"""
+
+PROJECT_DESIGN_TEXT = """---
+name: Dualith Managed Project Design Standard
+description: Portable UI guidance for projects created or imported through Dualith.
+---
+
+# Design System
+
+## Starting Point
+
+Use this file as the project's design context until a more specific system exists. If the project already has tokens, a theme, a component library, or brand assets, those take priority. Update this file when the product direction becomes more specific.
+
+## Product UI Defaults
+
+- Prefer clear hierarchy, readable density, and predictable controls.
+- Build with semantic HTML and accessible keyboard/focus behavior.
+- Use named tokens for persistent colors, spacing, radii, elevation, and motion.
+- Use cards only for repeated items, modals, framed tools, or genuinely grouped records. Avoid nested cards.
+- Design mobile and desktop together, with stable dimensions for fixed-format controls.
+- Keep copy direct. Labels should describe the action or state without hype.
+
+## Visual Direction
+
+Choose color and typography from the product context, not from generic category reflexes. If no brand direction exists yet, pick a restrained product palette with one clear accent, readable neutrals, and enough state colors for success, warning, and danger.
+
+New persistent colors should be named and reusable. Prefer OKLCH when practical.
+
+## Motion
+
+Use short, purposeful transitions for state changes. Avoid bounce and elastic easing. Respect `prefers-reduced-motion`.
+
+## Verification
+
+Before calling UI work done, check contrast, focus states, disabled states, responsive behavior, text overflow, loading/empty/error states, and obvious Impeccable anti-patterns.
+"""
+
+CLAUDE_TEXT = """# Dualith Agent Instructions
+
+Audit generated changes, write findings to FEEDBACK.md, and record AUDIT PASSED when clean.
+
+## UI Design Standard
+
+Before frontend or interface work, read PRODUCT.md and DESIGN.md. Treat them as the local Impeccable design context.
+
+If the official Impeccable skill is present, use it for shape, critique, audit, polish, harden, adapt, or clarify work. If it is not present, apply the same standard manually: product context first, existing tokens/components first, accessible states, responsive hardening, and explicit rejection of generic AI UI anti-patterns.
+
+Do not copy Dualith's own colors or layout unless SPEC.md asks for a local command-center UI.
+"""
 HITL_INSTRUCTION = (
     "Human-in-the-loop: If you hit deep specification ambiguity, a critical package "
     "dependency conflict, or a major architectural fork that you cannot safely resolve "
@@ -464,7 +573,11 @@ BUILDER_PROMPT = f"""Read SPEC.md and implement the app.
 
 You are the builder. Follow CLAUDE.md, keep your active blueprint in PLAN.md, and read FEEDBACK.md (or legacy CLAUDE_TODO.md) for auditor notes. Run the checks from SPEC.md and make small working checkpoints.
 
-Do not create Git commits, branches, or tags yourself. Dualith creates the Git checkpoint after your run succeeds so repository metadata is written outside the agent sandbox.
+For frontend or UI work, read PRODUCT.md and DESIGN.md before editing. Use the Impeccable standard in those files: shape the UX first, preserve existing tokens/components, check accessibility and responsive states, and avoid generic AI/SaaS visuals.
+
+Do not create Git commits automatically as part of your normal build work — Dualith creates a checkpoint commit after your run succeeds. However, if the user explicitly asks you to commit or push changes (e.g. "commit this", "push to main"), you may do so using git. Before pushing to a remote, confirm the target branch with the user first.
+
+If the task is large or naturally parallel (e.g. updating multiple independent files, running tests while writing code), you may spawn subagents to work in parallel. Use your judgment — don't spawn subagents for simple sequential tasks.
 
 Read FEEDBACK.md periodically. If the auditor adds notes, fix them, rerun checks, and update PLAN.md with what changed.
 
@@ -473,6 +586,8 @@ Read FEEDBACK.md periodically. If the auditor adds notes, fix them, rerun checks
 AUDITOR_PROMPT = f"""Read SPEC.md, CLAUDE.md, PLAN.md, FEEDBACK.md, and the latest git diff.
 
 You are the auditor, not the builder. Audit the builder's implementation against SPEC.md. Do not edit source files. Write findings as clear bullets in FEEDBACK.md. If the implementation is clean, write AUDIT PASSED in FEEDBACK.md.
+
+For frontend or UI review, audit against PRODUCT.md, DESIGN.md, and the Impeccable anti-pattern standard. Call out contrast, focus, responsive behavior, text overflow, missing states, token drift, nested cards, decorative glass, gradient text, and generic AI/SaaS visuals when present.
 
 {HITL_INSTRUCTION}
 """
@@ -492,11 +607,15 @@ LEAD_PROMPT = f"""You are the LEAD on a two-agent engineering team. Your teammat
 
 Read SPEC.md, PLAN.md, FEEDBACK.md, and AGENT_CHAT.md (the running conversation with your teammate). Plan and implement against SPEC.md when it is substantive. If SPEC.md is blank or skeletal, treat the latest `### Task` section in AGENT_CHAT.md or the user run prompt as the active scope, write/update PLAN.md, and implement only that scope.
 
-Do not create Git commits, branches, or tags yourself. Dualith creates the Git checkpoint after your run succeeds so repository metadata is written outside the agent sandbox.
+For frontend or UI work, read PRODUCT.md and DESIGN.md before editing. Use the Impeccable standard in those files: shape the UX first, preserve existing tokens/components, check accessibility and responsive states, and avoid generic AI/SaaS visuals.
+
+Do not create Git commits automatically as part of your normal build work — Dualith creates a checkpoint commit after your run succeeds. However, if the user explicitly asks you to commit or push changes (e.g. "commit this", "push to main"), you may do so using git. Before pushing to a remote, confirm the target branch with the user first.
+
+If the task is large or naturally parallel (e.g. updating multiple independent files, running tests while writing code), you may spawn subagents to work in parallel. Use your judgment — don't spawn subagents for simple sequential tasks.
 
 First, address any review notes your teammate left in the latest `### Teammate` section of AGENT_CHAT.md. Then continue the implementation.
 
-When you finish this round, append a section to AGENT_CHAT.md that starts with a markdown header `### Lead`. Write your update in plain sentences like you're giving a quick progress note to a colleague — what you did, what you noticed, and what you want them to look at. No bullet points, no sub-headers.
+When you finish this round, append a section to AGENT_CHAT.md that starts with a markdown header `### Lead`. Write your update as if you're giving the user a quick, friendly status — what you did, what you noticed, and what you're handing off to your teammate to look at. Keep it short (2–4 sentences), warm, and jargon-free. No bullet points, no sub-headers. Write to be read by a person watching over your shoulder, not a machine.
 
 {HITL_INSTRUCTION}
 """
@@ -504,11 +623,57 @@ TEAMMATE_PROMPT = f"""You are the TEAMMATE and reviewer on a two-agent engineeri
 
 Do NOT edit source files and do NOT create commits — you are read-only this round. Read SPEC.md, AGENT_CHAT.md (the running conversation), and inspect the latest git diff and project files to review the lead's most recent work. If SPEC.md is blank or skeletal, review against the latest `### Task` section in AGENT_CHAT.md.
 
-Append a section to AGENT_CHAT.md that starts with a markdown header `### Teammate`. Write your review as a short paragraph — what looks good, what needs fixing, and what the lead should focus on next. Be direct and conversational. Only mention specific files or line numbers when it genuinely helps, not as a habit. No bullet points, no sub-headers.
+Append a section to AGENT_CHAT.md that starts with a markdown header `### Teammate`. Write your review like you're giving the user a candid take — what's solid, what needs another look, and what the lead should tackle next. Keep it friendly and direct (2–4 sentences). No bullet points, no sub-headers. Write to be read by a person who wants to understand what just happened, not a formal code review.
+
+For frontend or UI review, audit against PRODUCT.md, DESIGN.md, and the Impeccable anti-pattern standard. Call out contrast, focus, responsive behavior, text overflow, missing states, token drift, nested cards, decorative glass, gradient text, and generic AI/SaaS visuals when present.
 
 End your section with exactly one of these verdicts on its own line:
 - `TEAMMATE: APPROVED` if the implementation meets SPEC.md and you have no blocking concerns.
 - `TEAMMATE: CHANGES REQUESTED` if the lead should keep working.
+
+{HITL_INSTRUCTION}
+"""
+
+PLANNER_PROMPT = f"""You are the Planner. The user wants to build something — your job is to write a clear, concise plan before any code is written.
+
+Read SPEC.md, PLAN.md, and the latest user message from CHAT_HISTORY.md. Write a step-by-step implementation plan to PLAN.md and also append it to AGENT_CHAT.md under a `### Plan` header.
+
+The plan should cover:
+- What will be built (1–2 sentences)
+- The key implementation steps (numbered, short phrases — not pseudocode)
+- Any open questions or decisions the user should know about
+
+Keep it brief and human-readable. No code blocks, no file trees, no technical jargon. Write it so the user can glance at it in 20 seconds and say yes or no.
+
+After writing, stop immediately. Do not implement anything.
+
+{HITL_INSTRUCTION}
+"""
+
+PM_PROMPT = f"""You are the Product Manager on this engineering team. Your job is to make sure the team builds the right thing.
+
+Read SPEC.md and CHAT_HISTORY.md to understand what's been built so far. Then read the user's latest message.
+
+If the request is clear enough to implement without guessing, write a one-sentence summary of what should be built to SPEC.md — just the summary line, do not ask a question. Then stop immediately.
+
+If the request is genuinely ambiguous and you would need to guess to start, ask the user one specific question using the HITL mechanism: overwrite HUMAN_INPUT.md with `🤖 QUESTION: <your question>` and exit.
+
+Keep the question short and direct. One question only. No preamble, no options list.
+
+{HITL_INSTRUCTION}
+"""
+
+TESTER_PROMPT = f"""You are the Tester. Your job is to verify the implementation compiles and passes checks — not to write new code.
+
+Read SPEC.md and PLAN.md to understand what was built. Run the project's build and test commands. Look for a package.json, Makefile, or pyproject.toml to find the right commands. Common ones: `npm run build`, `tsc --noEmit`, `npm test`, `eslint .`, `pytest`.
+
+If the project has no test suite yet, run whatever build/lint commands exist and report what you find.
+
+Write your findings to FEEDBACK.md:
+- If all checks pass, write "TESTER: PASSED" as the last line.
+- If checks fail, write the relevant error output (trimmed, most important errors only) followed by "TESTER: FAILED" as the last line. Do not fix the errors yourself.
+
+Keep the report concise (under 20 lines). Just results, no prose explanation.
 
 {HITL_INSTRUCTION}
 """
@@ -1845,6 +2010,10 @@ async def terminate_process_tree(process: subprocess.Popen[Any], timeout: float 
     if process.poll() is not None:
         return
     if os.name == "nt":
+        # taskkill /T kills the entire process tree; /F forces immediate termination.
+        # We fire it and then wait for the process to actually exit — without the wait
+        # the caller returns while the process is still alive, causing collect_snapshot()
+        # to still see it in active_agent_runs and the UI stays stuck on "Stopping…".
         await asyncio.to_thread(
             subprocess.run,
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],
@@ -1852,6 +2021,10 @@ async def terminate_process_tree(process: subprocess.Popen[Any], timeout: float 
             text=True,
             timeout=timeout,
         )
+        try:
+            await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass  # taskkill already sent; process will exit shortly on its own
         return
     process.terminate()
     try:
@@ -2337,6 +2510,7 @@ async def project_record(project_path: Path, name: str | None = None) -> dict[st
         "dev_server": dev_server_snapshot(project_name, project_path),
         "agent_chat": read_agent_chat(project_path),
         "memory": load_memory(project_path),
+        "plan_pending": project_name in plan_approval_events and not plan_approval_events[project_name].is_set(),
     }
 
 
@@ -2488,9 +2662,18 @@ async def write_project_files(project_path: Path, spec: str) -> None:
     await ensure_dualith_files(project_path, spec, overwrite_spec=True)
 
 
+def copy_impeccable_skill(project_path: Path) -> None:
+    for harness_dir in (".agents", ".claude"):
+        source = ROOT_DIR / harness_dir / "skills" / "impeccable"
+        dest = project_path / harness_dir / "skills" / "impeccable"
+        if source.exists() and not dest.exists():
+            shutil.copytree(source, dest)
+
+
 async def ensure_dualith_files(project_path: Path, spec: str, *, overwrite_spec: bool) -> None:
     skill_dir = project_path / ".agents" / "skills" / "autonomous-builder"
     skill_dir.mkdir(parents=True, exist_ok=True)
+    copy_impeccable_skill(project_path)
 
     skill_path = skill_dir / "SKILL.md"
     if not skill_path.exists():
@@ -2501,6 +2684,14 @@ async def ensure_dualith_files(project_path: Path, spec: str, *, overwrite_spec:
     claude_path = project_path / "CLAUDE.md"
     if not claude_path.exists():
         claude_path.write_text(CLAUDE_TEXT, encoding="utf-8")
+
+    product_path = project_path / "PRODUCT.md"
+    if not product_path.exists():
+        product_path.write_text(PROJECT_PRODUCT_TEXT, encoding="utf-8")
+
+    design_path = project_path / "DESIGN.md"
+    if not design_path.exists():
+        design_path.write_text(PROJECT_DESIGN_TEXT, encoding="utf-8")
 
     spec_path = project_path / "SPEC.md"
     if overwrite_spec or not spec_path.exists():
@@ -2521,6 +2712,14 @@ async def ensure_dualith_files(project_path: Path, spec: str, *, overwrite_spec:
 
     if not agent_chat_path(project_path).exists():
         agent_chat_path(project_path).write_text("", encoding="utf-8")
+
+
+async def ensure_registered_project_files() -> None:
+    for entry in read_registry():
+        try:
+            await ensure_dualith_files(Path(entry["path"]).resolve(), "", overwrite_spec=False)
+        except Exception as exc:
+            log.warning("startup: could not refresh Dualith project files for %s: %s", entry.get("name", entry.get("path")), exc)
 
 
 def import_filename_parts(filename: str) -> tuple[str, ...] | None:
@@ -2673,6 +2872,11 @@ def add_runner_args(
         prefix.extend(["--output-last-message", str(result_path)])
     if sandbox == "read-only":
         prefix = with_option_value(prefix, "--sandbox", sandbox)
+    elif sandbox == "workspace-write" and "--sandbox" not in prefix:
+        # On Windows the "unelevated" sandbox mode blocks .git writes, preventing
+        # git commits even when the user explicitly asks for them. Use "full-auto"
+        # so builder/lead agents have unrestricted filesystem access including .git.
+        prefix.extend(["--sandbox", "full-auto"])
     elif "--sandbox" not in prefix:
         prefix.extend(["--sandbox", "workspace-write"])
     if not ("--disable" in prefix and "memories" in prefix):
@@ -2774,6 +2978,9 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
         "auditor": AUDITOR_PROMPT,
         "lead": LEAD_PROMPT,
         "teammate": TEAMMATE_PROMPT,
+        "planner": PLANNER_PROMPT,
+        "pm": PM_PROMPT,
+        "tester": TESTER_PROMPT,
     }
     agent_config = AGENT_REGISTRY.get(agent)
     prompt_key = str(agent_config.get("prompt", "")) if agent_config else ""
@@ -3347,14 +3554,16 @@ async def run_pipeline_step(project_name: str, agent: str, runner_pref: str, mod
     await run_agent_process(project_name, agent, runner, resolved_model, clean_reasoning(reasoning), "", project_path)
 
 
-async def run_pipeline(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_iterations: int) -> None:
+async def run_pipeline(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_iterations: int, attachment_paths: list[str] | None = None) -> None:
     pipeline_resume_events[project_name] = asyncio.Event()
     active_pipelines[project_name] = {"status": "running", "step": "starting", "iteration": 0}
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
 
     # Seed the builder's first run with the user's kickoff prompt via PLAN.md note.
     if run_prompt.strip():
-        append_chat_history(project_path, f"### Pipeline Kickoff - {utc_now()}\n\n{run_prompt.strip()}\n\n")
+        attach_names = [Path(p).name for p in (attachment_paths or []) if p and p.strip()]
+        attach_line = f"\n\n_Attached: {', '.join(attach_names)}_" if attach_names else ""
+        append_chat_history(project_path, f"### Pipeline Kickoff - {utc_now()}\n\n{run_prompt.strip()}{attach_line}\n\n")
 
     try:
         for iteration in range(1, max_iterations + 1):
@@ -3439,7 +3648,94 @@ async def run_team_step(project_name: str, role: str, runner: str, assigned_runn
     await run_agent_process(project_name, role, runner, resolved_model, clean_reasoning(reasoning), "", project_path, partner)
 
 
-async def run_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int) -> None:
+async def run_plan_then_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None) -> None:
+    """Plan-first workflow: planner writes PLAN.md, user approves, then team builds."""
+    await ensure_dualith_files(project_path, "", overwrite_spec=False)
+
+    # 1. Run planner (read-only, always Claude for quality)
+    planner_model = clean_model(model) or DEFAULT_RUNNER_MODELS["claude"]
+    await run_agent_process(project_name, "planner", "claude", planner_model, clean_reasoning(reasoning), run_prompt, project_path, attachment_paths=attachment_paths)
+
+    # 2. Read plan from PLAN.md and broadcast as a plan message in chat history
+    plan_path = project_path / "PLAN.md"
+    plan_content = plan_path.read_text(encoding="utf-8", errors="ignore").strip() if plan_path.exists() else "(Planner did not write a plan.)"
+    append_chat_history(project_path, f"### Plan - {utc_now()}\n\n{plan_content}\n\n")
+    await broadcast("chat_event", record_event("PLAN_READY", f"{relative_path(project_path)} :: plan written, awaiting approval"))
+
+    # 3. Wait for user approval (up to 10 minutes)
+    ev = asyncio.Event()
+    plan_approval_events[project_name] = ev
+    try:
+        await asyncio.wait_for(ev.wait(), timeout=600)
+    except asyncio.TimeoutError:
+        plan_approval_events.pop(project_name, None)
+        plan_approval_results.pop(project_name, None)
+        log.info("plan approval timed out for %s", project_name)
+        return
+
+    result = plan_approval_results.pop(project_name, {})
+    plan_approval_events.pop(project_name, None)
+
+    if not result.get("approved", False):
+        # User rejected — append feedback and re-run planner once
+        comment = result.get("comment", "").strip()
+        if comment:
+            append_chat_history(project_path, f"### Plan Feedback - {utc_now()}\n\n{comment}\n\n")
+        # One re-plan cycle
+        await run_agent_process(project_name, "planner", "claude", planner_model, clean_reasoning(reasoning), comment, project_path)
+        plan_path2 = project_path / "PLAN.md"
+        plan_content2 = plan_path2.read_text(encoding="utf-8", errors="ignore").strip() if plan_path2.exists() else "(Planner did not revise the plan.)"
+        append_chat_history(project_path, f"### Plan - {utc_now()}\n\n{plan_content2}\n\n")
+        # Wait for second approval
+        ev2 = asyncio.Event()
+        plan_approval_events[project_name] = ev2
+        await broadcast("chat_event", record_event("PLAN_READY", f"{relative_path(project_path)} :: plan revised, awaiting approval"))
+        try:
+            await asyncio.wait_for(ev2.wait(), timeout=600)
+        except asyncio.TimeoutError:
+            plan_approval_events.pop(project_name, None)
+            plan_approval_results.pop(project_name, None)
+            return
+        result2 = plan_approval_results.pop(project_name, {})
+        plan_approval_events.pop(project_name, None)
+        if not result2.get("approved", False):
+            log.info("plan rejected twice for %s — aborting build", project_name)
+            return
+
+    # 4. Plan approved — run the team
+    await run_team(project_name, project_path, runner_pref, model, reasoning, run_prompt, max_rounds, attachment_paths=attachment_paths)
+
+
+async def run_pm_then_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None) -> None:
+    """PM-clarify workflow: PM checks if request is clear, then team builds."""
+    await ensure_dualith_files(project_path, "", overwrite_spec=False)
+
+    # 1. Run PM (read-only, always Claude)
+    pm_model = clean_model(model) or DEFAULT_RUNNER_MODELS["claude"]
+    await run_agent_process(project_name, "pm", "claude", pm_model, clean_reasoning(reasoning), run_prompt, project_path, attachment_paths=attachment_paths)
+
+    # 2. Check if PM triggered HITL (asked a question)
+    hi = parse_human_input(project_path)
+    if hi["blocked"]:
+        # HITL gate: wait for the user to answer via the normal human-answer endpoint
+        # The team will start after the answer is submitted and PM unblocks
+        # For now: just wait for the HITL event to clear, then start team
+        # The existing HITL infrastructure handles this — team won't start until user answers
+        # We poll here (max 10 min)
+        for _ in range(600):
+            await asyncio.sleep(1)
+            hi = parse_human_input(project_path)
+            if not hi["blocked"]:
+                break
+        else:
+            log.info("PM HITL timed out for %s — aborting", project_name)
+            return
+
+    # 3. PM is done (wrote spec or answered question) — start team
+    await run_team(project_name, project_path, runner_pref, model, reasoning, run_prompt, max_rounds, attachment_paths=attachment_paths)
+
+
+async def run_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None) -> None:
     lead, teammate, reason = team_runners(runner_pref)
     team_resume_events[project_name] = asyncio.Event()
     active_teams[project_name] = {
@@ -3457,7 +3753,9 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
     record_event("TEAM_ROUTED", f"{relative_path(project_path)} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason}")
 
     if run_prompt.strip():
-        append_chat_history(project_path, f"### Team Kickoff - {utc_now()}\n\n{run_prompt.strip()}\n\n")
+        attach_names = [Path(p).name for p in (attachment_paths or []) if p and p.strip()]
+        attach_line = f"\n\n_Attached: {', '.join(attach_names)}_" if attach_names else ""
+        append_chat_history(project_path, f"### Team Kickoff - {utc_now()}\n\n{run_prompt.strip()}{attach_line}\n\n")
         append_agent_chat(project_path, f"### Task - {utc_now()}\n\nLead: {RUNNER_COMMANDS[lead]['label']} · Teammate: {RUNNER_COMMANDS[teammate]['label']}\n\n{run_prompt.strip()}\n\n")
 
     def stopping() -> bool:
@@ -3475,6 +3773,9 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
         clear_human_input(project_path)
         await set_team_state(project_name, project_path, "team_event", status="running")
         return False
+
+    consecutive_test_failures = 0
+    last_test_error = ""
 
     try:
         for round_no in range(1, max_rounds + 1):
@@ -3497,6 +3798,45 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
             # Lead may have HALTed by writing a question — loop back to the gate.
             if parse_human_input(project_path)["blocked"]:
                 continue
+            if stopping():
+                await set_team_state(project_name, project_path, "team_event", status="stopped")
+                return
+
+            # Tester turn (compile/lint/test; workspace-write for running commands).
+            # Only run if there are build/test commands to run (heuristic: package.json or pyproject.toml exists).
+            tester_run_files = ["package.json", "pyproject.toml", "Makefile", "setup.py", "setup.cfg"]
+            should_test = any((project_path / f).exists() for f in tester_run_files)
+            tester_passed = True
+            if should_test:
+                await set_team_state(project_name, project_path, "team_event", status="running", step="tester", round=round_no)
+                tester_model = clean_model(model) or DEFAULT_RUNNER_MODELS["claude"]
+                await run_agent_process(project_name, "tester", "claude", tester_model, clean_reasoning(reasoning), "", project_path)
+                # Read FEEDBACK.md to check result
+                feedback_path = project_path / "FEEDBACK.md"
+                feedback_content = feedback_path.read_text(encoding="utf-8", errors="ignore") if feedback_path.exists() else ""
+                tester_passed = "TESTER: PASSED" in feedback_content
+                if not tester_passed:
+                    consecutive_test_failures += 1
+                    # Extract last error for circuit breaker message
+                    lines = feedback_content.strip().splitlines()
+                    last_test_error = "\n".join(lines[-15:]) if len(lines) > 15 else feedback_content.strip()
+                    # Circuit breaker: 3 consecutive test failures → alert user and stop
+                    if consecutive_test_failures >= 3:
+                        append_chat_history(
+                            project_path,
+                            f"### Circuit Breaker - {utc_now()}\n\n"
+                            f"The build hit {consecutive_test_failures} consecutive test failures. "
+                            f"Here's the last error:\n\n{last_test_error}\n\n"
+                            "Fix the underlying issue and try again.\n\n"
+                        )
+                        await broadcast("chat_event", record_event("CIRCUIT_BREAKER", f"{relative_path(project_path)} :: {consecutive_test_failures} consecutive test failures"))
+                        await set_team_state(project_name, project_path, "team_event", status="done", step="circuit-breaker", round=round_no)
+                        return
+                    # Lead gets another round with test feedback visible
+                    continue
+                else:
+                    consecutive_test_failures = 0
+
             if stopping():
                 await set_team_state(project_name, project_path, "team_event", status="stopped")
                 return
@@ -3530,11 +3870,45 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
         await broadcast("team_event")
 
 
+def _purge_orphaned_runs() -> None:
+    """Remove any in-memory run state whose subprocess is no longer alive.
+
+    On a clean start all dicts are empty, so this is a no-op.  On uvicorn
+    hot-reload the module state can survive a worker restart, leaving stale
+    entries that would permanently show 'RUNNING' badges on the frontend.
+    """
+    dead_agents = [
+        key for key, state in active_agent_runs.items()
+        if (proc := state.get("process")) is None or proc.poll() is not None
+    ]
+    for key in dead_agents:
+        log.warning("startup: purging orphaned agent run %s", key)
+        active_agent_runs.pop(key, None)
+
+    dead_pipelines = [
+        name for name, state in active_pipelines.items()
+        if state.get("status") not in ("running", "blocked")
+    ]
+    for name in dead_pipelines:
+        log.warning("startup: purging stale pipeline %s", name)
+        active_pipelines.pop(name, None)
+
+    dead_teams = [
+        name for name, state in active_teams.items()
+        if state.get("status") not in ("running", "blocked")
+    ]
+    for name in dead_teams:
+        log.warning("startup: purging stale team %s", name)
+        active_teams.pop(name, None)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     global event_loop, observer
 
     ensure_dualith_store()
+    _purge_orphaned_runs()
+    await ensure_registered_project_files()
     event_loop = asyncio.get_running_loop()
     observer = Observer()
     watch_registered_projects()
@@ -3767,6 +4141,16 @@ async def upload_attachments(name: str, files: list[UploadFile] = File(...)) -> 
     return {"paths": saved}
 
 
+@app.get("/api/projects/{name}/attachments/{filename}")
+async def get_attachment(name: str, filename: str) -> FileResponse:
+    """Serve a previously uploaded attachment image so the frontend can render thumbnails."""
+    project_path = tracked_project_path(name)
+    file_path = project_path / ".dualith" / "attachments" / filename
+    if not file_path.exists() or file_path.suffix.lower() not in ATTACHMENT_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+    return FileResponse(file_path)
+
+
 @app.post("/api/projects/import", status_code=201)
 async def import_project(
     name: str = Form(...),
@@ -3875,8 +4259,7 @@ async def start_agent(name: str, agent: str, request: AgentStartRequest = AgentS
     project_path = tracked_project_path(name)
     if project_has_active_orchestration(name):
         raise HTTPException(status_code=409, detail="Agent is already running.")
-    if agent != "ask":
-        await ensure_dualith_files(project_path, "", overwrite_spec=False)
+    await ensure_dualith_files(project_path, "", overwrite_spec=False)
 
     workflow_id = workflow_for_agent(agent)
     model = clean_model(request.model)
@@ -3921,10 +4304,19 @@ class UnifiedChatRequest(BaseModel):
     reasoning: str = Field(default="medium", max_length=40)
     prompt: str = Field(default="", max_length=20_000)
     attachment_paths: list[str] = Field(default_factory=list, max_length=20)
+    plan_mode: bool = Field(default=False)
+
+
+class PlanApprovalRequest(BaseModel):
+    approved: bool
+    comment: str = Field(default="", max_length=5000)
 
 
 def project_has_active_orchestration(project_name: str) -> bool:
     if project_name in active_pipelines or project_name in active_teams:
+        return True
+    # A pending plan approval means a run is effectively in progress (waiting for user input)
+    if project_name in plan_approval_events:
         return True
     prefix = f"{project_name}:"
     return any(key.startswith(prefix) for key in active_agent_runs)
@@ -4107,7 +4499,9 @@ def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str,
                    "install", "migrate", "setup", "configure", "deploy", "generate", "connect", "integrate",
                    "redesign", "redo", "rework", "rewrite", "rebuild", "replace", "overhaul",
                    "restyle", "revamp", "restructure", "remodel", "convert", "transform", "move",
-                   "simplify", "clean", "improve", "enhance", "polish"}
+                   "simplify", "clean", "improve", "enhance", "polish",
+                   # Git operations — agent can run these, must route to build not ask
+                   "commit", "push", "merge", "branch", "stash", "rebase", "tag", "release"}
     build_phrases = (
         r"\b(start|begin|continue|resume)\s+(implementing|building|coding|working|fixing|editing|updating|refactoring|creating|adding|writing|developing)\b",
         r"\b(implements?|implemented|implementing|builds?|building|built|creates?|created|creating|adds?|added|adding|writes?|writing|coded|coding|develops?|developed|developing|scaffolding|fixes|fixed|fixing|refactoring|updates?|updated|updating|changes?|changed|changing|edits?|edited|editing|modifies|modified|modifying|renames?|renamed|renaming|deletes?|deleted|deleting|removes?|removed|removing|installs?|installed|installing|migrates?|migrated|migrating|configured?|configuring|deploys?|deployed|deploying|generates?|generated|generating|connects?|connected|connecting|integrates?|integrated|integrating)\b",
@@ -4200,14 +4594,28 @@ async def start_orchestration(
         if project_name in active_teams:
             raise HTTPException(status_code=409, detail="Team is already running.")
         max_rounds = int(workflow.get("max_rounds", TEAM_MAX_ROUNDS) or TEAM_MAX_ROUNDS)
-        asyncio.create_task(run_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds))
+        asyncio.create_task(run_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths))
+        return
+
+    if kind == "plan-team":
+        if project_name in active_teams:
+            raise HTTPException(status_code=409, detail="Team is already running.")
+        max_rounds = int(workflow.get("max_rounds", TEAM_MAX_ROUNDS) or TEAM_MAX_ROUNDS)
+        asyncio.create_task(run_plan_then_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths))
+        return
+
+    if kind == "pm-team":
+        if project_name in active_teams:
+            raise HTTPException(status_code=409, detail="Team is already running.")
+        max_rounds = int(workflow.get("max_rounds", TEAM_MAX_ROUNDS) or TEAM_MAX_ROUNDS)
+        asyncio.create_task(run_pm_then_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths))
         return
 
     if kind == "pipeline":
         if project_name in active_pipelines:
             raise HTTPException(status_code=409, detail="Pipeline is already running.")
         max_iterations = int(workflow.get("max_iterations", PIPELINE_MAX_ITERATIONS) or PIPELINE_MAX_ITERATIONS)
-        asyncio.create_task(run_pipeline(project_name, project_path, runner_pref, model, reasoning, prompt, max_iterations))
+        asyncio.create_task(run_pipeline(project_name, project_path, runner_pref, model, reasoning, prompt, max_iterations, attachment_paths=attachment_paths))
         return
 
     if kind == "single":
@@ -4235,13 +4643,29 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
 
     runner = request.runner
     intent, route_reason = await classify_orchestration_intent_async(request.prompt, project_path, runner)
-    workflow_id = workflow_for_intent(intent)
+
+    # Plan-first mode: if user toggled Plan ON and intent is build, use the plan-first workflow
+    if request.plan_mode and intent == "build":
+        workflow_id = "plan-first"
+    # Autonomous mode: if intent is "ask" but message looks like a change request (not a question),
+    # route through PM for a single clarification step before building
+    elif not request.plan_mode and intent == "ask":
+        text = request.prompt.strip().lower()
+        # Heuristic: contains a change-target pronoun and no question mark = ambiguous change request
+        has_change_target = bool(re.search(r"\b(it|this|that|the app|the ui|the page|the design)\b", text))
+        is_question = "?" in text
+        if has_change_target and not is_question and len(text.split()) >= 3:
+            workflow_id = "pm-clarify"
+            route_reason = "ambiguous change request → PM clarify"
+        else:
+            workflow_id = workflow_for_intent(intent)
+    else:
+        workflow_id = workflow_for_intent(intent)
     workflow = ORCHESTRATION_WORKFLOWS[workflow_id]
     if project_has_active_orchestration(name):
         raise HTTPException(status_code=409, detail="An agent is already running.")
 
-    if workflow_id != "ask":
-        await ensure_dualith_files(project_path, "", overwrite_spec=False)
+    await ensure_dualith_files(project_path, "", overwrite_spec=False)
     model = clean_model(request.model)
     reasoning = clean_reasoning(request.reasoning)
 
@@ -4258,7 +4682,12 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
 
 @app.post("/api/projects/{name}/chat/stop")
 async def stop_unified_chat(name: str) -> dict[str, Any]:
-    """Stop whatever is currently running for this project."""
+    """Stop whatever is currently running for this project.
+
+    Also handles the stale-state case (e.g. after a backend restart that
+    cleared in-memory dicts but the frontend still shows a running badge):
+    any orphaned entries are force-evicted so collect_snapshot() returns clean.
+    """
     project_path = tracked_project_path(name)
     if name in active_pipelines:
         state = active_pipelines.get(name)
@@ -4270,6 +4699,14 @@ async def stop_unified_chat(name: str) -> dict[str, Any]:
             ev = pipeline_resume_events.get(name)
             if ev:
                 ev.set()
+        # Wait for the orchestrator's finally block to clean up (up to 3 s).
+        for _ in range(30):
+            if name not in active_pipelines:
+                break
+            await asyncio.sleep(0.1)
+        # Force-evict if still present (e.g. orchestrator stuck).
+        active_pipelines.pop(name, None)
+        pipeline_resume_events.pop(name, None)
     elif name in active_teams:
         state = active_teams.get(name)
         if state:
@@ -4280,14 +4717,51 @@ async def stop_unified_chat(name: str) -> dict[str, Any]:
             ev = team_resume_events.get(name)
             if ev:
                 ev.set()
+        # Wait for the orchestrator's finally block to clean up (up to 3 s).
+        for _ in range(30):
+            if name not in active_teams:
+                break
+            await asyncio.sleep(0.1)
+        # Force-evict if still present (e.g. orchestrator stuck).
+        active_teams.pop(name, None)
+        team_resume_events.pop(name, None)
     else:
         for agent in list(RUN_MODES.keys()):
             key = agent_run_key(name, agent)
             if key in active_agent_runs:
                 await stop_agent_process(name, agent)
+                # Wait for run_agent_process finally block (up to 3 s).
+                for _ in range(30):
+                    if key not in active_agent_runs:
+                        break
+                    await asyncio.sleep(0.1)
+                active_agent_runs.pop(key, None)
                 break
+
+    # Purge any remaining orphaned agent run entries for this project.
+    orphaned = [k for k in list(active_agent_runs) if k.startswith(f"{name}:")]
+    for k in orphaned:
+        log.warning("stop_chat: force-evicting orphaned run %s", k)
+        active_agent_runs.pop(k, None)
+
     entry = record_event("CHAT_STOPPED", project_path)
     schedule_broadcast("agent_event", entry)
+    return await collect_snapshot()
+
+
+@app.post("/api/projects/{name}/chat/plan-approve")
+async def approve_plan(name: str, request: PlanApprovalRequest) -> dict[str, Any]:
+    """Accept or reject the pending plan for a project.
+
+    Called when the user clicks Build (approved=True) or Revise (approved=False) on a plan bubble.
+    The waiting run_plan_then_team coroutine will resume and either start building or re-plan.
+    """
+    tracked_project_path(name)  # validate project exists
+    ev = plan_approval_events.get(name)
+    if not ev:
+        raise HTTPException(status_code=404, detail="No pending plan for this project.")
+    plan_approval_results[name] = {"approved": request.approved, "comment": request.comment}
+    ev.set()
     return await collect_snapshot()
 
 
