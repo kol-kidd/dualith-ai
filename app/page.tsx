@@ -1813,15 +1813,33 @@ function TeamBubble({ message, lead, teammate }: { message: TeamMessage; lead?: 
   const isLead = message.role === "lead";
   const runner = isLead ? lead : teammate;
   const approved = /TEAMMATE:\s*APPROVED/i.test(message.body);
+  const changesRequested = /TEAMMATE:\s*CHANGES REQUESTED/i.test(message.body);
   // Strip the verdict line from display — it's a machine signal, not prose
   const displayBody = message.body.replace(/\nTEAMMATE:\s*(APPROVED|CHANGES REQUESTED)\s*$/i, "").trim();
-  const accent = approved ? "border-ok/40" : "border-line";
+
+  // Lead (builder) rounds are internal — show as a quiet progress tick, not a full bubble
+  if (isLead) {
+    const firstLine = displayBody.split("\n").find((l) => l.trim()) ?? "Completed a round.";
+    return (
+      <div className="mx-auto w-full py-0.5" style={{ maxWidth: "var(--dualith-chat-max)" }}>
+        <div className="flex items-center gap-1.5 text-[11px] text-muted">
+          {runner && <RunnerMascot runner={runner} size={12} />}
+          <span>{firstLine.replace(/^[-*]\s*/, "")}</span>
+          {message.timestamp && <span className="opacity-50">· {timestampLabel(message.timestamp)}</span>}
+        </div>
+      </div>
+    );
+  }
+
+  // Teammate (reviewer) gets a full bubble — this is what the user actually cares about
+  const accent = approved ? "border-ok/40" : changesRequested ? "border-warn/40" : "border-line";
   return (
     <div className="dualith-msg dualith-msg--agent">
       <span className="dualith-msg__role">
         {runner && <RunnerMascot runner={runner} size={16} />}
-        {runner ? runnerLabels[runner] : isLead ? "Builder" : "Reviewer"}{message.timestamp && ` · ${timestampLabel(message.timestamp)}`}
-        {approved && <span className="ml-2 text-ok">✓ approved</span>}
+        {runner ? runnerLabels[runner] : "Reviewer"}{message.timestamp && ` · ${timestampLabel(message.timestamp)}`}
+        {approved && <span className="ml-2 text-ok">✓ looks good</span>}
+        {changesRequested && <span className="ml-2 text-warn">↻ changes needed</span>}
       </span>
       <div className={`dualith-msg__bubble border-l-2 ${accent}`}>
         <FormattedAgentOutput content={displayBody} />
