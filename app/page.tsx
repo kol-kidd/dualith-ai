@@ -3020,12 +3020,7 @@ function WorkspaceColumn({
           {(hasHistory || hasAgentChat) && project && (
             <button
               type="button"
-              onClick={() => {
-                void (async () => {
-                  if (hasHistory) await onClearChat(project.name);
-                  if (hasAgentChat) await onClearAgentChat(project.name);
-                })();
-              }}
+              onClick={() => { void onClearChat(project.name); }}
               className="border border-line-hard px-2 py-1 text-[10px] text-zinc-500 outline-none transition-colors hover:text-warn focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
             >
               Clear chat

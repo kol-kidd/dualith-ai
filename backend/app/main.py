@@ -4788,9 +4788,17 @@ async def approve_plan(name: str, request: PlanApprovalRequest) -> dict[str, Any
 
 @app.post("/api/projects/{name}/chat/clear")
 async def clear_chat(name: str) -> dict[str, Any]:
+    """Clear CHAT_HISTORY.md and AGENT_CHAT.md atomically in one request.
+
+    Clearing them in two separate requests causes a race: the WS broadcast from
+    the first clear arrives at the frontend after the second clear's applySnapshot,
+    restoring the old agent_chat content and leaving a stale teammate bubble.
+    One endpoint, one snapshot, no race.
+    """
     project_path = tracked_project_path(name)
     clear_chat_history(project_path)
-    entry = record_event("CHAT_CLEARED", project_path)
+    clear_agent_chat(project_path)
+    entry = record_event("CHAT_CLEARED", f"{relative_path(project_path)} :: chat + agent-chat cleared")
     schedule_broadcast("chat_event", entry)
     return await collect_snapshot()
 
