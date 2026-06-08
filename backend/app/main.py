@@ -575,7 +575,7 @@ You are the builder. Follow CLAUDE.md, keep your active blueprint in PLAN.md, an
 
 For frontend or UI work, read PRODUCT.md and DESIGN.md before editing. Use the Impeccable standard in those files: shape the UX first, preserve existing tokens/components, check accessibility and responsive states, and avoid generic AI/SaaS visuals.
 
-Do not create Git commits automatically as part of your normal build work — Dualith creates a checkpoint commit after your run succeeds. However, if the user explicitly asks you to commit or push changes (e.g. "commit this", "push to main"), you may do so using git. Before pushing to a remote, confirm the target branch with the user first.
+Do not create Git commits automatically as part of your normal build work — Dualith creates a checkpoint commit after your run succeeds. However, if the user explicitly asks you to commit or push changes (e.g. "commit this", "push to main"), you must do so. Use this exact sequence: `git add -A` to stage everything (including untracked files), then `git commit -m "<message>"`. To push, run `git push origin <branch>` — check the current branch with `git branch --show-current` first. You have full git access; there are no sandbox restrictions on `.git`.
 
 If the task is large or naturally parallel (e.g. updating multiple independent files, running tests while writing code), you may spawn subagents to work in parallel. Use your judgment — don't spawn subagents for simple sequential tasks.
 
@@ -609,7 +609,7 @@ Read SPEC.md, PLAN.md, FEEDBACK.md, and AGENT_CHAT.md (the running conversation 
 
 For frontend or UI work, read PRODUCT.md and DESIGN.md before editing. Use the Impeccable standard in those files: shape the UX first, preserve existing tokens/components, check accessibility and responsive states, and avoid generic AI/SaaS visuals.
 
-Do not create Git commits automatically as part of your normal build work — Dualith creates a checkpoint commit after your run succeeds. However, if the user explicitly asks you to commit or push changes (e.g. "commit this", "push to main"), you may do so using git. Before pushing to a remote, confirm the target branch with the user first.
+Do not create Git commits automatically as part of your normal build work — Dualith creates a checkpoint commit after your run succeeds. However, if the user explicitly asks you to commit or push changes (e.g. "commit this", "push to main"), you must do so. Use this exact sequence: `git add -A` to stage everything (including untracked files), then `git commit -m "<message>"`. To push, run `git push origin <branch>` — check the current branch with `git branch --show-current` first. You have full git access; there are no sandbox restrictions on `.git`.
 
 If the task is large or naturally parallel (e.g. updating multiple independent files, running tests while writing code), you may spawn subagents to work in parallel. Use your judgment — don't spawn subagents for simple sequential tasks.
 
