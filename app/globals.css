@@ -790,46 +790,44 @@ select option:disabled {
 .dualith-live-work {
   display: flex;
   flex-direction: column;
-  gap: 0.8rem;
 }
 
-.dualith-live-work__meta,
 .dualith-live-work__step {
   display: flex;
   min-width: 0;
-  align-items: center;
-  gap: 0.55rem;
-}
-
-.dualith-live-work__meta {
-  font-size: 0.75rem;
-  color: var(--dualith-text-muted);
+  align-items: baseline;
+  gap: 0.45rem;
 }
 
 .dualith-live-work__steps {
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
-  font-size: 0.82rem;
-  color: var(--dualith-text-soft);
+  gap: 0.18rem;
+  font-size: 0.78rem;
+  font-family: var(--font-mono, ui-monospace, "Cascadia Code", "SF Mono", Menlo, monospace);
+  color: var(--dualith-text-muted);
+  line-height: 1.5;
 }
 
 .dualith-live-work__dot {
-  width: 0.4rem;
-  height: 0.4rem;
+  width: 0.35rem;
+  height: 0.35rem;
   flex: 0 0 auto;
+  margin-top: 0.35em;
 }
 
 .dualith-live-work__time {
   flex: 0 0 auto;
-  font-size: 0.68rem;
-  opacity: 0.75;
+  font-size: 0.65rem;
+  opacity: 0.55;
+  margin-left: auto;
 }
 
 .dualith-live-pulse {
-  width: 0.45rem;
-  height: 0.45rem;
+  width: 0.4rem;
+  height: 0.4rem;
   flex: 0 0 auto;
+  margin-top: 0.35em;
   background: var(--dualith-cyan);
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--dualith-cyan) 42%, transparent);
   animation: dualith-live-pulse 1.6s ease-out infinite;

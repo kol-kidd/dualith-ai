@@ -591,8 +591,15 @@ function eventPayload(entry: ConsoleEntry, project: ProjectRecord) {
 function stripRawEventText(value: string) {
   const text = value.trim();
   if (!text) return "";
+  // Drop JSON stream events (codex / claude structured output)
   if (text.startsWith("{") && /"(thread|turn|item)\.(started|completed)"/.test(text)) return "";
   if (/"command_execution"|aggregated_output/.test(text)) return "";
+  // Drop raw ISO-timestamp log lines — e.g. "2026-06-08T05:54:00Z WARN codex_core..."
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(text)) return "";
+  // Drop rust-style module path log lines — e.g. "WARN codex_core_plugins::manifest: ..."
+  if (/^(WARN|INFO|ERROR|DEBUG)\s+\w[\w:]+::/.test(text)) return "";
+  // Drop lines that are purely a file path with no human-readable context
+  if (/^[A-Za-z]:[/\\]/.test(text) && !text.includes(" ")) return "";
   return text.replace(/\s+/g, " ").slice(0, 220);
 }
 
@@ -1469,16 +1476,15 @@ function LiveWorkingBubble({ project, projectEvents }: { project: ProjectRecord 
   const runner = activeRun.runner === "auto" ? undefined : activeRun.runner;
 
   return (
-    <AgentBubble runner={runner} label={`Working - ${friendlyRunLabel(activeRun.mode, activeRun.runner)}`} timestamp={activeRun.last_output_at || activeRun.started_at}>
+    <AgentBubble runner={runner} label={`Working – ${friendlyRunLabel(activeRun.mode, activeRun.runner)}`} timestamp={activeRun.last_output_at || activeRun.started_at}>
       <div className="dualith-live-work">
-        <div className="dualith-live-work__meta">
-          <span className="dualith-live-pulse" aria-hidden="true" />
-          <span>{modeLabels[activeRun.mode]} is running.</span>
-        </div>
         <div className="dualith-live-work__steps">
-          {displayed.map((item) => (
+          {displayed.map((item, i) => (
             <div key={item.id} className="dualith-live-work__step">
-              <span className={`dualith-live-work__dot ${progressDotClass(item.tone)}`} />
+              {i === displayed.length - 1
+                ? <span className="dualith-live-pulse" aria-hidden="true" />
+                : <span className={`dualith-live-work__dot ${progressDotClass(item.tone)}`} />
+              }
               <span className="min-w-0 flex-1">{item.text}</span>
               {item.time && <span className={`dualith-live-work__time ${progressToneClass(item.tone)}`}>{timestampLabel(item.time)}</span>}
             </div>
@@ -1499,8 +1505,8 @@ function RunStatusBubble({ project, latest }: { project: ProjectRecord | null; l
 
   return (
     <AgentBubble runner={latest.runner} label={`${modeLabels[latest.mode]} - ${runnerLabels[latest.runner]}`} timestamp={latest.ended_at}>
-      <div className="mb-2 font-medium text-zinc-200">{friendlyResultIntro(latest)}</div>
-      <div className="text-zinc-500">{body}</div>
+      <div className="mb-2 font-medium text-text-strong">{friendlyResultIntro(latest)}</div>
+      <div className="text-muted">{body}</div>
     </AgentBubble>
   );
 }
@@ -1654,13 +1660,13 @@ function InlineText({ text }: { text: string }) {
     <>
       {parts.map((part, index) => {
         if (part.startsWith("`") && part.endsWith("`")) {
-          return <code key={index} className="border border-line-hard bg-bg px-1 py-0.5 text-[0.95em] text-zinc-300">{part.slice(1, -1)}</code>;
+          return <code key={index} className="border border-line-hard bg-surface px-1 py-0.5 text-[0.95em] text-text-soft">{part.slice(1, -1)}</code>;
         }
         if (part.startsWith("**") && part.endsWith("**")) {
-          return <strong key={index} className="font-semibold text-zinc-100">{part.slice(2, -2)}</strong>;
+          return <strong key={index} className="font-semibold text-text-strong">{part.slice(2, -2)}</strong>;
         }
         if (part.startsWith("*") && part.endsWith("*")) {
-          return <em key={index} className="text-zinc-300">{part.slice(1, -1)}</em>;
+          return <em key={index} className="text-text-soft">{part.slice(1, -1)}</em>;
         }
         const link = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
         if (link) {
@@ -1699,7 +1705,7 @@ function FormattedTextBlock({ value }: { value: string }) {
     if (heading) {
       flushParagraph();
       nodes.push(
-        <h3 key={`h-${nodes.length}`} className="mb-2 mt-3 text-xs font-semibold uppercase tracking-widest text-zinc-300 first:mt-0">
+        <h3 key={`h-${nodes.length}`} className="mb-2 mt-3 text-xs font-semibold uppercase tracking-widest text-text-soft first:mt-0">
           <InlineText text={heading[1]} />
         </h3>
       );
@@ -1712,8 +1718,8 @@ function FormattedTextBlock({ value }: { value: string }) {
       const done = check[1].toLowerCase() === "x";
       nodes.push(
         <div key={`c-${nodes.length}`} className="mb-1.5 grid grid-cols-[18px_1fr] gap-2">
-          <span className={done ? "text-ok" : "text-zinc-700"}>{done ? "x" : "-"}</span>
-          <span className={done ? "text-zinc-600 line-through" : "text-zinc-400"}><InlineText text={check[2]} /></span>
+          <span className={done ? "text-ok" : "text-text-faint"}>{done ? "x" : "-"}</span>
+          <span className={done ? "text-text-faint line-through" : "text-text-soft"}><InlineText text={check[2]} /></span>
         </div>
       );
       continue;
@@ -1741,11 +1747,11 @@ function FormattedTextBlock({ value }: { value: string }) {
 function FormattedAgentOutput({ content }: { content: string }) {
   const blocks = splitOutputBlocks(content);
   return (
-    <div className="space-y-3 text-sm leading-6 text-zinc-300">
+    <div className="space-y-3 text-sm leading-6 text-text">
       {blocks.map((block, index) => (
         block.kind === "code" ? (
-          <pre key={index} className="max-h-80 overflow-auto whitespace-pre-wrap break-words border border-line-hard bg-bg p-3 text-xs leading-5 text-zinc-400">
-            {block.lang && <div className="mb-2 text-[10px] uppercase tracking-widest text-zinc-700">{block.lang}</div>}
+          <pre key={index} className="max-h-80 overflow-auto whitespace-pre-wrap break-words border border-line-hard bg-bg p-3 text-xs leading-5 text-text-muted">
+            {block.lang && <div className="mb-2 text-[10px] uppercase tracking-widest text-text-faint">{block.lang}</div>}
             <code>{block.value}</code>
           </pre>
         ) : (
@@ -1891,7 +1897,7 @@ function AgentBubble({ runner, label, timestamp, children }: { runner?: RunnerId
         {runner && <RunnerMascot runner={runner} size={16} />}
         {label}{timestamp && ` · ${timestampLabel(timestamp)}`}
       </span>
-      <div className="dualith-msg__bubble text-zinc-300">{children}</div>
+      <div className="dualith-msg__bubble">{children}</div>
     </div>
   );
 }
@@ -1947,11 +1953,11 @@ function ConversationThread({ project, projectEvents, results }: { project: Proj
           <LiveWorkingBubble project={project} projectEvents={projectEvents} />
           {latestRunMessage && (
             <AgentBubble runner={latestRunMessage.runner} label={`${modeLabels[latestRunMessage.mode]} · ${runnerLabels[latestRunMessage.runner]}`} timestamp={latestRunMessage.ended_at}>
-              <div className="mb-2 font-medium text-zinc-200">{friendlyResultIntro(latestRunMessage)}</div>
+              <div className="mb-2 font-medium text-text-strong">{friendlyResultIntro(latestRunMessage)}</div>
               {safeResultBody(latestRunMessage) ? (
                 <FormattedAgentOutput content={safeResultBody(latestRunMessage)} />
               ) : (
-                <div className="text-zinc-600">{latestRunMessage.status === "stopped" ? "No final answer was captured, and I kept the raw output in the Log panel." : "No final answer was captured for this run."}</div>
+                <div className="text-muted">{latestRunMessage.status === "stopped" ? "No final answer was captured, and I kept the raw output in the Log panel." : "No final answer was captured for this run."}</div>
               )}
             </AgentBubble>
           )}
