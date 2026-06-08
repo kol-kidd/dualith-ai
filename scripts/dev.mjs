@@ -55,8 +55,8 @@ function localLanIp() {
   return privateCandidates[0] ?? fallbackCandidates[0] ?? "127.0.0.1";
 }
 
-const apiPort = env.DUALITH_API_PORT ?? "4000";
-const webPort = env.DUALITH_WEB_PORT ?? "3000";
+const apiPort = env.DUALITH_API_PORT ?? "4200";
+const webPort = env.DUALITH_WEB_PORT ?? "3200";
 const lanIp = localLanIp();
 
 if (lanMode) {
@@ -74,27 +74,16 @@ function clearStaleNextDevOutput() {
   const nextDir = path.join(root, ".next");
   const resolvedNextDir = path.resolve(nextDir);
   const resolvedRoot = path.resolve(root);
-  const appDir = path.join(nextDir, "server", "app");
-  const appPage = path.join(appDir, "page.js");
-  const appManifest = path.join(appDir, "page_client-reference-manifest.js");
-  const pagesDir = path.join(nextDir, "server", "pages");
-  const documentPage = path.join(pagesDir, "_document.js");
-  const errorPage = path.join(pagesDir, "_error.js");
 
   if (!existsSync(nextDir)) {
     return;
   }
 
-  const missingAppEntrypoint = existsSync(appManifest) && !existsSync(appPage);
-  const missingPagesEntrypoints = existsSync(pagesDir) && (!existsSync(documentPage) || !existsSync(errorPage));
-
-  if (missingAppEntrypoint || missingPagesEntrypoints) {
-    if (path.basename(resolvedNextDir) !== ".next" || !resolvedNextDir.startsWith(resolvedRoot + path.sep)) {
-      throw new Error(`Refusing to remove unexpected Next output path: ${resolvedNextDir}`);
-    }
-    rmSync(resolvedNextDir, { recursive: true, force: true });
-    console.log("[dualith] Cleared stale Next output before starting dev server.");
+  if (path.basename(resolvedNextDir) !== ".next" || !resolvedNextDir.startsWith(resolvedRoot + path.sep)) {
+    throw new Error(`Refusing to remove unexpected Next output path: ${resolvedNextDir}`);
   }
+  rmSync(resolvedNextDir, { recursive: true, force: true });
+  console.log("[dualith] Cleared Next dev output before starting dev server.");
 }
 
 // Prefer .venv (local), fall back to PYTHON env var, then system python.
@@ -126,7 +115,7 @@ function apiState() {
         try {
           const payload = JSON.parse(body);
           const features = Array.isArray(payload.features) ? payload.features : [];
-          resolve(payload.app === "dualith" && features.includes("status-refresh") ? "current" : "occupied");
+          resolve(payload.app === "dualith" && features.includes("unified-chat") ? "current" : "occupied");
         } catch {
           resolve("occupied");
         }
@@ -142,8 +131,44 @@ function apiState() {
   });
 }
 
+function webState() {
+  const host = webHost === "0.0.0.0" ? "127.0.0.1" : webHost;
+  const url = new URL(`http://${host}:${webPort}/`);
+
+  return new Promise((resolve) => {
+    const req = http.request(url, { method: "GET", timeout: 1500 }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {
+        body += chunk;
+      });
+      res.on("end", () => {
+        const lower = body.toLowerCase();
+        if ((res.statusCode ?? 0) >= 500) {
+          resolve(lower.includes("enoent") || lower.includes("runtime error") ? "broken" : "occupied");
+          return;
+        }
+        if (lower.includes("dualith command center") || lower.includes("dualith")) {
+          resolve("current");
+          return;
+        }
+        resolve("occupied");
+      });
+    });
+
+    req.on("timeout", () => {
+      req.destroy();
+      resolve("free");
+    });
+    req.on("error", () => resolve("free"));
+    req.end();
+  });
+}
+
 const children = [];
+let shuttingDown = false;
 const apiStatus = await apiState();
+const webStatus = await webState();
 
 if (apiStatus === "current") {
   console.log(`[dualith] API already running at ${apiBaseUrl}; reusing it.`);
@@ -151,10 +176,19 @@ if (apiStatus === "current") {
   const url = new URL(apiBaseUrl);
   console.error(`[dualith] ${apiBaseUrl} is already in use by an older or incompatible server.`);
   console.error(`[dualith] Stop the port owner, then run npm run dev again:`);
-  console.error(`[dualith]   Get-NetTCPConnection -LocalPort ${url.port || 4000} | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }`);
+  console.error(`[dualith]   Get-NetTCPConnection -LocalPort ${url.port || 4200} | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }`);
   process.exit(1);
 } else {
   children.push(spawnProc(python, ["backend/run_server.py"]));
+}
+
+if (webStatus === "current") {
+  console.log(`[dualith] Web already running at http://${webHost}:${webPort}; reusing it.`);
+} else if (webStatus === "occupied" || webStatus === "broken") {
+  console.error(`[dualith] http://${webHost}:${webPort} is already in use${webStatus === "broken" ? " but its Next dev output is broken" : ""}.`);
+  console.error(`[dualith] Stop the port owner, then run npm run dev again:`);
+  console.error(`[dualith]   Get-NetTCPConnection -LocalPort ${webPort} | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }`);
+  shutdown(1);
 }
 
 if (lanMode) {
@@ -163,10 +197,10 @@ if (lanMode) {
   console.log(`[dualith] API URL: ${env.NEXT_PUBLIC_API_BASE_URL}`);
 }
 
-clearStaleNextDevOutput();
-children.push(spawnProc(process.execPath, [nextCli, "dev", "--hostname", webHost, "--port", webPort]));
-
-let shuttingDown = false;
+if (webStatus === "free") {
+  clearStaleNextDevOutput();
+  children.push(spawnProc(process.execPath, [nextCli, "dev", "--hostname", webHost, "--port", webPort]));
+}
 
 function shutdown(code = 0) {
   if (shuttingDown) {

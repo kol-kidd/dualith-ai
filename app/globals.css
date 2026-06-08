@@ -2,7 +2,35 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Default theme: daylight (light mode). Midnight is still available via the theme picker. */
 :root,
+:root[data-theme="daylight"] {
+  color-scheme: light;
+  --dualith-bg: #f7f7f8;
+  --dualith-surface: #ffffff;
+  --dualith-line: #d9d9e0;
+  --dualith-line-hard: #e7e7ec;
+  --dualith-text: #1f2328;
+  --dualith-muted: #6b7280;
+  --dualith-text-strong: #111827;
+  --dualith-text-soft: #1f2937;
+  --dualith-text-muted: #4b5563;
+  --dualith-text-faint: #6b7280;
+  --dualith-surface-hover: #eef2f7;
+  --dualith-surface-selected: #dff3fb;
+  --dualith-surface-raised: #ffffff;
+  --dualith-input-bg: #ffffff;
+  --dualith-input-text: #111827;
+  --dualith-input-muted: #6b7280;
+  --dualith-ring: #0e7490;
+  --dualith-cyan: #0e7490;
+  --dualith-emerald: #047857;
+  --dualith-amber: #b45309;
+  --dualith-red: #dc2626;
+  --dualith-bubble-user: #eef2f7;
+  --dualith-bubble-agent: #ffffff;
+}
+
 :root[data-theme="midnight"] {
   color-scheme: dark;
   --dualith-bg: #05070a;
@@ -84,34 +112,6 @@
   --dualith-red: #bf616a;
   --dualith-bubble-user: #1b2735;
   --dualith-bubble-agent: #141d28;
-}
-
-/* Theme: Daylight — light mode */
-:root[data-theme="daylight"] {
-  color-scheme: light;
-  --dualith-bg: #f7f7f8;
-  --dualith-surface: #ffffff;
-  --dualith-line: #d9d9e0;
-  --dualith-line-hard: #e7e7ec;
-  --dualith-text: #1f2328;
-  --dualith-muted: #6b7280;
-  --dualith-text-strong: #111827;
-  --dualith-text-soft: #1f2937;
-  --dualith-text-muted: #4b5563;
-  --dualith-text-faint: #6b7280;
-  --dualith-surface-hover: #eef2f7;
-  --dualith-surface-selected: #dff3fb;
-  --dualith-surface-raised: #ffffff;
-  --dualith-input-bg: #ffffff;
-  --dualith-input-text: #111827;
-  --dualith-input-muted: #6b7280;
-  --dualith-ring: #0e7490;
-  --dualith-cyan: #0e7490;
-  --dualith-emerald: #047857;
-  --dualith-amber: #b45309;
-  --dualith-red: #dc2626;
-  --dualith-bubble-user: #eef2f7;
-  --dualith-bubble-agent: #ffffff;
 }
 
 /* Layout density */
@@ -360,19 +360,29 @@ select option:disabled {
 
 .dualith-topbar {
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(300px, 380px);
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) auto;
   height: 36px;
 }
 
+/* Single-pane: projects sidebar + full-height chat. System lives in a slide-over drawer. */
 .dualith-main-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(300px, 380px);
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
   height: calc(100vh - 36px);
 }
 
-.dualith-topbar--system-collapsed,
-.dualith-main-grid--system-collapsed {
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) 44px;
+/* Collapsed sidebar -> thin icon rail, chat takes the rest. */
+.dualith-topbar--sidebar-collapsed {
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+}
+.dualith-main-grid--sidebar-collapsed {
+  grid-template-columns: 0px minmax(0, 1fr);
+}
+.dualith-main-grid--sidebar-collapsed .dualith-project-slot {
+  overflow: hidden;
+  width: 0;
+  min-width: 0;
+  border: none;
 }
 
 .dualith-rail-slot {
@@ -384,10 +394,44 @@ select option:disabled {
   height: 100%;
 }
 
+/* System drawer: fixed right slide-over at all widths (was mobile-only). */
+.dualith-system-slot {
+  position: fixed;
+  top: 36px;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  width: min(92vw, 380px);
+  background: var(--dualith-bg);
+  border-left: 1px solid var(--dualith-line);
+  transform: translateX(100%);
+  transition: transform 160ms ease;
+}
+.dualith-system-slot.is-open {
+  transform: translateX(0);
+}
+.dualith-system-slot > * {
+  height: 100%;
+}
+
 .dualith-mobile-actions,
-.dualith-mobile-only,
-.dualith-drawer-backdrop {
+.dualith-mobile-only {
   display: none;
+}
+
+.dualith-desktop-only {
+  display: inline-flex;
+}
+
+/* Backdrop is rendered conditionally in JSX; show it whenever present (desktop drawer too). */
+.dualith-drawer-backdrop {
+  position: fixed;
+  inset: 36px 0 0 0;
+  z-index: 30;
+  display: block;
+  border: 0;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 0;
 }
 
 .dualith-logo {
@@ -490,6 +534,10 @@ select option:disabled {
     gap: 6px;
   }
 
+  .dualith-desktop-only {
+    display: none;
+  }
+
   .dualith-mobile-only {
     display: inline-flex;
   }
@@ -557,27 +605,26 @@ select option:disabled {
 .dualith-msg {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.35rem;
 }
 .dualith-msg--user {
-  align-items: flex-end;
+  align-items: flex-start;
 }
 .dualith-msg__bubble {
-  max-width: 88%;
-  border: 1px solid var(--dualith-line-hard);
-  border-radius: 14px;
-  padding: 0.85rem 1.1rem;
+  max-width: 100%;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+/* User message: subtle left accent line, no bubble */
 .dualith-msg--user .dualith-msg__bubble {
-  background: var(--dualith-bubble-user);
-  border-color: color-mix(in srgb, var(--dualith-cyan) 28%, var(--dualith-line-hard));
+  padding-left: 0.85rem;
+  border-left: 2px solid color-mix(in srgb, var(--dualith-cyan) 55%, transparent);
+  color: var(--dualith-text-strong);
 }
+/* Agent message: plain text, no background */
 .dualith-msg--agent .dualith-msg__bubble {
-  background: var(--dualith-bubble-agent);
-  max-width: 100%;
   width: 100%;
+  color: var(--dualith-text);
 }
 .dualith-msg__bubble pre,
 .dualith-msg__bubble code {
@@ -690,26 +737,40 @@ select option:disabled {
   font-variant-ligatures: none;
 }
 
-.dualith-app-shell,
-.dualith-boot-shell {
+.dualith-app-shell {
   min-height: 100dvh;
 }
 
-.dualith-boot-shell {
-  display: grid;
-  place-items: center;
-  padding: 1.5rem;
+.dualith-project-loading {
+  display: flex;
+  gap: 0.85rem;
+  border-bottom: 1px solid var(--dualith-line-hard);
+  padding: 1rem 0.75rem;
 }
 
-.dualith-boot-card {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  max-width: 22rem;
-  border: 1px solid var(--dualith-line);
-  border-radius: 14px;
-  background: var(--dualith-surface);
-  padding: 1rem;
+.dualith-project-loading__pulse {
+  width: 0.55rem;
+  height: 0.55rem;
+  flex: 0 0 auto;
+  margin-top: 0.18rem;
+  background: var(--dualith-cyan);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--dualith-cyan) 42%, transparent);
+  animation: dualith-loading-pulse 1.45s ease-out infinite;
+}
+
+@keyframes dualith-loading-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--dualith-cyan) 42%, transparent);
+    opacity: 1;
+  }
+  70% {
+    box-shadow: 0 0 0 0.55rem color-mix(in srgb, var(--dualith-cyan) 0%, transparent);
+    opacity: 0.8;
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--dualith-cyan) 0%, transparent);
+    opacity: 1;
+  }
 }
 
 .dualith-mobile-tabs {
@@ -719,6 +780,11 @@ select option:disabled {
 .dualith-mobile-pane,
 .dualith-mobile-composer-pane {
   display: contents;
+}
+
+/* Desktop: preview lives in the Details drawer, so hide the inline preview pane. */
+.dualith-mobile-pane--preview {
+  display: none;
 }
 
 .dualith-live-work {

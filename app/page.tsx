@@ -7,6 +7,7 @@ type AgentState = "IDLE" | "BUILDER_ACTIVE";
 type AuditState = "PENDING" | "CLEAN" | "ATTENTION";
 type AgentMode = "ask" | "builder" | "auditor" | "team";
 type RunnerId = "auto" | "codex" | "claude";
+type RunnerPolicyId = "auto" | "codex-heavy" | "claude-heavy" | "balanced";
 type RefineRunnerId = Exclude<RunnerId, "auto">;
 type RunRole = AgentMode | "lead" | "teammate";
 type ActiveRun = {
@@ -23,7 +24,9 @@ type AgentStartOptions = {
   model: string;
   reasoning: ReasoningLevel;
   prompt: string;
+  attachmentPaths?: string[];
 };
+type Attachment = { id: string; name: string; previewUrl: string; file: File };
 type DevServerAction = "start" | "stop" | "restart";
 type ReasoningLevel = "low" | "medium" | "high" | "extra-high";
 
@@ -137,6 +140,7 @@ type AgentResult = {
   content: string;
   error?: string;
   prompt?: string;
+  checkpoint?: { status: "committed" | "no_changes" | "skipped" | "error"; message: string; commit?: string };
 };
 
 type UsageSnapshot = {
@@ -148,6 +152,7 @@ type UsageSnapshot = {
 };
 
 type QuotaSettings = {
+  runner_policy: RunnerPolicyId;
   reserve_percent: number;
   codex_monthly_tokens: number;
   claude_five_hour_tokens: number;
@@ -200,6 +205,30 @@ type AppStatus = {
   phone_url: string;
 };
 
+type OrchestrationManifest = {
+  default_workflow: string;
+  agents: {
+    id: string;
+    label: string;
+    role: string;
+    capabilities: string[];
+    sandbox: string;
+    default_runner: RunnerId;
+  }[];
+  workflows: {
+    id: string;
+    label: string;
+    kind: string;
+    agents: string[];
+    description: string;
+  }[];
+  runner_policies?: {
+    id: RunnerPolicyId;
+    label: string;
+    description: string;
+  }[];
+};
+
 type SnapshotPayload = {
   projects: ProjectRecord[];
   console: ConsoleEntry[];
@@ -210,6 +239,7 @@ type SnapshotPayload = {
   projects_root?: string;
   memory_path?: string;
   runner_health?: RunnerHealth;
+  orchestration?: OrchestrationManifest;
   app?: AppStatus;
 };
 
@@ -234,7 +264,8 @@ type DirectoryInputProps = InputHTMLAttributes<HTMLInputElement> & {
   webkitdirectory?: string;
 };
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4000";
+const defaultDualithReservedPorts = [3200, 4200];
+const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4200";
 const wsBase = apiBase.replace(/^http/, "ws");
 const directoryInputProps: DirectoryInputProps = { directory: "", webkitdirectory: "" };
 const skippedImportDirs = new Set([".git", "node_modules", ".next", "dist", "build", ".venv", "__pycache__", ".cache", ".turbo"]);
@@ -250,6 +281,14 @@ const runners: { id: RunnerId; label: string }[] = [
   { id: "codex", label: "Codex" },
   { id: "claude", label: "Claude" },
 ];
+const runnerPolicies: { id: RunnerPolicyId; label: string; description: string }[] = [
+  { id: "codex-heavy", label: "Codex-heavy", description: "Codex leads implementation; Claude reviews when available." },
+  { id: "claude-heavy", label: "Claude-heavy", description: "Claude leads implementation; Codex reviews when available." },
+  { id: "balanced", label: "Balanced", description: "Auto picks the runner with the most quota headroom." },
+  { id: "auto", label: "Registry auto", description: "Use each agent's built-in runner default." },
+];
+const runnerPolicyLabels = Object.fromEntries(runnerPolicies.map((policy) => [policy.id, policy.label])) as Record<RunnerPolicyId, string>;
+const runnerPolicyDescriptions = Object.fromEntries(runnerPolicies.map((policy) => [policy.id, policy.description])) as Record<RunnerPolicyId, string>;
 const modeLabels: Record<RunRole, string> = {
   ask: "Ask",
   builder: "Build",
@@ -338,6 +377,7 @@ const emptyUsage: UsageSnapshot = {
   active: [],
 };
 const emptyQuotaSettings: QuotaSettings = {
+  runner_policy: "codex-heavy",
   reserve_percent: 10,
   codex_monthly_tokens: 0,
   claude_five_hour_tokens: 0,
@@ -484,6 +524,9 @@ function humanVerb(action: string): string {
     CLAUDE_EXIT: "Claude done",
     CLAUDE_STOPPED: "Claude stopped",
     AUTO_ROUTED: "Auto routed",
+    CHAT_ROUTED: "Chat routed",
+    TEAM_ROUTED: "Team routed",
+    TEAM_TAKEOVER: "Team takeover",
     STATUS_REFRESHED: "Status refreshed",
     DEV_SERVER_STARTED: "Preview starting",
     DEV_SERVER_READY: "Preview ready",
@@ -492,6 +535,7 @@ function humanVerb(action: string): string {
     DEV_SERVER_STOPPED: "Preview stopped",
     RUN_PROGRESS: "Working",
     GIT_OK: "Saved",
+    GIT_SKIP: "Save skipped",
     GIT_ERR: "Save error",
     GIT_LOG: "Committed",
     SNAPSHOT_ERR: "Error",
@@ -565,6 +609,8 @@ function friendlyProgressFromEvent(entry: ConsoleEntry, project: ProjectRecord):
   if (action === "PIPELINE_STARTED") return "I started the automatic build and review loop.";
   if (action === "PIPELINE_STOPPED") return "I stopped the automatic loop.";
   if (action === "TEAM_STARTED") return "I started the team run.";
+  if (action === "TEAM_ROUTED") return "I formed the team for this run.";
+  if (action === "CHAT_ROUTED") return "I picked the workflow for this message.";
   if (action === "TEAM_STOPPED") return "I stopped the team run.";
   if (action === "AUTO_ROUTED") return "I picked the runner based on the current limits.";
   if (action.endsWith("_STARTED")) return `I handed this to ${action.startsWith("CLAUDE") ? "Claude" : "Codex"}.`;
@@ -572,8 +618,10 @@ function friendlyProgressFromEvent(entry: ConsoleEntry, project: ProjectRecord):
   if (action.endsWith("_EXIT")) return "The run finished.";
 
   if (action.endsWith("_LOG") || action.endsWith("_ERR")) {
-    if (lower.includes("127.0.0.1:3000") || lower.includes("port 3000") || lower.includes("dualith command center")) {
-      return "I found Dualith on port 3000, so I'm keeping the project on a different port.";
+    const reservedPorts = project.dev_server?.reserved_ports ?? defaultDualithReservedPorts;
+    const mentionsReservedPort = reservedPorts.some((port) => lower.includes(`:${port}`) || lower.includes(`port ${port}`));
+    if (mentionsReservedPort || lower.includes("dualith command center")) {
+      return "I found Dualith on a reserved port, so I'm keeping the project on a different port.";
     }
     if (lower.includes("npm run") || lower.includes("next dev") || lower.includes("vite") || lower.includes("dev server")) {
       return "I'm checking the project preview.";
@@ -1176,11 +1224,14 @@ function ProjectSetupModal({
 // Registry (left column)
 
 function RegistryColumn({
-  projects, selectedName, loading, onSelect, onOpenSetup, onDelete, onCloseMobile,
+  projects, selectedName, loading, loadError, socketStatus, onRetry, onSelect, onOpenSetup, onDelete, onCloseMobile,
 }: {
   projects: ProjectRecord[];
   selectedName: string | null;
   loading: boolean;
+  loadError: string;
+  socketStatus: string;
+  onRetry: () => Promise<void> | void;
   onSelect: (name: string) => void;
   onOpenSetup: () => void;
   onDelete: (name: string) => Promise<void> | void;
@@ -1211,12 +1262,36 @@ function RegistryColumn({
       </SectionHeader>
       <div className="min-h-0 flex-1 overflow-auto">
         {loading && projects.length === 0 ? (
-          Array.from({ length: 4 }).map((_, i) => (
-            <div key={`sk-${i}`} className="grid grid-cols-[12px_1fr] items-center gap-2 border-b border-line-hard px-3 py-3">
-              <span className="h-2 w-2 bg-zinc-800" />
-              <span className="h-2 w-2/3 bg-zinc-800" />
+          <div className="dualith-project-loading">
+            <div className="dualith-project-loading__pulse" aria-hidden="true" />
+            <div>
+              <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-400">Loading projects</div>
+              <div className="mt-1 text-[11px] leading-5 text-zinc-600">
+                Connecting to the local Dualith API. The workspace will fill in automatically.
+              </div>
+              <div className="mt-3 space-y-2">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={`sk-${i}`} className="grid grid-cols-[10px_1fr] items-center gap-2">
+                    <span className="h-2 w-2 bg-zinc-800" />
+                    <span className={`h-2 bg-zinc-800 ${i === 1 ? "w-3/4" : i === 2 ? "w-1/2" : "w-2/3"}`} />
+                  </div>
+                ))}
+              </div>
             </div>
-          ))
+          </div>
+        ) : loadError && projects.length === 0 ? (
+          <div className="px-3 py-4 text-xs text-zinc-600">
+            <div className="mb-2 text-zinc-300">Dualith is still connecting.</div>
+            <div className="mb-3 leading-5">{loadError}</div>
+            <div className="mb-3 text-[11px] text-zinc-600">Socket: {socketStatus}</div>
+            <button
+              type="button"
+              onClick={() => void onRetry()}
+              className="border border-line-hard px-3 py-2 text-accent outline-none hover:bg-zinc-900 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+            >
+              Retry
+            </button>
+          </div>
         ) : projects.length === 0 ? (
           <div className="px-3 py-4 text-xs text-zinc-600">
             <div className="mb-2 text-zinc-300">No projects yet.</div>
@@ -1720,27 +1795,36 @@ function parseAgentChat(raw: string): TeamMessage[] {
 }
 
 function TeamBubble({ message, lead, teammate }: { message: TeamMessage; lead?: RunnerId; teammate?: RunnerId }) {
-  if (message.role === "task" || message.role === "note") {
-    const isNote = message.role === "note";
+  if (message.role === "task") {
+    // Quiet system note — just show who's working on what
     return (
-      <div className={`dualith-msg ${isNote ? "dualith-msg--agent" : "dualith-msg--user"}`}>
-        <span className="dualith-msg__role">{message.title}{message.timestamp && ` · ${timestampLabel(message.timestamp)}`}</span>
-        <div className={`dualith-msg__bubble whitespace-pre-wrap ${isNote ? "border-l-2 border-zinc-800 text-zinc-400" : "text-zinc-200"}`}>{message.body}</div>
+      <div className="mx-auto w-full py-1" style={{ maxWidth: "var(--dualith-chat-max)" }}>
+        <div className="text-[11px] text-muted">{message.body.split("\n")[0]}</div>
+      </div>
+    );
+  }
+  if (message.role === "note") {
+    return (
+      <div className="dualith-msg dualith-msg--agent">
+        <div className="dualith-msg__bubble whitespace-pre-wrap border-l-2 border-line-hard text-muted">{message.body}</div>
       </div>
     );
   }
   const isLead = message.role === "lead";
   const runner = isLead ? lead : teammate;
   const approved = /TEAMMATE:\s*APPROVED/i.test(message.body);
-  const accent = isLead ? "border-cyan-900/70" : approved ? "border-emerald-900/70" : "border-amber-900/70";
+  // Strip the verdict line from display — it's a machine signal, not prose
+  const displayBody = message.body.replace(/\nTEAMMATE:\s*(APPROVED|CHANGES REQUESTED)\s*$/i, "").trim();
+  const accent = approved ? "border-ok/40" : "border-line";
   return (
     <div className="dualith-msg dualith-msg--agent">
       <span className="dualith-msg__role">
         {runner && <RunnerMascot runner={runner} size={16} />}
-        {isLead ? "Lead" : "Teammate"}{runner ? ` · ${runnerLabels[runner]}` : ""}{message.timestamp && ` · ${timestampLabel(message.timestamp)}`}
+        {runner ? runnerLabels[runner] : isLead ? "Builder" : "Reviewer"}{message.timestamp && ` · ${timestampLabel(message.timestamp)}`}
+        {approved && <span className="ml-2 text-ok">✓ approved</span>}
       </span>
-      <div className={`dualith-msg__bubble border-l-2 ${accent} text-zinc-300`}>
-        <FormattedAgentOutput content={message.body} />
+      <div className={`dualith-msg__bubble border-l-2 ${accent}`}>
+        <FormattedAgentOutput content={displayBody} />
       </div>
     </div>
   );
@@ -1760,6 +1844,8 @@ function parseChatHistory(raw: string): ChatMessage[] {
     const [, timestamp = ""] = header.split(/\s+-\s+/);
     if (lower.startsWith("user query")) {
       messages.push({ role: "user", title: "You", timestamp, body, kind: "ask" });
+    } else if (lower.startsWith("team kickoff")) {
+      messages.push({ role: "user", title: "Team kickoff", timestamp, body, kind: "kickoff" });
     } else if (lower.startsWith("pipeline kickoff")) {
       messages.push({ role: "user", title: "Pipeline kickoff", timestamp, body, kind: "kickoff" });
     } else if (lower.startsWith("dualith answer")) {
@@ -1836,13 +1922,7 @@ function ConversationThread({ project, projectEvents, results }: { project: Proj
               </AgentBubble>
             )
           )}
-          {teamMessages.length > 0 && (
-            <div className="flex items-center gap-2 py-1 text-[10px] uppercase tracking-widest text-zinc-600">
-              <span className="h-px flex-1 bg-line-hard" />
-              Team dialogue
-              <span className="h-px flex-1 bg-line-hard" />
-            </div>
-          )}
+          {teamMessages.length > 0 && <div className="h-px bg-line" />}
           {teamMessages.map((message, index) => (
             <TeamBubble key={`t-${index}`} message={message} lead={lead} teammate={teammate} />
           ))}
@@ -1934,44 +2014,26 @@ function CommitPane({ commits }: { commits: string[] }) {
 }
 
 function ChatComposer({
-  project, onAgentAction, onPipelineStart, onPipelineStop, onTeamStart, onTeamStop, runnerHealth,
+  project, onSendChat, onStopChat, runnerHealth,
 }: {
   project: ProjectRecord | null;
-  onAgentAction: (projectName: string, agent: AgentMode, action: "start" | "stop", options?: AgentStartOptions) => Promise<void>;
-  onPipelineStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
-  onPipelineStop: (projectName: string) => Promise<void>;
-  onTeamStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
-  onTeamStop: (projectName: string) => Promise<void>;
+  onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[] }) => Promise<void>;
+  onStopChat: (projectName: string) => Promise<void>;
   runnerHealth: RunnerHealth;
 }) {
-  const [mode, setMode] = useState<AgentMode>("ask");
-  const [runner, setRunner] = useState<RunnerId>("codex");
-  const [modelChoice, setModelChoice] = useState(defaultModelByRunner.codex);
-  const [reasoning, setReasoning] = useState<ReasoningLevel>(defaultReasoningByRunner.codex);
+  const [runner, setRunner] = useState<RunnerId>("auto");
+  const [modelChoice, setModelChoice] = useState(defaultModelByRunner.auto);
+  const [reasoning, setReasoning] = useState<ReasoningLevel>(defaultReasoningByRunner.auto);
   const [runPrompt, setRunPrompt] = useState("");
-  const [autoLoop, setAutoLoop] = useState(false);
   const [pendingAction, setPendingAction] = useState<"start" | "stop" | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const activeRuns = project?.active_runs ?? [];
-  const teamRunning = Boolean(project?.team);
-  const pipelineRunning = Boolean(project?.pipeline);
-  const activeTeam = project?.team ?? null;
-  const selectedRun = activeRuns.find((run) => run.mode === mode);
-  const anyAgentRun = activeRuns[0];
-  const activeKind: "pipeline" | "team" | "agent" | null = pipelineRunning ? "pipeline" : teamRunning ? "team" : anyAgentRun ? "agent" : null;
-  const modeRunning = Boolean(activeKind || selectedRun);
-  const modelLabel = runner === "auto" ? "auto default" : modelChoice || "default";
-  // In Team mode the runner choice picks the LEAD; the other runner assists.
-  const teamLead = runner === "auto" ? "auto" : runner;
-  const teamTeammate = runner === "codex" ? "claude" : runner === "claude" ? "codex" : "auto";
-  const teamLeadModel = teamLead === "auto" ? "runner default" : modelChoice || defaultModelByRunner[teamLead] || "default";
-  const teamTeammateModel = teamTeammate === "auto" ? "runner default" : defaultModelByRunner[teamTeammate] || "default";
-  const teamLeadSummary = teamLead === "auto" ? "Auto lead / runner default" : `Lead: ${runnerLabels[teamLead]} / ${teamLeadModel}`;
-  const teamReviewSummary = teamTeammate === "auto" ? "Review: runner default" : `Review: ${runnerLabels[teamTeammate]} / ${teamTeammateModel}`;
-  const settingsLabel = mode === "team"
-    ? `${teamLead === "auto" ? "Auto lead" : runnerLabels[teamLead]} + ${teamTeammate === "auto" ? "review" : runnerLabels[teamTeammate]}`
-    : `${runnerLabels[runner]} / ${modelLabel}`;
+  const isRunning = Boolean(project?.pipeline) || Boolean(project?.team) || activeRuns.length > 0;
 
   useEffect(() => {
     setModelChoice(defaultModelByRunner[runner]);
@@ -1980,29 +2042,68 @@ function ChatComposer({
 
   useEffect(() => {
     setErrorText(null);
-  }, [mode, runner, modelChoice, reasoning, runPrompt, project?.name]);
+  }, [runner, modelChoice, reasoning, runPrompt, project?.name]);
 
-  const run = async (action: "start" | "stop") => {
-    if (!project) return;
-    setPendingAction(action);
+  const addFiles = useCallback((files: FileList | File[]) => {
+    const images = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (!images.length) return;
+    setAttachments((prev) => [
+      ...prev,
+      ...images.map((file) => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, name: file.name || "pasted-image.png", previewUrl: URL.createObjectURL(file), file })),
+    ]);
+  }, []);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => {
+      const hit = prev.find((a) => a.id === id);
+      if (hit) URL.revokeObjectURL(hit.previewUrl);
+      return prev.filter((a) => a.id !== id);
+    });
+  }, []);
+
+  const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((f): f is File => f !== null);
+    if (files.length) {
+      event.preventDefault();
+      addFiles(files);
+    }
+  };
+
+  const onDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragOver(false);
+    if (event.dataTransfer.files.length) addFiles(event.dataTransfer.files);
+  };
+
+  const uploadAttachments = async (projectName: string): Promise<string[]> => {
+    if (!attachments.length) return [];
+    const formData = new FormData();
+    for (const att of attachments) formData.append("files", att.file, att.name);
+    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/attachments`, { method: "POST", body: formData });
+    if (!response.ok) throw new Error(await readErrorMessage(response));
+    const data = (await response.json()) as { paths: string[] };
+    return data.paths ?? [];
+  };
+
+  const clearAttachments = () => {
+    setAttachments((prev) => {
+      prev.forEach((a) => URL.revokeObjectURL(a.previewUrl));
+      return [];
+    });
+  };
+
+  const send = async () => {
+    if (!project || (!runPrompt.trim() && attachments.length === 0)) return;
+    setPendingAction("start");
     setErrorText(null);
     try {
-      if (action === "stop") {
-        if (activeKind === "pipeline") {
-          await onPipelineStop(project.name);
-        } else if (activeKind === "team") {
-          await onTeamStop(project.name);
-        } else if (anyAgentRun) {
-          await onAgentAction(project.name, anyAgentRun.mode as AgentMode, "stop");
-        }
-      } else if (autoLoop && mode !== "ask" && mode !== "team") {
-        await onPipelineStart(project.name, { runner, model: modelChoice, reasoning, prompt: runPrompt });
-      } else if (mode === "team") {
-        await onTeamStart(project.name, { runner, model: modelChoice, reasoning, prompt: runPrompt });
-      } else {
-        await onAgentAction(project.name, mode, "start", { runner, model: modelChoice, reasoning, prompt: runPrompt });
-      }
-      if (action === "start") setRunPrompt("");
+      const attachmentPaths = await uploadAttachments(project.name);
+      await onSendChat(project.name, { runner, model: modelChoice, reasoning, prompt: runPrompt, attachmentPaths });
+      setRunPrompt("");
+      clearAttachments();
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : "unknown");
     } finally {
@@ -2010,126 +2111,152 @@ function ChatComposer({
     }
   };
 
-  const togglePipeline = async () => {
+  const stop = async () => {
     if (!project) return;
-    await (pipelineRunning ? onPipelineStop(project.name) : onPipelineStart(project.name, { runner, model: modelChoice, reasoning, prompt: runPrompt }));
+    setPendingAction("stop");
+    try {
+      await onStopChat(project.name);
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : "unknown");
+    } finally {
+      setPendingAction(null);
+    }
   };
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Enter" && !event.shiftKey && !modeRunning && project && (runPrompt.trim() || mode === "builder" || mode === "auditor")) {
+    if (event.key === "Enter" && !event.shiftKey && !isRunning && project && (runPrompt.trim() || attachments.length > 0)) {
       event.preventDefault();
-      void run("start");
+      void send();
     }
   };
 
   const chip = (active: boolean) =>
-    `rounded-full border px-2.5 py-1 text-[11px] outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${
-      active ? "border-cyan-700 bg-cyan-950/50 text-zinc-100" : "border-line-hard text-zinc-500 hover:text-zinc-300"
+    `rounded-full border px-2.5 py-1 text-[11px] font-medium outline-none transition-all focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${
+      active
+        ? "border-accent bg-accent text-white shadow-sm"
+        : "border-line text-muted hover:border-line-hard hover:text-text"
     }`;
-  const formClass = "h-8 min-w-0 rounded-md border border-line-hard bg-bg px-2 text-zinc-300 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-600";
-  const runLabel = autoLoop && mode !== "ask" && mode !== "team" ? "Run auto loop" : `Run ${modeLabels[mode]}`;
-  const stopLabel = activeKind === "pipeline" ? "Stop auto loop" : activeKind === "team" ? "Stop team run" : "Stop run";
-  const activeTeamDetail = activeTeam
-    ? `Team run is active: Lead ${runnerLabels[activeTeam.lead]} / ${activeTeam.lead_model || defaultModelByRunner[activeTeam.lead] || "default"}; Review ${runnerLabels[activeTeam.teammate]} / ${activeTeam.teammate_model || defaultModelByRunner[activeTeam.teammate] || "default"}.`
-    : "Team run is active.";
-  const activeDetail = activeKind === "pipeline"
-    ? "Auto loop is running."
-    : activeKind === "team"
-      ? activeTeamDetail
-      : anyAgentRun
-        ? `${modeLabels[anyAgentRun.mode]} is running.`
-        : "";
+  const formClass = "h-8 min-w-0 rounded-md border border-line bg-surface px-2 text-text outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:opacity-50";
 
   return (
     <section className="dualith-composer-shell shrink-0 px-4 pb-4 pt-2">
       <div className="mx-auto w-full" style={{ maxWidth: "var(--dualith-chat-max)" }}>
-        <div className="dualith-composer relative px-2 pb-2 pt-2">
+        <div
+          className={`dualith-composer relative px-2 pb-2 pt-2 ${dragOver ? "ring-1 ring-accent/70" : ""}`}
+          onDragOver={(event) => { if (!isRunning) { event.preventDefault(); setDragOver(true); } }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={onDrop}
+        >
+          {attachments.length > 0 && (
+            <div className="mb-1.5 flex flex-wrap gap-2 px-1">
+              {attachments.map((att) => (
+                <div key={att.id} className="group relative h-14 w-14 overflow-hidden rounded-md border border-line-hard bg-bg">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={att.previewUrl} alt={att.name} className="h-full w-full object-cover" />
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(att.id)}
+                    className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-black/70 text-[10px] text-zinc-200 opacity-0 transition-opacity group-hover:opacity-100"
+                    title="Remove"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(event) => { if (event.target.files) addFiles(event.target.files); event.target.value = ""; }}
+          />
           <textarea
             id="agent-prompt"
             value={runPrompt}
-            disabled={pendingAction !== null || modeRunning}
+            disabled={pendingAction !== null || isRunning}
             onChange={(event) => setRunPrompt(event.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={project ? modePromptPlaceholders[mode] : "Select a project first"}
+            onPaste={onPaste}
+            placeholder={project ? "Describe the outcome..." : "Select a project first"}
             rows={1}
-            className="block max-h-44 min-h-[2.5rem] w-full resize-none bg-transparent px-2 py-2 leading-6 text-zinc-200 outline-none placeholder:text-zinc-600"
+            className="block max-h-44 min-h-[2.5rem] w-full resize-none bg-transparent px-2 py-2 leading-6 text-text outline-none placeholder:text-muted"
             spellCheck={false}
           />
           <div className="flex flex-wrap items-center justify-between gap-2 px-1">
             <div className="flex flex-wrap items-center gap-1.5">
-              <label className="flex items-center gap-2 rounded-full border border-line-hard bg-bg px-2.5 py-1 text-[11px] text-zinc-400">
-                <span className="uppercase tracking-widest text-zinc-600">Workflow</span>
-                <select
-                  value={mode}
-                  disabled={pendingAction !== null || modeRunning}
-                  onChange={(event) => setMode(event.target.value as AgentMode)}
-                  className="bg-transparent text-zinc-100 outline-none"
-                >
-                  {agentModes.map((option) => (
-                    <option key={option.id} value={option.id}>{option.label}</option>
-                  ))}
-                </select>
-              </label>
               <button
                 type="button"
-                disabled={pendingAction !== null || modeRunning || mode === "ask" || mode === "team"}
-                onClick={() => setAutoLoop((value) => !value)}
-                className={`${chip(autoLoop && mode !== "ask" && mode !== "team")} inline-flex items-center gap-1.5`}
-                title="Run builder and auditor in an automatic loop"
+                disabled={pendingAction !== null || isRunning || !project}
+                onClick={() => fileInputRef.current?.click()}
+                className={`${chip(false)} inline-flex items-center gap-1`}
+                title="Attach images (or paste / drag-drop)"
               >
-                <span className={`h-1.5 w-1.5 ${autoLoop && mode !== "ask" && mode !== "team" ? "bg-warn" : "border border-zinc-700"}`} />
-                Auto loop
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+                {attachments.length > 0 && <span>{attachments.length}</span>}
               </button>
-              <span className="mx-0.5 h-4 w-px bg-line-hard" />
-              {runners.map((option) => {
-                const health = option.id !== "auto" ? runnerHealth[option.id] : null;
-                const dot = !health ? null : health.ready ? "bg-ok" : "bg-danger";
-                const title = health ? (health.ready ? health.version : health.error || "not found") : undefined;
-                return (
-                  <button key={option.id} type="button" disabled={pendingAction !== null || modeRunning} onClick={() => setRunner(option.id)} className={`${chip(runner === option.id)} inline-flex items-center gap-1.5`} title={title}>
-                    <RunnerMascot runner={option.id} size={14} />
-                    {dot && <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} />}
-                    <span>{option.label}</span>
-                  </button>
-                );
-              })}
-              <button type="button" onClick={() => setSettingsOpen((v) => !v)} className={`${chip(settingsOpen)} inline-flex items-center gap-1`} title="Run settings">
-                {settingsLabel}
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-bg px-2.5 py-1 text-[11px] font-medium text-accent">
+                <RunnerMascot runner={runner} size={14} />
+                {runner === "auto" ? "Auto" : runnerLabels[runner]}
+              </span>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen((v) => !v)}
+                className={`${chip(settingsOpen)} inline-flex items-center gap-1`}
+                title={`Run settings - ${runner === "auto" ? "auto" : `${runnerLabels[runner]} / ${modelChoice || "default"}`}`}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </svg>
               </button>
             </div>
             <div className="flex items-center gap-1.5">
-              {false && mode !== "team" && (
+              {isRunning ? (
                 <button
                   type="button"
-                  disabled={!project}
-                  onClick={() => void togglePipeline()}
-                  className={`rounded-full border px-3 py-1 text-[11px] outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-700 ${pipelineRunning ? "border-amber-700 text-warn hover:bg-amber-950/30" : "border-line-hard text-zinc-500 hover:text-zinc-300"}`}
-                  title="Autonomous build→audit loop"
+                  disabled={pendingAction !== null}
+                  onClick={() => void stop()}
+                  className="h-8 rounded-full bg-amber-900/40 px-4 text-[12px] font-medium text-warn outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
                 >
-                  {pipelineRunning ? "Stop loop" : "Pipeline"}
+                  {pendingAction === "stop" ? "..." : "Stop"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={!project || pendingAction !== null || (!runPrompt.trim() && attachments.length === 0)}
+                  onClick={() => void send()}
+                  className="h-8 rounded-full bg-accent/90 px-4 text-[12px] font-medium text-bg outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
+                >
+                  {pendingAction === "start" ? "..." : "Send"}
                 </button>
               )}
-              <button
-                type="button"
-                disabled={!project || pendingAction !== null || (!modeRunning && !runPrompt.trim() && (mode === "ask" || mode === "team"))}
-                onClick={() => void run(modeRunning ? "stop" : "start")}
-                className={`h-8 rounded-full px-4 text-[12px] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40 ${modeRunning ? "bg-amber-900/40 text-warn" : "bg-accent/90 text-bg hover:bg-accent"}`}
-              >
-                {pendingAction ? "..." : modeRunning ? stopLabel : runLabel}
-              </button>
             </div>
           </div>
 
           {settingsOpen && (
-            <div className="absolute bottom-full left-2 z-10 mb-2 w-72 rounded-md border border-line bg-surface p-3 shadow-xl shadow-black/40">
-              <div className="mb-2 text-[10px] uppercase tracking-widest text-zinc-500">Run settings</div>
-              <div className="grid grid-cols-2 gap-2">
-                <select value={modelChoice} disabled={modeRunning || runner === "auto"} onChange={(event) => setModelChoice(event.target.value)} className={formClass}>
+            <div className="absolute bottom-full left-2 z-10 mb-2 w-72 rounded-md border border-line bg-surface p-3 shadow-xl shadow-black/20">
+              <div className="mb-2 text-[10px] uppercase tracking-widest text-muted">Run settings</div>
+              <div className="grid grid-cols-3 gap-2">
+                <select value={runner} disabled={isRunning} onChange={(event) => setRunner(event.target.value as RunnerId)} className={formClass}>
+                  {runners.map((option) => {
+                    const health = option.id !== "auto" ? runnerHealth[option.id] : null;
+                    const suffix = health && !health.ready ? " (off)" : "";
+                    return (
+                      <option key={option.id} value={option.id}>{option.label}{suffix}</option>
+                    );
+                  })}
+                </select>
+                <select value={modelChoice} disabled={isRunning || runner === "auto"} onChange={(event) => setModelChoice(event.target.value)} className={formClass}>
                   {modelChoices[runner].map((option) => (
                     <option key={`${runner}-${option.value}`} value={option.value}>{option.label}</option>
                   ))}
                 </select>
-                <select value={reasoning} disabled={modeRunning} onChange={(event) => setReasoning(event.target.value as ReasoningLevel)} className={formClass}>
+                <select value={reasoning} disabled={isRunning} onChange={(event) => setReasoning(event.target.value as ReasoningLevel)} className={formClass}>
                   {reasoningChoices.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
@@ -2138,17 +2265,15 @@ function ChatComposer({
             </div>
           )}
         </div>
-        <div className="mt-1.5 px-2 text-[10px] text-zinc-600">
+        <div className="mt-1.5 px-2 text-[10px] text-muted">
           {errorText ? (
             <span className="text-danger">Error: {errorText}</span>
-          ) : activeDetail ? (
-            <span className="text-warn">{activeDetail} The Stop button ends the active work.</span>
-          ) : mode === "team" ? (
-            <span className="text-accent">{teamLeadSummary}; {teamReviewSummary}; Enter to start</span>
-          ) : autoLoop && mode !== "ask" ? (
-            <span className="text-warn">Auto loop runs build and review until it passes or you stop it.</span>
+          ) : isRunning ? (
+            <span className="text-warn">Working - hit Stop to cancel.</span>
+          ) : attachments.length > 0 ? (
+            <span className="text-accent">{attachments.length} image{attachments.length > 1 ? "s" : ""} attached{runner === "codex" ? " - Claude reads images more reliably" : ""} - Enter to send</span>
           ) : (
-            <>Enter to send · Shift+Enter for newline</>
+            <>Enter to send - Shift+Enter for newline - paste or drag an image</>
           )}
         </div>
       </div>
@@ -2384,7 +2509,7 @@ function ProjectPreviewPanel({
   const status = server?.status ?? "stopped";
   const running = status === "running" || status === "starting";
   const url = server?.url ?? "";
-  const reserved = server?.reserved_ports?.join(", ") || "3000, 4000";
+  const reserved = server?.reserved_ports?.join(", ") || defaultDualithReservedPorts.join(", ");
   const canToggleInline = running && url && !mobileActive;
 
   useEffect(() => {
@@ -2579,7 +2704,7 @@ function TeamPane({ project, onStart, onStop }: {
         <p className="mb-3 leading-relaxed text-zinc-500">
           {team
             ? `${runnerLabels[team.lead]} / ${leadModel} leads; ${runnerLabels[team.teammate]} / ${teammateModel} reviews; ${team.step || "running"}${team.round ? `; round ${team.round}` : ""}`
-            : "Two agents collaborate: a lead implements, a teammate reviews each round until sign-off. Pick the lead with the runner chips."}
+            : "Two agents collaborate: a lead implements and a teammate reviews each round until sign-off."}
         </p>
         {errorText && <p className="mb-2 text-[11px] text-danger">Error: {errorText}</p>}
         <button
@@ -2620,13 +2745,15 @@ function MemoryPane({ project }: { project: ProjectRecord | null }) {
   );
 }
 
-function DetailsDrawer({ project, onClose, onPipelineStart, onPipelineStop, onTeamStart, onTeamStop }: {
+function DetailsDrawer({ project, appStatus, onClose, onPipelineStart, onPipelineStop, onTeamStart, onTeamStop, onDevServerAction }: {
   project: ProjectRecord | null;
+  appStatus: AppStatus;
   onClose: () => void;
   onPipelineStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
   onPipelineStop: (projectName: string) => Promise<void>;
   onTeamStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
   onTeamStop: (projectName: string) => Promise<void>;
+  onDevServerAction: (projectName: string, action: DevServerAction) => Promise<void>;
 }) {
   return (
     <>
@@ -2637,6 +2764,7 @@ function DetailsDrawer({ project, onClose, onPipelineStart, onPipelineStop, onTe
           <button type="button" onClick={onClose} className="border border-line-hard px-2 py-0.5 text-[10px] text-zinc-500 outline-none hover:text-zinc-200 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60">Close</button>
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
+          <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive />
           <TeamPane project={project} onStart={onTeamStart} onStop={onTeamStop} />
           <PipelinePane project={project} onStart={onPipelineStart} onStop={onPipelineStop} />
           <ReviewPane project={project} />
@@ -2649,13 +2777,15 @@ function DetailsDrawer({ project, onClose, onPipelineStart, onPipelineStop, onTe
 }
 
 function WorkspaceColumn({
-  project, projectEvents, results, appStatus, mobileView, onAgentAction, onPipelineStart, onPipelineStop, onTeamStart, onTeamStop, onDevServerAction, onHumanAnswer, onClearChat, onClearAgentChat, runnerHealth,
+  project, projectEvents, results, appStatus, mobileView, onSendChat, onStopChat, onAgentAction, onPipelineStart, onPipelineStop, onTeamStart, onTeamStop, onDevServerAction, onHumanAnswer, onClearChat, onClearAgentChat, runnerHealth,
 }: {
   project: ProjectRecord | null;
   projectEvents: ConsoleEntry[];
   results: AgentResult[];
   appStatus: AppStatus;
   mobileView: MobileView;
+  onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[] }) => Promise<void>;
+  onStopChat: (projectName: string) => Promise<void>;
   onAgentAction: (projectName: string, agent: AgentMode, action: "start" | "stop", options?: AgentStartOptions) => Promise<void>;
   onPipelineStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
   onPipelineStop: (projectName: string) => Promise<void>;
@@ -2704,7 +2834,6 @@ function WorkspaceColumn({
           </button>
         </div>
       </div>
-      <ActivityFeed project={project} projectEvents={projectEvents} results={results} />
       <div className={`dualith-mobile-pane dualith-mobile-pane--preview ${mobileView === "preview" ? "is-mobile-active" : ""}`}>
         <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive={mobileView === "preview"} />
       </div>
@@ -2713,10 +2842,10 @@ function WorkspaceColumn({
         {blocked && project && <HumanInputPane project={project} onSubmit={onHumanAnswer} />}
       </div>
       <div className={`dualith-mobile-composer-pane ${mobileView === "chat" ? "is-mobile-active" : ""}`}>
-        <ChatComposer project={project} onAgentAction={onAgentAction} onPipelineStart={onPipelineStart} onPipelineStop={onPipelineStop} onTeamStart={onTeamStart} onTeamStop={onTeamStop} runnerHealth={runnerHealth} />
+        <ChatComposer project={project} onSendChat={onSendChat} onStopChat={onStopChat} runnerHealth={runnerHealth} />
       </div>
       {detailsOpen && (
-        <DetailsDrawer project={project} onClose={() => setDetailsOpen(false)} onPipelineStart={onPipelineStart} onPipelineStop={onPipelineStop} onTeamStart={onTeamStart} onTeamStop={onTeamStop} />
+        <DetailsDrawer project={project} appStatus={appStatus} onClose={() => setDetailsOpen(false)} onPipelineStart={onPipelineStart} onPipelineStop={onPipelineStop} onTeamStart={onTeamStart} onTeamStop={onTeamStop} onDevServerAction={onDevServerAction} />
       )}
     </main>
   );
@@ -2785,6 +2914,18 @@ function quotaValueFromInput(value: string, max = 2_000_000_000) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
   return Math.min(parsed, max);
+}
+
+function normalizeRunnerPolicy(value: unknown): RunnerPolicyId {
+  return runnerPolicies.some((policy) => policy.id === value) ? value as RunnerPolicyId : "codex-heavy";
+}
+
+function normalizeQuotaSettings(settings: Partial<QuotaSettings> | null | undefined): QuotaSettings {
+  return {
+    ...emptyQuotaSettings,
+    ...(settings ?? {}),
+    runner_policy: normalizeRunnerPolicy(settings?.runner_policy),
+  };
 }
 
 function QuotaLine({ label, period }: { label: string; period: QuotaPeriod }) {
@@ -2921,16 +3062,21 @@ function QuotaEditor({
   quota: QuotaSnapshot;
   onQuotaSave: (settings: QuotaSettings) => Promise<void>;
 }) {
-  const [settings, setSettings] = useState<QuotaSettings>(quota.settings);
-  const [status, setStatus] = useState("Fallback for unparsed /status");
+  const [settings, setSettings] = useState<QuotaSettings>(() => normalizeQuotaSettings(quota.settings));
+  const [status, setStatus] = useState("Auto runner policy");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    setSettings(quota.settings);
+    setSettings(normalizeQuotaSettings(quota.settings));
   }, [quota.settings]);
 
-  const updateSetting = (key: keyof QuotaSettings, value: number) => {
+  const updateSetting = (key: Exclude<keyof QuotaSettings, "runner_policy">, value: number) => {
     setSettings((current) => ({ ...current, [key]: value }));
+    setStatus("Unsaved");
+  };
+
+  const updateRunnerPolicy = (value: string) => {
+    setSettings((current) => ({ ...current, runner_policy: normalizeRunnerPolicy(value) }));
     setStatus("Unsaved");
   };
 
@@ -2950,6 +3096,23 @@ function QuotaEditor({
 
   return (
     <form onSubmit={save} className="border-t border-line-hard">
+      <div className="border-b border-line-hard px-3 py-2">
+        <label className="grid min-w-0 grid-cols-[88px_1fr] items-center gap-2">
+          <span className="truncate text-[10px] uppercase tracking-widest text-zinc-700">Runner policy</span>
+          <select
+            value={settings.runner_policy}
+            onChange={(event) => updateRunnerPolicy(event.target.value)}
+            className="h-7 min-w-0 border border-line-hard bg-bg px-2 text-xs text-zinc-300 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+          >
+            {runnerPolicies.map((policy) => (
+              <option key={policy.id} value={policy.id}>{policy.label}</option>
+            ))}
+          </select>
+        </label>
+        <div className="mt-1 truncate text-[10px] text-zinc-600">
+          {runnerPolicyDescriptions[settings.runner_policy]}
+        </div>
+      </div>
       <div className="grid grid-cols-2 border-b border-line-hard">
         <QuotaInput
           label="Fallback Codex"
@@ -2982,7 +3145,7 @@ function QuotaEditor({
           disabled={saving}
           className="border-l border-line px-3 py-1.5 text-accent outline-none hover:bg-zinc-900 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-700"
         >
-          Save fallback
+          Save settings
         </button>
       </div>
     </form>
@@ -3093,11 +3256,16 @@ function ConfigTab({
   quota: QuotaSnapshot;
   onQuotaSave: (settings: QuotaSettings) => Promise<void>;
 }) {
+  const runnerPolicy = normalizeRunnerPolicy(quota.settings.runner_policy);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
       {/* Quota guard progress lines */}
       <div className="border-b border-line-hard px-3 py-2.5">
-        <div className="mb-1.5 text-[10px] uppercase tracking-widest text-zinc-600">Token limits</div>
+        <div className="mb-1.5 flex items-baseline justify-between gap-2 text-[10px]">
+          <span className="uppercase tracking-widest text-zinc-600">Token limits</span>
+          <span className="truncate text-zinc-500">{runnerPolicyLabels[runnerPolicy]}</span>
+        </div>
         <div className="space-y-2">
           <QuotaLine label="Codex monthly" period={quota.codex.monthly} />
           <QuotaLine label="Claude 5-hour" period={quota.claude.five_hour} />
@@ -3243,12 +3411,12 @@ function CommandColumn({
 }
 
 function useAppearance() {
-  const [theme, setTheme] = useState<ThemeId>("midnight");
+  const [theme, setTheme] = useState<ThemeId>("daylight");
   const [density, setDensity] = useState<DensityId>("comfortable");
   const [appearanceLoaded, setAppearanceLoaded] = useState(false);
 
   useEffect(() => {
-    const savedTheme = (localStorage.getItem(THEME_KEY) as ThemeId | null) ?? "midnight";
+    const savedTheme = (localStorage.getItem(THEME_KEY) as ThemeId | null) ?? "daylight";
     const savedDensity = (localStorage.getItem(DENSITY_KEY) as DensityId | null) ?? "comfortable";
     setTheme(savedTheme);
     setDensity(savedDensity);
@@ -3335,22 +3503,6 @@ function SettingsMenu({ theme, setTheme, density, setDensity }: {
   );
 }
 
-// Root
-
-function DualithBootShell() {
-  return (
-    <div className="dualith-boot-shell bg-bg text-zinc-300">
-      <div className="dualith-boot-card">
-        <DualithLogo />
-        <div>
-          <div className="text-xs font-medium uppercase tracking-widest text-zinc-300">Starting Dualith</div>
-          <div className="mt-2 text-xs text-zinc-600">Preparing the command center...</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function DualithApp() {
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
@@ -3366,10 +3518,12 @@ function DualithApp() {
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupMode, setSetupMode] = useState<SetupMode>("new");
   const [systemCollapsed, setSystemCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
   const [mobileView, setMobileView] = useState<MobileView>("chat");
   const [socketStatus, setSocketStatus] = useState("Connecting...");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const { theme, setTheme, density, setDensity } = useAppearance();
 
   const applySnapshot = useCallback((snapshot: SnapshotPayload, preferredName?: string) => {
@@ -3384,6 +3538,8 @@ function DualithApp() {
     setAppStatus(snapshot.app ?? emptyAppStatus);
     setProjectsRoot(snapshot.projects_root || defaultProjectsRoot);
     setMemoryPath(snapshot.memory_path || "");
+    setLoading(false);
+    setLoadError("");
     setSelectedName((current) => {
       if (preferredName && sorted.some((p) => p.name === preferredName)) return preferredName;
       if (current && sorted.some((p) => p.name === current)) return current;
@@ -3393,11 +3549,23 @@ function DualithApp() {
 
   const refreshProjects = useCallback(async (preferredName?: string) => {
     const response = await fetch(`${apiBase}/api/projects`, { cache: "no-store" });
-    if (response.ok) applySnapshot(await response.json(), preferredName);
+    if (!response.ok) throw new Error(await readErrorMessage(response));
+    applySnapshot(await response.json(), preferredName);
   }, [applySnapshot]);
 
   useEffect(() => {
-    refreshProjects().catch(() => undefined).finally(() => setLoading(false));
+    let cancelled = false;
+    refreshProjects()
+      .catch((error) => {
+        if (cancelled) return;
+        setLoadError(error instanceof Error ? error.message : "The local API did not answer yet.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [refreshProjects]);
 
   useEffect(() => {
@@ -3431,10 +3599,12 @@ function DualithApp() {
   }, [applySnapshot]);
 
   const runAgentAction = useCallback(async (projectName: string, agent: AgentMode, action: "start" | "stop", options?: AgentStartOptions) => {
+    const opts = options ?? { runner: "codex" as RunnerId, model: defaultModelByRunner.codex, reasoning: defaultReasoningByRunner.codex, prompt: "" };
+    const body = { runner: opts.runner, model: opts.model, reasoning: opts.reasoning, prompt: opts.prompt, attachment_paths: opts.attachmentPaths ?? [] };
     const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/agents/${agent}/${action}`, {
       method: "POST",
       headers: action === "start" ? { "Content-Type": "application/json" } : undefined,
-      body: action === "start" ? JSON.stringify(options ?? { runner: "codex", model: defaultModelByRunner.codex, reasoning: defaultReasoningByRunner.codex, prompt: "" }) : undefined,
+      body: action === "start" ? JSON.stringify(body) : undefined,
     });
     if (!response.ok) throw new Error(await readErrorMessage(response));
     applySnapshot(await response.json(), projectName);
@@ -3462,6 +3632,23 @@ function DualithApp() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ answer }),
     });
+    if (!response.ok) throw new Error(await readErrorMessage(response));
+    applySnapshot(await response.json(), projectName);
+  }, [applySnapshot]);
+
+  const sendChat = useCallback(async (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[] }) => {
+    const body = { runner: options.runner, model: options.model, reasoning: options.reasoning, prompt: options.prompt, attachment_paths: options.attachmentPaths ?? [] };
+    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error(await readErrorMessage(response));
+    applySnapshot(await response.json(), projectName);
+  }, [applySnapshot]);
+
+  const stopChat = useCallback(async (projectName: string) => {
+    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat/stop`, { method: "POST" });
     if (!response.ok) throw new Error(await readErrorMessage(response));
     applySnapshot(await response.json(), projectName);
   }, [applySnapshot]);
@@ -3560,14 +3747,24 @@ function DualithApp() {
 
   return (
     <div className="dualith-app-shell h-screen w-screen overflow-hidden bg-bg text-zinc-300">
-      <header className={`dualith-topbar border-b border-line text-xs ${systemCollapsed ? "dualith-topbar--system-collapsed" : ""}`}>
-        <div className="flex items-center border-r border-line px-3">
-          <DualithLogo />
+      <header className={`dualith-topbar border-b border-line text-xs ${sidebarCollapsed ? "dualith-topbar--sidebar-collapsed" : ""}`}>
+        <div className="flex items-center gap-2 border-r border-line px-3 overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setSidebarCollapsed((v) => !v)}
+            className="dualith-desktop-only flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted outline-none hover:bg-line/40 hover:text-text focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+            title={sidebarCollapsed ? "Show projects" : "Hide projects"}
+            aria-label="Toggle projects sidebar"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="2" /><line x1="9" y1="4" x2="9" y2="20" />
+            </svg>
+          </button>
+          {!sidebarCollapsed && <DualithLogo />}
         </div>
         <div className="flex min-w-0 items-center justify-between gap-3 border-r border-line px-3 text-zinc-500">
           <span className="truncate">
-            {selectedProject ? selectedProject.location : `Projects: ${projectsRoot}`} | Memory: {memoryPath || ".dualith"}
-            {appStatus.phone_url ? ` | Phone: ${appStatus.phone_url}` : ""}
+            {selectedProject ? selectedProject.name : "No project selected"}
           </span>
           <div className="dualith-mobile-actions">
             <button type="button" onClick={() => openMobileView("projects")} className="border border-line-hard px-2 py-1 text-[10px] text-accent">Projects</button>
@@ -3585,6 +3782,14 @@ function DualithApp() {
             />
             <span className="text-xs">{socketStatus}</span>
           </div>
+          <button
+            type="button"
+            onClick={() => setMobilePanel((p) => (p === "system" ? null : "system"))}
+            className="dualith-desktop-only border border-line-hard px-2 py-1 text-[10px] text-accent outline-none transition-colors hover:bg-cyan-950/30 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+            title="System: console, usage, quota"
+          >
+            System
+          </button>
           <SettingsMenu theme={theme} setTheme={setTheme} density={density} setDensity={setDensity} />
         </div>
       </header>
@@ -3596,12 +3801,15 @@ function DualithApp() {
           onClick={() => openMobileView("chat")}
         />
       )}
-      <div className={`dualith-main-grid ${systemCollapsed ? "dualith-main-grid--system-collapsed" : ""}`} data-mobile-view={mobileView}>
+      <div className={`dualith-main-grid ${sidebarCollapsed ? "dualith-main-grid--sidebar-collapsed" : ""}`} data-mobile-view={mobileView}>
         <div className={`dualith-rail-slot dualith-project-slot ${mobilePanel === "projects" ? "is-open" : ""}`}>
           <RegistryColumn
             projects={projects}
             selectedName={selectedName}
             loading={loading}
+            loadError={loadError}
+            socketStatus={socketStatus}
+            onRetry={refreshProjects}
             onSelect={(name) => {
               setSelectedName(name);
               openMobileView("chat");
@@ -3617,6 +3825,8 @@ function DualithApp() {
           results={results}
           appStatus={appStatus}
           mobileView={mobileView}
+          onSendChat={sendChat}
+          onStopChat={stopChat}
           onAgentAction={runAgentAction}
           onPipelineStart={startPipeline}
           onPipelineStop={stopPipeline}
@@ -3669,11 +3879,5 @@ function DualithApp() {
 }
 
 export default function Home() {
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  return mounted ? <DualithApp /> : <DualithBootShell />;
+  return <DualithApp />;
 }

@@ -83,5 +83,5 @@ import uvicorn
 
 if __name__ == "__main__":
     host = os.environ.get("DUALITH_API_HOST", "127.0.0.1")
-    port = int(os.environ.get("DUALITH_API_PORT", "4000"))
+    port = int(os.environ.get("DUALITH_API_PORT", "4200"))
     uvicorn.run("backend.app.main:app", host=host, port=port)

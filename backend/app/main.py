@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import logging.handlers
 import os
 import re
 import glob as glob_module
@@ -27,19 +29,69 @@ from watchdog.observers import Observer
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DUALITH_DIR = ROOT_DIR / ".dualith"
 REGISTRY_PATH = DUALITH_DIR / "projects.json"
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+def _setup_logger() -> logging.Logger:
+    _log_dir = DUALITH_DIR / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+
+    _logger = logging.getLogger("dualith")
+    _logger.setLevel(logging.DEBUG)
+
+    if _logger.handlers:
+        return _logger  # already configured (e.g. on hot-reload)
+
+    # Rotating file — JSON lines, 5 MB × 5 files
+    _file_handler = logging.handlers.RotatingFileHandler(
+        _log_dir / "dualith.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    _file_handler.setLevel(logging.DEBUG)
+
+    class _JsonFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            payload: dict[str, Any] = {
+                "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+                "level": record.levelname,
+                "msg": record.getMessage(),
+            }
+            if record.exc_info:
+                payload["exc"] = self.formatException(record.exc_info)
+            extra = {k: v for k, v in record.__dict__.items()
+                     if k not in logging.LogRecord.__dict__ and not k.startswith("_")}
+            if extra:
+                payload.update(extra)
+            return json.dumps(payload, default=str)
+
+    _file_handler.setFormatter(_JsonFormatter())
+
+    # Console — human-readable, INFO+ only
+    _console_handler = logging.StreamHandler()
+    _console_handler.setLevel(logging.INFO)
+    _console_handler.setFormatter(logging.Formatter(
+        "\033[36m[dualith]\033[0m %(levelname)-8s %(message)s"
+    ))
+
+    _logger.addHandler(_file_handler)
+    _logger.addHandler(_console_handler)
+    return _logger
+
+log = _setup_logger()
+# ─────────────────────────────────────────────────────────────────────────────
 PROJECTS_ROOT = Path(os.environ.get("DUALITH_PROJECTS_ROOT", ROOT_DIR.parent)).expanduser().resolve()
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 SAFE_MODEL = re.compile(r"^[A-Za-z0-9._:@/+ -]+$")
 SAFE_REASONING = {"low", "medium", "high", "extra-high"}
 CODE_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".py", ".html", ".css", ".md"}
 SKIP_IMPORT_DIRS = {".git", "node_modules", ".next", "dist", "build", ".venv", "__pycache__", ".cache", ".turbo"}
+CHECKPOINT_EXCLUDE_PATHS = (*sorted(SKIP_IMPORT_DIRS - {".git"}), ".dualith", ".dualith-result")
+CHECKPOINT_MODES = {"builder", "lead"}
 USAGE_RUN_LIMIT = 500
 STATUS_OUTPUT_LIMIT = 8_000
 STATUS_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_STATUS_TIMEOUT_SECONDS", "15"))
 RESULT_LIMIT = 100
 RESULT_CONTENT_MAX_CHARS = 32_000
-DUALITH_WEB_PORT = int(os.environ.get("DUALITH_WEB_PORT", "3000"))
-DUALITH_API_PORT = int(os.environ.get("DUALITH_API_PORT", "4000"))
+DUALITH_WEB_PORT = int(os.environ.get("DUALITH_WEB_PORT", "3200"))
+DUALITH_API_PORT = int(os.environ.get("DUALITH_API_PORT", "4200"))
 DUALITH_WEB_HOST = os.environ.get("DUALITH_WEB_HOST", "127.0.0.1")
 DUALITH_API_HOST = os.environ.get("DUALITH_API_HOST", "127.0.0.1")
 PROJECT_PREVIEW_PORT_START = int(os.environ.get("DUALITH_PROJECT_PREVIEW_PORT_START", "5173"))
@@ -54,11 +106,38 @@ DEFAULT_RUNNER_REASONING = {
     "claude": "medium",
 }
 DEFAULT_QUOTA_SETTINGS = {
+    "runner_policy": "codex-heavy",
     "reserve_percent": 10,
     "codex_monthly_tokens": 0,
     "claude_five_hour_tokens": 0,
     "claude_weekly_tokens": 0,
 }
+RUNNER_POLICIES = {
+    "auto": {
+        "label": "Auto",
+        "description": "Use the agent registry defaults: implementation prefers Codex, review prefers Claude.",
+    },
+    "codex-heavy": {
+        "label": "Codex-heavy",
+        "description": "Use Codex as the main implementation runner and Claude as reviewer when available.",
+    },
+    "claude-heavy": {
+        "label": "Claude-heavy",
+        "description": "Use Claude as the main implementation runner and Codex as reviewer when available.",
+    },
+    "balanced": {
+        "label": "Balanced",
+        "description": "Pick the runner with the most quota headroom, then pair it with the other runner.",
+    },
+}
+QUOTA_INTEGER_SETTINGS = {
+    "reserve_percent",
+    "codex_monthly_tokens",
+    "claude_five_hour_tokens",
+    "claude_weekly_tokens",
+}
+IMPLEMENTATION_AGENTS = {"ask", "builder", "lead", "team"}
+REVIEW_AGENTS = {"auditor", "teammate"}
 DEFAULT_STATUS_CACHE = {
     "codex": {
         "checked_at": "",
@@ -94,15 +173,112 @@ runner_health: dict[str, dict[str, Any]] = {
     "claude": {"ready": False, "version": "", "error": ""},
 }
 
-RUN_MODES = {
-    "ask": {"label": "Ask"},
-    "builder": {"label": "Build"},
-    "auditor": {"label": "Audit"},
-    "team": {"label": "Team"},
+# Default upper bound on builder/auditor iterations for the autonomous pipeline.
+PIPELINE_MAX_ITERATIONS = int(os.environ.get("DUALITH_PIPELINE_MAX_ITERATIONS", "6"))
+
+# Default upper bound on lead/teammate rounds for the multi-agent Team mode.
+TEAM_MAX_ROUNDS = int(os.environ.get("DUALITH_TEAM_MAX_ROUNDS", "4"))
+
+AGENT_REGISTRY: dict[str, dict[str, Any]] = {
+    "ask": {
+        "label": "Ask",
+        "role": "conversation",
+        "capabilities": ["repo-inspection", "discussion"],
+        "prompt": "ask",
+        "sandbox": "read-only",
+        "default_runner": "auto",
+    },
+    "builder": {
+        "label": "Build",
+        "role": "implementation",
+        "capabilities": ["code-editing", "tests", "project-build"],
+        "prompt": "builder",
+        "sandbox": "workspace-write",
+        "default_runner": "codex",
+    },
+    "auditor": {
+        "label": "Audit",
+        "role": "review",
+        "capabilities": ["diff-review", "spec-checking", "risk-analysis"],
+        "prompt": "auditor",
+        "sandbox": "read-only",
+        "default_runner": "claude",
+    },
+    "team": {
+        "label": "Team",
+        "role": "workflow",
+        "capabilities": ["automatic-routing", "implementation", "review"],
+        "prompt": "",
+        "sandbox": "orchestrated",
+        "default_runner": "auto",
+    },
     # lead/teammate are pseudo-agents used internally by the Team orchestrator.
-    "lead": {"label": "Lead"},
-    "teammate": {"label": "Teammate"},
+    "lead": {
+        "label": "Lead",
+        "role": "implementation-lead",
+        "capabilities": ["planning", "code-editing", "tests"],
+        "prompt": "lead",
+        "sandbox": "workspace-write",
+        "default_runner": "codex",
+    },
+    "teammate": {
+        "label": "Teammate",
+        "role": "reviewer",
+        "capabilities": ["review", "spec-checking", "risk-analysis"],
+        "prompt": "teammate",
+        "sandbox": "read-only",
+        "default_runner": "claude",
+    },
 }
+
+ORCHESTRATION_WORKFLOWS: dict[str, dict[str, Any]] = {
+    "ask": {
+        "label": "Ask",
+        "kind": "single",
+        "agent": "ask",
+        "description": "Read-only project conversation.",
+    },
+    "build-only": {
+        "label": "Build",
+        "kind": "single",
+        "agent": "builder",
+        "description": "Single implementation pass.",
+    },
+    "review-only": {
+        "label": "Audit",
+        "kind": "single",
+        "agent": "auditor",
+        "description": "Read-only review pass.",
+    },
+    "lead-only": {
+        "label": "Lead",
+        "kind": "single",
+        "agent": "lead",
+        "description": "Single lead implementation pass.",
+    },
+    "teammate-only": {
+        "label": "Teammate",
+        "kind": "single",
+        "agent": "teammate",
+        "description": "Single teammate review pass.",
+    },
+    "build-review-loop": {
+        "label": "Build Review Loop",
+        "kind": "pipeline",
+        "agents": ["builder", "auditor"],
+        "description": "Alternate builder and auditor until the audit passes.",
+        "max_iterations": PIPELINE_MAX_ITERATIONS,
+    },
+    "auto-team": {
+        "label": "Auto Team",
+        "kind": "team",
+        "agents": ["lead", "teammate"],
+        "description": "Lead implements; teammate reviews each round until sign-off.",
+        "max_rounds": TEAM_MAX_ROUNDS,
+    },
+}
+
+RUN_MODES = {agent_id: {"label": str(config["label"])} for agent_id, config in AGENT_REGISTRY.items()}
 
 def codex_fallback_path() -> Path:
     configured = os.environ.get("CODEX_CLI_PATH")
@@ -190,6 +366,7 @@ class AgentStartRequest(BaseModel):
     model: str = Field(default="", max_length=120)
     reasoning: str = Field(default="medium", max_length=40)
     prompt: str = Field(default="", max_length=20_000)
+    attachment_paths: list[str] = Field(default_factory=list, max_length=20)
 
 
 class PipelineStartRequest(BaseModel):
@@ -213,6 +390,7 @@ class HumanInputRequest(BaseModel):
 
 
 class QuotaSettingsRequest(BaseModel):
+    runner_policy: Literal["auto", "codex-heavy", "claude-heavy", "balanced"] = "codex-heavy"
     reserve_percent: int = Field(default=10, ge=0, le=90)
     codex_monthly_tokens: int = Field(default=0, ge=0, le=2_000_000_000)
     claude_five_hour_tokens: int = Field(default=0, ge=0, le=2_000_000_000)
@@ -266,12 +444,12 @@ Current Goal field text:
 
 BUILDER_SKILL_TEXT = """---
 name: autonomous-builder
-description: Build against SPEC.md, commit small verified changes, and leave audit notes for Claude.
+description: Build against SPEC.md, leave audit notes for Claude, and let Dualith create Git checkpoints.
 ---
 
 # Autonomous Builder
 
-Build against SPEC.md, commit small verified changes, and leave audit notes for Claude.
+Build against SPEC.md, leave audit notes for Claude, and let Dualith create Git checkpoints.
 """
 CLAUDE_TEXT = "# Claude Auditor\n\nAudit generated changes, write findings to CLAUDE_TODO.md, and record AUDIT PASSED when clean.\n"
 HITL_INSTRUCTION = (
@@ -284,7 +462,9 @@ HITL_INSTRUCTION = (
 )
 BUILDER_PROMPT = f"""Read SPEC.md and implement the app.
 
-You are the builder. Follow CLAUDE.md, keep your active blueprint in PLAN.md, and read FEEDBACK.md (or legacy CLAUDE_TODO.md) for auditor notes. Run the checks from SPEC.md, make small working checkpoints, and commit working changes.
+You are the builder. Follow CLAUDE.md, keep your active blueprint in PLAN.md, and read FEEDBACK.md (or legacy CLAUDE_TODO.md) for auditor notes. Run the checks from SPEC.md and make small working checkpoints.
+
+Do not create Git commits, branches, or tags yourself. Dualith creates the Git checkpoint after your run succeeds so repository metadata is written outside the agent sandbox.
 
 Read FEEDBACK.md periodically. If the auditor adds notes, fix them, rerun checks, and update PLAN.md with what changed.
 
@@ -296,31 +476,35 @@ You are the auditor, not the builder. Audit the builder's implementation against
 
 {HITL_INSTRUCTION}
 """
-ASK_PROMPT = """Inspect this project and answer the user's question.
+ASK_PROMPT = """You are a thoughtful collaborator helping the user with their project. Read CHAT_HISTORY.md first to catch up on the conversation.
 
-You are in Ask mode. First read CHAT_HISTORY.md for prior conversation context. Answer in clear, practical language. You may read project files and run read-only inspection commands as needed. Do not edit source files and do not create commits.
+Answer like a knowledgeable friend who actually looked at the code — clear, direct sentences, no technical jargon unless it's necessary. When something is a file path or a command, keep it brief and only mention it if it actually helps the answer. Don't list bullet points of facts; talk to the person.
 
-Do not write to CHAT_HISTORY.md yourself. Dualith stores your answer in the conversation after the run finishes.
+You can read files and run read-only checks. Don't edit files or make commits in this mode.
 
-If the user asks for implementation or file changes, explain that Build mode should be used for edits and give a short implementation plan instead. If no specific question is provided, summarize the current project status and useful next questions.
+If the user wants you to actually build or change something, just say so directly — something like "I can do that, just ask me to go ahead and I'll make the changes." Give a quick one or two sentence plan of what you'd do, then wait for them to confirm.
+
+If no question is given, just tell them honestly where things stand with the project and what seems like the most useful next step.
 """
 
 # Team mode: {partner} is filled with the other runner's name at runtime.
 LEAD_PROMPT = f"""You are the LEAD on a two-agent engineering team. Your teammate is {{partner}}, who reviews your work each round.
 
-Read SPEC.md, PLAN.md, FEEDBACK.md, and AGENT_CHAT.md (the running conversation with your teammate). Plan and implement against SPEC.md, make small working checkpoints, and commit working changes.
+Read SPEC.md, PLAN.md, FEEDBACK.md, and AGENT_CHAT.md (the running conversation with your teammate). Plan and implement against SPEC.md when it is substantive. If SPEC.md is blank or skeletal, treat the latest `### Task` section in AGENT_CHAT.md or the user run prompt as the active scope, write/update PLAN.md, and implement only that scope.
+
+Do not create Git commits, branches, or tags yourself. Dualith creates the Git checkpoint after your run succeeds so repository metadata is written outside the agent sandbox.
 
 First, address any review notes your teammate left in the latest `### Teammate` section of AGENT_CHAT.md. Then continue the implementation.
 
-When you finish this round, append a section to AGENT_CHAT.md that starts with a markdown header `### Lead` summarizing what you changed this round and noting anything you want your teammate to focus on. Keep it concise.
+When you finish this round, append a section to AGENT_CHAT.md that starts with a markdown header `### Lead`. Write your update in plain sentences like you're giving a quick progress note to a colleague — what you did, what you noticed, and what you want them to look at. No bullet points, no sub-headers.
 
 {HITL_INSTRUCTION}
 """
 TEAMMATE_PROMPT = f"""You are the TEAMMATE and reviewer on a two-agent engineering team. The LEAD is {{partner}}, who does the implementation.
 
-Do NOT edit source files and do NOT create commits — you are read-only this round. Read SPEC.md, AGENT_CHAT.md (the running conversation), and inspect the latest git diff and project files to review the lead's most recent work.
+Do NOT edit source files and do NOT create commits — you are read-only this round. Read SPEC.md, AGENT_CHAT.md (the running conversation), and inspect the latest git diff and project files to review the lead's most recent work. If SPEC.md is blank or skeletal, review against the latest `### Task` section in AGENT_CHAT.md.
 
-Append a section to AGENT_CHAT.md that starts with a markdown header `### Teammate` containing concrete, actionable findings (bugs, missing SPEC requirements, risks, suggested fixes). Be specific and reference files.
+Append a section to AGENT_CHAT.md that starts with a markdown header `### Teammate`. Write your review as a short paragraph — what looks good, what needs fixing, and what the lead should focus on next. Be direct and conversational. Only mention specific files or line numbers when it genuinely helps, not as a habit. No bullet points, no sub-headers.
 
 End your section with exactly one of these verdicts on its own line:
 - `TEAMMATE: APPROVED` if the implementation meets SPEC.md and you have no blocking concerns.
@@ -350,9 +534,13 @@ async def check_runner_health() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log.info("Dualith backend starting  host=%s port=%s lan=%s log=%s",
+             DUALITH_API_HOST, DUALITH_API_PORT, LAN_MODE,
+             DUALITH_DIR / "logs" / "dualith.log")
     asyncio.create_task(check_runner_health())
     asyncio.create_task(refresh_status_cache())
     yield
+    log.info("Dualith backend shutting down")
 
 
 app = FastAPI(title="Dualith Backend", version="0.1.0", lifespan=lifespan)
@@ -435,6 +623,47 @@ def app_status_snapshot() -> dict[str, Any]:
     }
 
 
+def orchestration_manifest() -> dict[str, Any]:
+    agents = []
+    for agent_id, config in AGENT_REGISTRY.items():
+        agents.append(
+            {
+                "id": agent_id,
+                "label": config.get("label", agent_id),
+                "role": config.get("role", ""),
+                "capabilities": config.get("capabilities", []),
+                "sandbox": config.get("sandbox", ""),
+                "default_runner": config.get("default_runner", "auto"),
+            }
+        )
+
+    workflows = []
+    for workflow_id, config in ORCHESTRATION_WORKFLOWS.items():
+        workflows.append(
+            {
+                "id": workflow_id,
+                "label": config.get("label", workflow_id),
+                "kind": config.get("kind", ""),
+                "agents": config.get("agents", [config.get("agent", "")]),
+                "description": config.get("description", ""),
+            }
+        )
+
+    return {
+        "default_workflow": "auto-team",
+        "agents": agents,
+        "workflows": workflows,
+        "runner_policies": [
+            {
+                "id": policy_id,
+                "label": config["label"],
+                "description": config["description"],
+            }
+            for policy_id, config in RUNNER_POLICIES.items()
+        ],
+    }
+
+
 def usage_path() -> Path:
     return DUALITH_DIR / "usage.json"
 
@@ -485,13 +714,6 @@ ANSWER_PREFIX = "✍️ ANSWER:"
 
 # Cap CHAT_HISTORY.md payload streamed to the UI so a long transcript can't bloat snapshots.
 CHAT_HISTORY_MAX_CHARS = 32_000
-
-# Default upper bound on builder→auditor iterations for the autonomous pipeline.
-PIPELINE_MAX_ITERATIONS = int(os.environ.get("DUALITH_PIPELINE_MAX_ITERATIONS", "6"))
-
-# Default upper bound on lead↔teammate rounds for the multi-agent Team mode.
-TEAM_MAX_ROUNDS = int(os.environ.get("DUALITH_TEAM_MAX_ROUNDS", "4"))
-
 
 def ensure_dualith_store() -> None:
     DUALITH_DIR.mkdir(parents=True, exist_ok=True)
@@ -614,7 +836,7 @@ def write_result(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def read_quota_settings() -> dict[str, int]:
+def read_quota_settings() -> dict[str, Any]:
     ensure_dualith_store()
     try:
         data = json.loads(quota_path().read_text(encoding="utf-8"))
@@ -623,7 +845,9 @@ def read_quota_settings() -> dict[str, int]:
 
     settings = dict(DEFAULT_QUOTA_SETTINGS)
     if isinstance(data, dict):
-        for key in settings:
+        policy = str(data.get("runner_policy", settings["runner_policy"]))
+        settings["runner_policy"] = policy if policy in RUNNER_POLICIES else DEFAULT_QUOTA_SETTINGS["runner_policy"]
+        for key in QUOTA_INTEGER_SETTINGS:
             try:
                 settings[key] = max(0, int(data.get(key, settings[key])))
             except (TypeError, ValueError):
@@ -633,9 +857,11 @@ def read_quota_settings() -> dict[str, int]:
     return settings
 
 
-def write_quota_settings(settings: dict[str, int]) -> dict[str, int]:
+def write_quota_settings(settings: dict[str, Any]) -> dict[str, Any]:
     payload = dict(DEFAULT_QUOTA_SETTINGS)
-    for key in payload:
+    policy = str(settings.get("runner_policy", payload["runner_policy"]))
+    payload["runner_policy"] = policy if policy in RUNNER_POLICIES else DEFAULT_QUOTA_SETTINGS["runner_policy"]
+    for key in QUOTA_INTEGER_SETTINGS:
         try:
             payload[key] = max(0, int(settings.get(key, payload[key])))
         except (TypeError, ValueError):
@@ -1057,25 +1283,27 @@ def finish_result_record(
     status: str,
     content: str,
     error: str = "",
+    checkpoint: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     summary = short_result_summary(content, "Run completed" if status == "ok" else error or "Run failed")
-    return write_result(
-        {
-            "id": str(usage_record.get("id", "")),
-            "project": str(usage_record.get("project", "")),
-            "mode": str(usage_record.get("mode", "")),
-            "runner": str(usage_record.get("runner", "")),
-            "model": str(usage_record.get("model", "")) or "default",
-            "reasoning": str(usage_record.get("reasoning", "")) or "medium",
-            "status": status,
-            "started_at": str(usage_record.get("started_at", "")),
-            "ended_at": str(usage_record.get("ended_at", "")) or utc_now(),
-            "summary": summary,
-            "content": content,
-            "error": error,
-            "prompt": str(usage_record.get("user_prompt", "")),
-        }
-    )
+    result = {
+        "id": str(usage_record.get("id", "")),
+        "project": str(usage_record.get("project", "")),
+        "mode": str(usage_record.get("mode", "")),
+        "runner": str(usage_record.get("runner", "")),
+        "model": str(usage_record.get("model", "")) or "default",
+        "reasoning": str(usage_record.get("reasoning", "")) or "medium",
+        "status": status,
+        "started_at": str(usage_record.get("started_at", "")),
+        "ended_at": str(usage_record.get("ended_at", "")) or utc_now(),
+        "summary": summary,
+        "content": content,
+        "error": error,
+        "prompt": str(usage_record.get("user_prompt", "")),
+    }
+    if checkpoint:
+        result["checkpoint"] = checkpoint
+    return write_result(result)
 
 
 def summarize_usage(runs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1799,6 +2027,7 @@ def project_runtime_prompt_block(project_path: Path) -> str:
     state = dev_server_snapshot(project_name, project_path) if project_name else {}
     preview_url = str(state.get("url", "") or "")
     reserved = ", ".join(str(port) for port in sorted(dualith_reserved_ports()))
+    reserved_local_urls = ", ".join(f"127.0.0.1:{port}" for port in sorted(dualith_reserved_ports()))
     preview_line = (
         f"- Assigned project preview URL: {preview_url}"
         if preview_url
@@ -1807,7 +2036,7 @@ def project_runtime_prompt_block(project_path: Path) -> str:
     return (
         "Dualith runtime context:\n"
         f"- Dualith itself reserves these ports: {reserved}.\n"
-        "- Do not inspect or start the project on 127.0.0.1:3000 or 127.0.0.1:4000 unless the task is explicitly about Dualith itself.\n"
+        f"- Do not inspect or start the project on these Dualith reserved local ports: {reserved_local_urls}, unless the task is explicitly about Dualith itself.\n"
         f"{preview_line}\n"
         "- When checking the rendered project, use the assigned project preview URL above. If you start a server manually, bind it to 127.0.0.1 and the assigned safe project port.\n\n"
     )
@@ -1889,6 +2118,126 @@ def run_git_sync(project_path: Path, args: tuple[str, ...]) -> tuple[int, str]:
 
 async def run_git(project_path: Path, *args: str) -> tuple[int, str]:
     return await asyncio.to_thread(run_git_sync, project_path, args)
+
+
+def git_output_tail(output: str, limit: int = 220) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return (lines[-1] if lines else output.strip())[:limit]
+
+
+async def git_status_porcelain(project_path: Path) -> tuple[int, str]:
+    if not (project_path / ".git").exists():
+        return 128, "not a git repository"
+    return await run_git(project_path, "status", "--porcelain")
+
+
+def checkpoint_message(mode: str, runner: str) -> str:
+    label = "lead" if mode == "lead" else "builder"
+    return f"Dualith checkpoint: {label} via {runner}"
+
+
+def checkpoint_note(checkpoint: dict[str, str]) -> str:
+    status = checkpoint.get("status", "")
+    message = checkpoint.get("message", "")
+    if status == "committed":
+        sha = checkpoint.get("commit", "")
+        return f"Dualith checkpoint committed {sha}: {message}.".strip()
+    if status == "no_changes":
+        return "Dualith checkpoint skipped: no file changes to commit."
+    if status == "skipped":
+        return f"Dualith checkpoint skipped: {message}"
+    if status == "error":
+        return f"Dualith checkpoint failed: {message}"
+    return ""
+
+
+def append_checkpoint_note(content: str, checkpoint: dict[str, str] | None) -> str:
+    if not checkpoint:
+        return content
+    note = checkpoint_note(checkpoint)
+    if not note:
+        return content
+    separator = "\n\n" if content.strip() else ""
+    return f"{content.rstrip()}{separator}---\n\n{note}\n"
+
+
+async def backend_git_checkpoint(
+    project_path: Path,
+    mode: str,
+    runner: str,
+    pre_run_status: str,
+) -> dict[str, str]:
+    if not (project_path / ".git").exists():
+        checkpoint = {"status": "skipped", "message": "project is not a Git repository."}
+        entry = record_event("GIT_SKIP", f"{relative_path(project_path)} :: {checkpoint['message']}")
+        await broadcast("git_event", entry)
+        return checkpoint
+
+    if pre_run_status.strip():
+        checkpoint = {
+            "status": "skipped",
+            "message": "working tree was already dirty before this run, so automatic checkpointing did not mix pre-existing changes.",
+        }
+        entry = record_event("GIT_SKIP", f"{relative_path(project_path)} :: pre-existing dirty working tree")
+        await broadcast("git_event", entry)
+        return checkpoint
+
+    code, status_output = await git_status_porcelain(project_path)
+    if code != 0:
+        checkpoint = {"status": "error", "message": f"git status failed: {git_output_tail(status_output)}"}
+        entry = record_event("GIT_ERR", f"{relative_path(project_path)} :: {checkpoint['message']}")
+        await broadcast("git_event", entry)
+        return checkpoint
+
+    if not status_output.strip():
+        checkpoint = {"status": "no_changes", "message": "no file changes to commit."}
+        entry = record_event("GIT_SKIP", f"{relative_path(project_path)} :: no file changes to commit")
+        await broadcast("git_event", entry)
+        return checkpoint
+
+    excludes = [f":(exclude){path}" for path in CHECKPOINT_EXCLUDE_PATHS]
+    code, output = await run_git(project_path, "add", "-A", "--", ".", *excludes)
+    if code != 0:
+        checkpoint = {"status": "error", "message": f"git add failed: {git_output_tail(output)}"}
+        entry = record_event("GIT_ERR", f"{relative_path(project_path)} :: {checkpoint['message']}")
+        await broadcast("git_event", entry)
+        return checkpoint
+
+    code, output = await run_git(project_path, "diff", "--cached", "--quiet")
+    if code == 0:
+        checkpoint = {"status": "no_changes", "message": "no checkpointable file changes after exclusions."}
+        entry = record_event("GIT_SKIP", f"{relative_path(project_path)} :: no checkpointable file changes")
+        await broadcast("git_event", entry)
+        return checkpoint
+    if code not in {0, 1}:
+        checkpoint = {"status": "error", "message": f"git diff --cached failed: {git_output_tail(output)}"}
+        entry = record_event("GIT_ERR", f"{relative_path(project_path)} :: {checkpoint['message']}")
+        await broadcast("git_event", entry)
+        return checkpoint
+
+    message = checkpoint_message(mode, runner)
+    code, output = await run_git(
+        project_path,
+        "-c",
+        "user.name=Dualith",
+        "-c",
+        "user.email=dualith@localhost",
+        "commit",
+        "-m",
+        message,
+    )
+    if code != 0:
+        checkpoint = {"status": "error", "message": f"git commit failed: {git_output_tail(output)}"}
+        entry = record_event("GIT_ERR", f"{relative_path(project_path)} :: {checkpoint['message']}")
+        await broadcast("git_event", entry)
+        return checkpoint
+
+    rev_code, rev_output = await run_git(project_path, "rev-parse", "--short", "HEAD")
+    commit = rev_output.strip() if rev_code == 0 else ""
+    checkpoint = {"status": "committed", "message": message, "commit": commit}
+    entry = record_event("GIT_OK", f"{relative_path(project_path)} :: committed {commit} :: {message}")
+    await broadcast("git_event", entry)
+    return checkpoint
 
 
 async def latest_project_commits(project_path: Path) -> list[str]:
@@ -2020,6 +2369,7 @@ async def collect_snapshot() -> dict[str, Any]:
         "projects_root": display_path(PROJECTS_ROOT),
         "memory_path": display_path(DUALITH_DIR),
         "runner_health": dict(runner_health),
+        "orchestration": orchestration_manifest(),
         "app": app_status_snapshot(),
     }
 
@@ -2053,6 +2403,9 @@ def record_event(action: str, path: Path | str) -> dict[str, str]:
         "path": path_value,
     }
     console_events.append(entry)
+    # Error-class actions at WARNING; everything else at DEBUG (high-volume)
+    _level = logging.WARNING if action.endswith(("_ERR", "_ERROR", "DENIED")) else logging.DEBUG
+    log.log(_level, "%s  %s", action, path_value)
     return entry
 
 
@@ -2385,21 +2738,22 @@ def runner_reasoning_arg(runner: str, reasoning: str) -> str:
     return reasoning
 
 
-def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = None, partner: str = "") -> str:
+def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = None, partner: str = "", attachment_paths: list[str] | None = None) -> str:
     runner_labels_by_id = {rid: str(cfg["label"]) for rid, cfg in RUNNER_COMMANDS.items()}
     partner_label = runner_labels_by_id.get(partner, partner or "your teammate")
-    if agent == "ask":
-        prompt = ASK_PROMPT
-    elif agent == "builder":
-        prompt = BUILDER_PROMPT
-    elif agent == "auditor":
-        prompt = AUDITOR_PROMPT
-    elif agent == "lead":
-        prompt = LEAD_PROMPT.format(partner=partner_label)
-    elif agent == "teammate":
-        prompt = TEAMMATE_PROMPT.format(partner=partner_label)
-    else:
+    prompt_templates = {
+        "ask": ASK_PROMPT,
+        "builder": BUILDER_PROMPT,
+        "auditor": AUDITOR_PROMPT,
+        "lead": LEAD_PROMPT,
+        "teammate": TEAMMATE_PROMPT,
+    }
+    agent_config = AGENT_REGISTRY.get(agent)
+    prompt_key = str(agent_config.get("prompt", "")) if agent_config else ""
+    prompt_template = prompt_templates.get(prompt_key)
+    if not prompt_template:
         raise HTTPException(status_code=404, detail="Unknown agent.")
+    prompt = prompt_template.format(partner=partner_label) if "{partner}" in prompt_template else prompt_template
 
     if project_path is not None:
         prompt = f"{project_runtime_prompt_block(project_path)}{prompt}"
@@ -2411,6 +2765,11 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
     if extra:
         label = "User question" if agent == "ask" else "User run prompt"
         prompt = f"{prompt}\n\n{label}:\n{extra}\n"
+
+    paths = [p for p in (attachment_paths or []) if p and p.strip()]
+    if paths:
+        lines = "\n".join(f"- {p.strip()}" for p in paths)
+        prompt = f"{prompt}\n\nAttached images (read these files from disk; they are part of the user's message):\n{lines}\n"
 
     return prompt
 
@@ -2598,24 +2957,114 @@ def runner_quota_available(runner: str, quota: dict[str, Any]) -> bool:
     return False
 
 
+def runner_policy_from_settings(settings: dict[str, Any]) -> str:
+    policy = str(settings.get("runner_policy", DEFAULT_QUOTA_SETTINGS["runner_policy"]))
+    return policy if policy in RUNNER_POLICIES else str(DEFAULT_QUOTA_SETTINGS["runner_policy"])
+
+
+def paired_runner(runner: str) -> str:
+    return "claude" if runner == "codex" else "codex"
+
+
+def registry_preferred_runner(agent: str) -> str:
+    configured = str(AGENT_REGISTRY.get(agent, {}).get("default_runner", "auto"))
+    if configured in RUNNER_COMMANDS:
+        return configured
+    if agent in REVIEW_AGENTS:
+        return "claude"
+    return "codex"
+
+
+def quota_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def quota_period_headroom(period: dict[str, Any]) -> float:
+    if not bool(period.get("available", True)):
+        return -1.0
+    usable_limit = quota_int(period.get("usable_limit"))
+    if usable_limit <= 0:
+        return 1.0
+    usable_remaining = quota_int(period.get("usable_remaining"))
+    return max(0.0, min(1.0, usable_remaining / usable_limit))
+
+
+def runner_headroom_score(runner: str, quota: dict[str, Any]) -> float:
+    if runner == "codex":
+        return quota_period_headroom(quota["codex"]["monthly"])
+    if runner == "claude":
+        return min(
+            quota_period_headroom(quota["claude"]["five_hour"]),
+            quota_period_headroom(quota["claude"]["weekly"]),
+        )
+    return -1.0
+
+
+def best_available_runner(quota: dict[str, Any], tie_breaker: str = "codex") -> str:
+    tie_breaker = tie_breaker if tie_breaker in RUNNER_COMMANDS else "codex"
+    scores = {runner: runner_headroom_score(runner, quota) for runner in RUNNER_COMMANDS}
+    available = [runner for runner, score in scores.items() if score >= 0]
+    if not available:
+        raise HTTPException(status_code=429, detail="Both runners are over their configured quota reserve.")
+    return sorted(
+        available,
+        key=lambda runner: (scores[runner], 1 if runner == tie_breaker else 0),
+        reverse=True,
+    )[0]
+
+
+def resolve_preferred_runner(preferred: str, quota: dict[str, Any], reason: str) -> tuple[str, str]:
+    fallback = paired_runner(preferred)
+    if runner_quota_available(preferred, quota):
+        return preferred, reason
+    if runner_quota_available(fallback, quota):
+        return fallback, f"{reason} quota fallback"
+    raise HTTPException(status_code=429, detail="Both runners are over their configured quota reserve.")
+
+
+def policy_preferred_runner(agent: str, policy: str) -> tuple[str, str]:
+    if policy == "auto":
+        return registry_preferred_runner(agent), "registry default"
+    if policy == "claude-heavy":
+        return ("codex", "claude-heavy review policy") if agent in REVIEW_AGENTS else ("claude", "claude-heavy policy")
+    if policy == "codex-heavy":
+        return ("claude", "codex-heavy review policy") if agent in REVIEW_AGENTS else ("codex", "codex-heavy policy")
+    return registry_preferred_runner(agent), "registry default"
+
+
+def preferred_runner_for_agent(agent: str, quota: dict[str, Any]) -> tuple[str, str]:
+    policy = runner_policy_from_settings(quota.get("settings", {}))
+    default_runner = registry_preferred_runner(agent)
+    if policy == "balanced":
+        return best_available_runner(quota, default_runner), "balanced policy"
+    preferred, reason = policy_preferred_runner(agent, policy)
+    return resolve_preferred_runner(preferred, quota, reason)
+
+
+def team_pair_for_policy(policy: str, quota: dict[str, Any]) -> tuple[str, str, str]:
+    if policy == "balanced":
+        lead = best_available_runner(quota, "codex")
+        return lead, paired_runner(lead), "balanced policy"
+
+    lead = "claude" if policy == "claude-heavy" else "codex"
+    reason = "registry default" if policy == "auto" else f"{policy} policy"
+    runner, route_reason = resolve_preferred_runner(lead, quota, reason)
+    return runner, paired_runner(runner), route_reason
+
+
 def auto_runner_for_agent(agent: str) -> tuple[str, str]:
     quota = quota_snapshot()
-    preferred = "claude" if agent == "auditor" else "codex"
-    fallback = "claude" if preferred == "codex" else "codex"
-
-    if runner_quota_available(preferred, quota):
-        return preferred, "preferred"
-    if runner_quota_available(fallback, quota):
-        return fallback, "quota fallback"
-
-    raise HTTPException(status_code=429, detail="Both runners are over their configured quota reserve.")
+    return preferred_runner_for_agent(agent, quota)
 
 
 def team_runners(runner_pref: str) -> tuple[str, str, str]:
     """Resolve (lead, teammate, reason) for Team mode, decoupling role from runner.
 
     The user's runner choice selects the LEAD; the other runner becomes the teammate.
-    For "auto", the lead is whichever runner has quota headroom (codex preferred).
+    For "auto", the saved runner policy selects the lead and quota fallback can swap it.
     """
     if runner_pref == "codex":
         return "codex", "claude", "manual lead"
@@ -2623,12 +3072,8 @@ def team_runners(runner_pref: str) -> tuple[str, str, str]:
         return "claude", "codex", "manual lead"
 
     quota = quota_snapshot()
-    if runner_quota_available("codex", quota):
-        return "codex", "claude", "auto lead"
-    if runner_quota_available("claude", quota):
-        return "claude", "codex", "auto lead"
-
-    raise HTTPException(status_code=429, detail="Both runners are over their configured quota reserve.")
+    policy = runner_policy_from_settings(quota.get("settings", {}))
+    return team_pair_for_policy(policy, quota)
 
 
 def resolve_round_runner(assigned: str, partner: str) -> tuple[str, bool]:
@@ -2695,23 +3140,31 @@ async def stream_agent_output(project_path: Path, stream: Any, action: str, usag
             await broadcast("agent_event", entry)
 
 
-async def run_agent_process(project_name: str, agent: str, runner: str, model: str, reasoning: str, run_prompt: str, project_path: Path, partner: str = "") -> None:
+async def run_agent_process(project_name: str, agent: str, runner: str, model: str, reasoning: str, run_prompt: str, project_path: Path, partner: str = "", attachment_paths: list[str] | None = None) -> None:
     config = RUNNER_COMMANDS[runner]
     key = agent_run_key(project_name, agent)
-    prompt = agent_prompt(agent, run_prompt, project_path, partner)
+    prompt = agent_prompt(agent, run_prompt, project_path, partner, attachment_paths)
     command = str(config["command"])
 
     # Short-term memory: log the user's Ask query to CHAT_HISTORY.md before the agent runs.
     if agent == "ask" and run_prompt.strip():
-        append_chat_history(project_path, f"### User Query - {utc_now()}\n\n{run_prompt.strip()}\n\n")
+        attach_names = [Path(p).name for p in (attachment_paths or []) if p and p.strip()]
+        attach_line = f"\n\n_Attached: {', '.join(attach_names)}_" if attach_names else ""
+        append_chat_history(project_path, f"### User Query - {utc_now()}\n\n{run_prompt.strip()}{attach_line}\n\n")
         await broadcast("chat_event", record_event("CHAT_QUERY", f"{relative_path(project_path)} :: ask query"))
     command_reasoning = runner_reasoning_arg(runner, reasoning)
     usage_record = new_usage_record(project_name, agent, runner, model, reasoning, prompt)
     usage_record["user_prompt"] = run_prompt.strip()
     output_path = result_file_path(project_path, str(usage_record["id"]))
-    read_only = agent in ("ask", "teammate")
+    read_only = agent == "ask"
     sandbox = "read-only" if read_only else "workspace-write"
+    # "ask" uses default permission mode (prompts on writes) as a safety net.
+    # "teammate" is NOT read-only: it must write to AGENT_CHAT.md. The prompt
+    # instructs it not to touch source files — no CLI enforcement needed.
     permission_mode = "default" if read_only and runner == "claude" else None
+    pre_run_git_status = ""
+    if agent in CHECKPOINT_MODES:
+        _, pre_run_git_status = await git_status_porcelain(project_path)
     args = add_runner_args(
         parse_agent_args(str(config["args"]), str(config["model_args"]), str(config["reasoning_args"]), model, command_reasoning, prompt),
         runner,
@@ -2748,6 +3201,8 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             "last_output_at": usage_record["started_at"],
             "usage_id": usage_record["id"],
         }
+        log.info("▶ %s/%s started  runner=%s model=%s reasoning=%s pid=%s",
+                 project_name, agent, runner_label, model_label, reasoning, process.pid)
         entry = record_event(
             str(config["start_action"]),
             f"{relative_path(project_path)} :: {mode_label} via {runner_label} :: model {model_label} :: reasoning {reasoning} :: {command} {' '.join(args[:-1])}".strip(),
@@ -2763,13 +3218,17 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         status = "stopped" if state.get("stopping") else "ok" if code == 0 else "error"
         finish_usage_record(usage_record, status, code)
         content = extract_result_content(runner, output_path, stdout_lines) if status == "ok" else ""
+        checkpoint = None
+        if status == "ok" and agent in CHECKPOINT_MODES:
+            checkpoint = await backend_git_checkpoint(project_path, agent, runner, pre_run_git_status)
+            content = append_checkpoint_note(content, checkpoint)
         if status == "stopped":
             error = "I stopped the run before it finished."
         elif status == "ok":
             error = ""
         else:
             error = friendly_failure_excerpt(stderr_lines, stdout_lines, f"exited {code}")
-        finish_result_record(usage_record, status, content, error)
+        finish_result_record(usage_record, status, content, error, checkpoint)
         # Short-term memory: persist the Ask answer to CHAT_HISTORY.md (Ask runs read-only,
         # so the backend owns the transcript write).
         if agent == "ask" and status == "ok" and content.strip():
@@ -2778,24 +3237,35 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         if status == "stopped":
             action = "CODEX_STOPPED" if runner == "codex" else "CLAUDE_STOPPED"
             exit_message = "stopped before a final answer"
-        else:
-            action = str(config["exit_action"]) if status == "ok" else str(config["error_action"])
+            log.info("⏹ %s/%s stopped by user  exit_code=%s", project_name, agent, code)
+        elif status == "ok":
+            action = str(config["exit_action"])
             exit_message = f"exited {code}"
+            log.info("✓ %s/%s finished  exit_code=%s lines=%s chars=%s",
+                     project_name, agent, code,
+                     usage_record.get("output_lines", 0), usage_record.get("output_chars", 0))
+        else:
+            action = str(config["error_action"])
+            exit_message = f"exited {code}"
+            log.error("✗ %s/%s error  exit_code=%s  %s", project_name, agent, code, error)
         exit_entry = record_event(action, f"{relative_path(project_path)} :: {exit_message}")
         await broadcast("agent_event", exit_entry)
     except FileNotFoundError:
         finish_usage_record(usage_record, "error", None)
         finish_result_record(usage_record, "error", "", f"command not found: {command}")
+        log.error("command not found: %s  project=%s agent=%s", command, project_name, agent)
         error_entry = record_event(str(config["error_action"]), f"{relative_path(project_path)} :: command not found: {command}")
         await broadcast("agent_event", error_entry)
     except PermissionError as exc:
         finish_usage_record(usage_record, "error", None)
         finish_result_record(usage_record, "error", "", f"permission denied launching {command}: {exc}")
+        log.error("permission denied: %s  project=%s agent=%s  %s", command, project_name, agent, exc)
         error_entry = record_event(str(config["error_action"]), f"{relative_path(project_path)} :: permission denied launching {command}: {exc}")
         await broadcast("agent_event", error_entry)
     except Exception as exc:
         finish_usage_record(usage_record, "error", None)
         finish_result_record(usage_record, "error", "", f"{type(exc).__name__}: {exc}")
+        log.exception("unexpected error  project=%s agent=%s  %s", project_name, agent, exc)
         error_entry = record_event(str(config["error_action"]), f"{relative_path(project_path)} :: {type(exc).__name__}: {exc}")
         await broadcast("agent_event", error_entry)
     finally:
@@ -2956,10 +3426,12 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
         "teammate_model": runner_default_model(teammate),
     }
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
+    log.info("⚙ team routed  project=%s lead=%s teammate=%s reason=%s",
+             project_name, RUNNER_COMMANDS[lead]['label'], RUNNER_COMMANDS[teammate]['label'], reason)
     record_event("TEAM_ROUTED", f"{relative_path(project_path)} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason}")
 
     if run_prompt.strip():
-        append_chat_history(project_path, f"### Pipeline Kickoff - {utc_now()}\n\n{run_prompt.strip()}\n\n")
+        append_chat_history(project_path, f"### Team Kickoff - {utc_now()}\n\n{run_prompt.strip()}\n\n")
         append_agent_chat(project_path, f"### Task - {utc_now()}\n\nLead: {RUNNER_COMMANDS[lead]['label']} · Teammate: {RUNNER_COMMANDS[teammate]['label']}\n\n{run_prompt.strip()}\n\n")
 
     def stopping() -> bool:
@@ -3066,9 +3538,14 @@ async def health() -> dict[str, Any]:
     return {
         "app": "dualith",
         "version": "0.2.0",
-        "features": ["status-refresh", "quota-status", "project-preview", "lan-mode"],
+        "features": ["status-refresh", "quota-status", "project-preview", "lan-mode", "unified-chat", "dynamic-orchestration"],
         **app_status_snapshot(),
     }
+
+
+@app.get("/api/orchestration/manifest")
+async def get_orchestration_manifest() -> dict[str, Any]:
+    return orchestration_manifest()
 
 
 @app.get("/api/usage")
@@ -3234,6 +3711,36 @@ async def create_project(request: ProjectCreateRequest) -> dict[str, Any]:
     return await collect_snapshot()
 
 
+ATTACHMENT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024
+
+
+@app.post("/api/projects/{name}/attachments")
+async def upload_attachments(name: str, files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    project_path = tracked_project_path(name)
+    dest_dir = project_path / ".dualith" / "attachments"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    saved: list[str] = []
+    for upload in files:
+        ext = Path(upload.filename or "").suffix.lower()
+        if ext not in ATTACHMENT_EXTENSIONS:
+            raise HTTPException(status_code=400, detail=f"Unsupported image type: {ext or 'unknown'}.")
+        target = dest_dir / f"{uuid4().hex}{ext}"
+        size = 0
+        with target.open("wb") as handle:
+            while chunk := await upload.read(1024 * 1024):
+                size += len(chunk)
+                if size > ATTACHMENT_MAX_BYTES:
+                    handle.close()
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(status_code=400, detail="Image exceeds 15 MB limit.")
+                handle.write(chunk)
+        saved.append(str(target.resolve()))
+
+    return {"paths": saved}
+
+
 @app.post("/api/projects/import", status_code=201)
 async def import_project(
     name: str = Form(...),
@@ -3338,25 +3845,17 @@ async def restart_dev_server(name: str, request: DevServerStartRequest = DevServ
 async def start_agent(name: str, agent: str, request: AgentStartRequest = AgentStartRequest()) -> dict[str, Any]:
     if agent not in RUN_MODES:
         raise HTTPException(status_code=404, detail="Unknown agent.")
-    runner = request.runner
-    route_reason = "manual"
-    if runner == "auto":
-        runner, route_reason = auto_runner_for_agent(agent)
-    if runner not in RUNNER_COMMANDS:
-        raise HTTPException(status_code=404, detail="Unknown runner.")
 
     project_path = tracked_project_path(name)
-    key = agent_run_key(name, agent)
-    if key in active_agent_runs:
+    if project_has_active_orchestration(name):
         raise HTTPException(status_code=409, detail="Agent is already running.")
     if agent != "ask":
         await ensure_dualith_files(project_path, "", overwrite_spec=False)
 
-    model = clean_model(request.model) or DEFAULT_RUNNER_MODELS[runner]
+    workflow_id = workflow_for_agent(agent)
+    model = clean_model(request.model)
     reasoning = clean_reasoning(request.reasoning)
-    if request.runner == "auto":
-        record_event("AUTO_ROUTED", f"{relative_path(project_path)} :: {RUN_MODES[agent]['label']} -> {RUNNER_COMMANDS[runner]['label']} :: {route_reason}")
-    asyncio.create_task(run_agent_process(name, agent, runner, model, reasoning, request.prompt, project_path))
+    await start_orchestration(name, project_path, workflow_id, request.runner, model, reasoning, request.prompt, request.attachment_paths)
     return await collect_snapshot()
 
 
@@ -3366,11 +3865,237 @@ async def stop_agent(name: str, agent: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Unknown agent.")
 
     project_path = tracked_project_path(name)
+    if agent == "team":
+        state = active_teams.get(name)
+        if not state:
+            raise HTTPException(status_code=404, detail="Team is not running.")
+        state["stopping"] = True
+        for role in ("lead", "teammate"):
+            if agent_run_key(name, role) in active_agent_runs:
+                await stop_agent_process(name, role)
+        event = team_resume_events.get(name)
+        if event:
+            event.set()
+        entry = record_event("TEAM_STOPPED", project_path)
+        schedule_broadcast("team_event", entry)
+        return await collect_snapshot()
+
     state = active_agent_runs.get(agent_run_key(name, agent))
     runner = str(state["runner"]) if state else "codex"
     await stop_agent_process(name, agent)
     action = "CODEX_STOPPED" if runner == "codex" else "CLAUDE_STOPPED"
     entry = record_event(action, project_path)
+    schedule_broadcast("agent_event", entry)
+    return await collect_snapshot()
+
+
+class UnifiedChatRequest(BaseModel):
+    runner: Literal["auto", "codex", "claude"] = "auto"
+    model: str = Field(default="", max_length=120)
+    reasoning: str = Field(default="medium", max_length=40)
+    prompt: str = Field(default="", max_length=20_000)
+    attachment_paths: list[str] = Field(default_factory=list, max_length=20)
+
+
+def project_has_active_orchestration(project_name: str) -> bool:
+    if project_name in active_pipelines or project_name in active_teams:
+        return True
+    prefix = f"{project_name}:"
+    return any(key.startswith(prefix) for key in active_agent_runs)
+
+
+def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str, str]:
+    """Return (intent, reason) by reading message intent and project state."""
+    text = prompt.strip().lower()
+
+    # Signals from project state
+    spec_path = project_path / "SPEC.md"
+    feedback_path = project_path / "FEEDBACK.md"
+    has_spec = spec_path.exists() and spec_path.stat().st_size > 40
+    has_feedback = feedback_path.exists() and feedback_path.stat().st_size > 20
+    feedback_content = feedback_path.read_text(encoding="utf-8", errors="ignore") if has_feedback else ""
+    audit_failed = has_feedback and "AUDIT PASSED" not in feedback_content
+
+    # Intent keywords
+    build_words = {"build", "make", "implement", "create", "add", "write", "code", "develop", "scaffold",
+                   "fix", "refactor", "update", "change", "edit", "modify", "rename", "delete", "remove",
+                   "install", "migrate", "setup", "configure", "deploy", "generate", "connect", "integrate"}
+    build_phrases = (
+        r"\b(start|begin|continue|resume)\s+(implementing|building|coding|working|fixing|editing|updating|refactoring|creating|adding|writing|developing)\b",
+        r"\b(implements?|implemented|implementing|builds?|building|built|creates?|created|creating|adds?|added|adding|writes?|writing|coded|coding|develops?|developed|developing|scaffolding|fixes|fixed|fixing|refactoring|updates?|updated|updating|changes?|changed|changing|edits?|edited|editing|modifies|modified|modifying|renames?|renamed|renaming|deletes?|deleted|deleting|removes?|removed|removing|installs?|installed|installing|migrates?|migrated|migrating|configured?|configuring|deploys?|deployed|deploying|generates?|generated|generating|connects?|connected|connecting|integrates?|integrated|integrating)\b",
+    )
+    audit_words = {"audit", "review", "check", "test", "verify", "scan", "inspect", "validate",
+                   "assess", "analyze", "analyse", "lint", "debug", "investigate"}
+    audit_phrases = (
+        r"\b(audits?|audited|auditing|reviews?|reviewed|reviewing|checks?|checking|tests?|tested|testing|verifies|verified|verifying|scans?|scanned|scanning|inspects?|inspected|inspecting|validates?|validated|validating|assesses|assessed|assessing|analy[sz]es|analy[sz]ed|analy[sz]ing|lints?|linted|linting|debugs?|debugged|debugging|investigates?|investigated|investigating)\b",
+    )
+    team_words = {"team", "together", "collaborate", "pair", "both"}
+
+    words = set(re.findall(r"\b\w+\b", text))
+
+    has_build_intent = bool(words & build_words) or any(re.search(pattern, text) for pattern in build_phrases)
+    has_audit_intent = bool(words & audit_words) or any(re.search(pattern, text) for pattern in audit_phrases)
+
+    if words & team_words:
+        return "build", "team intent"
+
+    if has_audit_intent and not has_build_intent:
+        return "review", "audit/review intent"
+
+    if has_build_intent:
+        if audit_failed:
+            return "build", "build intent + open feedback"
+        if has_spec:
+            return "build", "build intent + project spec"
+        return "build", "build intent + task prompt"
+
+    # Default: ask / discuss
+    return "ask", "general question or no clear build intent"
+
+
+def workflow_for_intent(intent: str) -> str:
+    if intent == "build":
+        return "auto-team"
+    if intent == "review":
+        return "review-only"
+    return "ask"
+
+
+def workflow_for_agent(agent: str) -> str:
+    if agent == "team":
+        return "auto-team"
+    if agent == "lead":
+        return "lead-only"
+    if agent == "teammate":
+        return "teammate-only"
+    if agent == "builder":
+        return "build-only"
+    if agent == "auditor":
+        return "review-only"
+    return "ask"
+
+
+def route_intent(prompt: str, project_path: Path) -> tuple[str, str]:
+    """Return a legacy agent id for callers that still work in modes."""
+    intent, reason = classify_orchestration_intent(prompt, project_path)
+    workflow_id = workflow_for_intent(intent)
+    workflow = ORCHESTRATION_WORKFLOWS[workflow_id]
+    if workflow["kind"] == "single":
+        return str(workflow["agent"]), reason
+    if workflow["kind"] == "team":
+        return "team", reason
+    if workflow["kind"] == "pipeline":
+        return "builder", reason
+    return "ask", reason
+
+
+async def start_orchestration(
+    project_name: str,
+    project_path: Path,
+    workflow_id: str,
+    runner_pref: str,
+    model: str,
+    reasoning: str,
+    prompt: str,
+    attachment_paths: list[str] | None = None,
+) -> None:
+    workflow = ORCHESTRATION_WORKFLOWS.get(workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Unknown workflow.")
+
+    kind = str(workflow.get("kind", ""))
+    if kind == "team":
+        if project_name in active_teams:
+            raise HTTPException(status_code=409, detail="Team is already running.")
+        max_rounds = int(workflow.get("max_rounds", TEAM_MAX_ROUNDS) or TEAM_MAX_ROUNDS)
+        asyncio.create_task(run_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds))
+        return
+
+    if kind == "pipeline":
+        if project_name in active_pipelines:
+            raise HTTPException(status_code=409, detail="Pipeline is already running.")
+        max_iterations = int(workflow.get("max_iterations", PIPELINE_MAX_ITERATIONS) or PIPELINE_MAX_ITERATIONS)
+        asyncio.create_task(run_pipeline(project_name, project_path, runner_pref, model, reasoning, prompt, max_iterations))
+        return
+
+    if kind == "single":
+        agent = str(workflow.get("agent", "ask"))
+        key = agent_run_key(project_name, agent)
+        if key in active_agent_runs:
+            raise HTTPException(status_code=409, detail="Agent is already running.")
+        runner = runner_pref
+        route_reason = "manual"
+        if runner == "auto":
+            runner, route_reason = auto_runner_for_agent(agent)
+            record_event("AUTO_ROUTED", f"{relative_path(project_path)} :: {RUN_MODES[agent]['label']} -> {RUNNER_COMMANDS[runner]['label']} :: {route_reason}")
+        if runner not in RUNNER_COMMANDS:
+            raise HTTPException(status_code=404, detail="Unknown runner.")
+        resolved_model = clean_model(model) or DEFAULT_RUNNER_MODELS[runner]
+        asyncio.create_task(run_agent_process(project_name, agent, runner, resolved_model, reasoning, prompt, project_path, attachment_paths=attachment_paths))
+        return
+
+    raise HTTPException(status_code=404, detail="Unknown workflow kind.")
+
+
+@app.post("/api/projects/{name}/chat")
+async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatRequest()) -> dict[str, Any]:
+    project_path = tracked_project_path(name)
+
+    intent, route_reason = classify_orchestration_intent(request.prompt, project_path)
+    workflow_id = workflow_for_intent(intent)
+    workflow = ORCHESTRATION_WORKFLOWS[workflow_id]
+    if project_has_active_orchestration(name):
+        raise HTTPException(status_code=409, detail="An agent is already running.")
+
+    if workflow_id != "ask":
+        await ensure_dualith_files(project_path, "", overwrite_spec=False)
+
+    runner = request.runner
+    model = clean_model(request.model)
+    reasoning = clean_reasoning(request.reasoning)
+
+    log.info("→ chat routed  project=%s prompt=%r workflow=%s runner=%s reason=%s",
+             name, request.prompt[:60], workflow_id, runner, route_reason)
+    record_event(
+        "CHAT_ROUTED",
+        f"{relative_path(project_path)} :: {request.prompt[:60]!r} -> {workflow.get('label', workflow_id)} via {runner} ({route_reason})",
+    )
+    await start_orchestration(name, project_path, workflow_id, runner, model, reasoning, request.prompt, request.attachment_paths)
+
+    return await collect_snapshot()
+
+
+@app.post("/api/projects/{name}/chat/stop")
+async def stop_unified_chat(name: str) -> dict[str, Any]:
+    """Stop whatever is currently running for this project."""
+    project_path = tracked_project_path(name)
+    if name in active_pipelines:
+        state = active_pipelines.get(name)
+        if state:
+            state["stopping"] = True
+            for agent in ("builder", "auditor"):
+                if agent_run_key(name, agent) in active_agent_runs:
+                    await stop_agent_process(name, agent)
+            ev = pipeline_resume_events.get(name)
+            if ev:
+                ev.set()
+    elif name in active_teams:
+        state = active_teams.get(name)
+        if state:
+            state["stopping"] = True
+            for role in ("lead", "teammate"):
+                if agent_run_key(name, role) in active_agent_runs:
+                    await stop_agent_process(name, role)
+            ev = team_resume_events.get(name)
+            if ev:
+                ev.set()
+    else:
+        for agent in list(RUN_MODES.keys()):
+            key = agent_run_key(name, agent)
+            if key in active_agent_runs:
+                await stop_agent_process(name, agent)
+                break
+    entry = record_event("CHAT_STOPPED", project_path)
     schedule_broadcast("agent_event", entry)
     return await collect_snapshot()
 
