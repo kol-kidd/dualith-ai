@@ -1836,6 +1836,7 @@ function TeamBubble({ message, lead, teammate }: { message: TeamMessage; lead?: 
       <div className="mx-auto w-full py-0.5" style={{ maxWidth: "var(--dualith-chat-max)" }}>
         <div className="flex items-center gap-1.5 text-[11px] text-muted">
           {runner && <RunnerMascot runner={runner} size={12} />}
+          <span className="opacity-30">↳</span>
           <span>{firstLine.replace(/^[-*]\s*/, "")}</span>
           {message.timestamp && <span className="opacity-50">· {timestampLabel(message.timestamp)}</span>}
         </div>
@@ -1956,6 +1957,29 @@ function ConversationThread({ project, projectEvents, results }: { project: Proj
           {teamMessages.map((message, index) => (
             <TeamBubble key={`t-${index}`} message={message} lead={lead} teammate={teammate} />
           ))}
+          {/* Team run completion / stopped / error marker — only when run is no longer active */}
+          {teamMessages.length > 0 && !activeRun && project?.team && (
+            <div className="mx-auto w-full py-1" style={{ maxWidth: "var(--dualith-chat-max)" }}>
+              {project.team.status === "done" && (
+                <div className="flex items-center gap-1.5 text-[11px] text-text-muted">
+                  <span className="text-ok">✓</span>
+                  <span>Done — {project.team.round} round{project.team.round !== 1 ? "s" : ""}.</span>
+                </div>
+              )}
+              {project.team.status === "stopped" && (
+                <div className="flex items-center gap-1.5 text-[11px] text-warn">
+                  <span>✕</span>
+                  <span>Run stopped.</span>
+                </div>
+              )}
+              {project.team.status === "error" && (
+                <div className="flex items-center gap-1.5 text-[11px] text-danger">
+                  <span>✕</span>
+                  <span>Run hit an error.</span>
+                </div>
+              )}
+            </div>
+          )}
           <LiveWorkingBubble project={project} projectEvents={projectEvents} />
           {latestRunMessage && (
             <AgentBubble runner={latestRunMessage.runner} label={`${modeLabels[latestRunMessage.mode]} · ${runnerLabels[latestRunMessage.runner]}`} timestamp={latestRunMessage.ended_at}>
