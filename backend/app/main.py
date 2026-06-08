@@ -3310,12 +3310,9 @@ async def stop_agent_process(project_name: str, agent: str) -> None:
 
     state["stopping"] = True
     process = state["process"]
-    process.terminate()
-    try:
-        await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=5)
-    except asyncio.TimeoutError:
-        process.kill()
-        await asyncio.to_thread(process.wait)
+    # Use terminate_process_tree so the full process tree is killed on Windows
+    # (plain process.terminate() sends SIGTERM which Codex ignores on Windows).
+    await terminate_process_tree(process, timeout=5)
 
 
 def pipeline_snapshot(project_name: str) -> dict[str, Any] | None:
