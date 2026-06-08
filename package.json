@@ -9,7 +9,8 @@
     "dev:api": "node scripts/dev-api.mjs",
     "build": "node scripts/build.mjs",
     "start": "node scripts/start.mjs",
-    "lint": "next lint"
+    "lint": "next lint",
+    "design:audit": "npx --yes impeccable detect app"
   },
   "dependencies": {
     "next": "^15.3.0",
