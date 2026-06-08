@@ -3241,7 +3241,7 @@ def best_available_runner(quota: dict[str, Any], tie_breaker: str = "codex") -> 
     scores = {runner: runner_headroom_score(runner, quota) for runner in RUNNER_COMMANDS}
     available = [runner for runner, score in scores.items() if score >= 0]
     if not available:
-        raise HTTPException(status_code=429, detail="Both runners are over their configured quota reserve.")
+        raise HTTPException(status_code=429, detail="Both Codex and Claude are over their configured quota reserve. Adjust your quota settings in the System panel or wait for the limit to reset.")
     return sorted(
         available,
         key=lambda runner: (scores[runner], 1 if runner == tie_breaker else 0),
@@ -3254,8 +3254,11 @@ def resolve_preferred_runner(preferred: str, quota: dict[str, Any], reason: str)
     if runner_quota_available(preferred, quota):
         return preferred, reason
     if runner_quota_available(fallback, quota):
-        return fallback, f"{reason} quota fallback"
-    raise HTTPException(status_code=429, detail="Both runners are over their configured quota reserve.")
+        fallback_label = RUNNER_COMMANDS[fallback]["label"]
+        preferred_label = RUNNER_COMMANDS[preferred]["label"]
+        log.info("quota fallback: %s over reserve, switching to %s", preferred_label, fallback_label)
+        return fallback, f"{reason} → {fallback_label} (quota fallback: {preferred_label} over reserve)"
+    raise HTTPException(status_code=429, detail="Both Codex and Claude are over their configured quota reserve. Adjust your quota settings in the System panel or wait for the limit to reset.")
 
 
 def policy_preferred_runner(agent: str, policy: str) -> tuple[str, str]:
@@ -3309,20 +3312,27 @@ def team_runners(runner_pref: str) -> tuple[str, str, str]:
     return team_pair_for_policy(policy, quota)
 
 
+class QuotaExhaustedError(RuntimeError):
+    """Raised when both runners are over their configured quota reserve."""
+
+
 def resolve_round_runner(assigned: str, partner: str) -> tuple[str, bool]:
     """Pick the runner that actually executes a role this round.
 
     If the assigned runner is over its quota reserve and the partner has headroom,
     the partner covers the role (returns covered=True). If the assigned runner has
-    headroom, it runs normally. If neither has headroom, stop before spending past
-    the configured reserve.
+    headroom, it runs normally. If neither has headroom, raise QuotaExhaustedError
+    so the team loop can surface a readable message in the chat thread.
     """
     quota = quota_snapshot()
     if runner_quota_available(assigned, quota):
         return assigned, False
     if runner_quota_available(partner, quota):
         return partner, True
-    raise HTTPException(status_code=429, detail="Both runners are over their configured quota reserve.")
+    raise QuotaExhaustedError(
+        f"Both {RUNNER_COMMANDS[assigned]['label']} and {RUNNER_COMMANDS[partner]['label']} "
+        "are over their configured quota reserve. Adjust your quota settings in the System panel or wait for the limit to reset."
+    )
 
 
 def runner_default_model(runner: str) -> str:
@@ -3861,6 +3871,15 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 return
 
         await set_team_state(project_name, project_path, "team_event", status="done", step="max-rounds")
+    except QuotaExhaustedError as exc:
+        # Write a readable message to the chat thread so the user knows why the run stopped.
+        append_chat_history(
+            project_path,
+            f"### Circuit Breaker - {utc_now()}\n\n"
+            f"⚠ Run paused — quota limit reached.\n\n{exc}\n\n",
+        )
+        await broadcast("chat_event", record_event("QUOTA_EXHAUSTED", f"{relative_path(project_path)} :: {exc}"))
+        await set_team_state(project_name, project_path, "team_event", status="stopped", step="quota-exhausted")
     except Exception as exc:  # noqa: BLE001 — surface failures to the UI rather than crash the loop.
         await set_team_state(project_name, project_path, "team_event", status="error", step=f"{type(exc).__name__}: {exc}")
     finally:
