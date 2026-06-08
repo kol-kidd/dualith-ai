@@ -3933,6 +3933,80 @@ def project_has_active_orchestration(project_name: str) -> bool:
     return any(key.startswith(prefix) for key in active_agent_runs)
 
 
+async def classify_intent_llm(prompt: str, project_context: str) -> str | None:
+    """Ask Claude to classify intent as ask/build/review. Returns None on failure/timeout."""
+    config = RUNNER_COMMANDS.get("claude")
+    if not config:
+        return None
+    cmd = str(config["command"])
+    classification_prompt = (
+        f"{project_context}\n\n"
+        "Classify the user message below as exactly one of: ask, build, review.\n"
+        "- ask: a question, discussion, or request for information/advice\n"
+        "- build: a request to create, change, fix, redesign, improve, or otherwise modify code or UI\n"
+        "- review: a request to audit, check, test, or verify something\n\n"
+        'Respond with only valid JSON: {"intent": "ask"} or {"intent": "build"} or {"intent": "review"}\n\n'
+        f'User message: "{prompt}"'
+    )
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [cmd, "-p", "--output-format", "json", classification_prompt],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+        )
+        if result.returncode != 0:
+            return None
+        # claude --output-format json wraps in {"type":"result","result":"..."} — unwrap
+        raw = result.stdout.strip()
+        try:
+            outer = json.loads(raw)
+            inner_text = outer.get("result") or outer.get("content") or raw
+            if isinstance(inner_text, list):
+                inner_text = " ".join(b.get("text", "") for b in inner_text if isinstance(b, dict))
+        except (json.JSONDecodeError, AttributeError):
+            inner_text = raw
+        # Find the intent JSON in the output
+        match = re.search(r'\{\s*"intent"\s*:\s*"(ask|build|review)"\s*\}', str(inner_text))
+        if match:
+            return match.group(1)
+        return None
+    except Exception:
+        return None
+
+
+def _build_project_context(project_path: Path) -> str:
+    """Short one-line project state summary for the LLM classifier."""
+    parts: list[str] = []
+    spec_path = project_path / "SPEC.md"
+    plan_path = project_path / "PLAN.md"
+    feedback_path = project_path / "FEEDBACK.md"
+    if spec_path.exists() and spec_path.stat().st_size > 40:
+        parts.append("project has a SPEC")
+    if plan_path.exists() and plan_path.stat().st_size > 40:
+        parts.append("project has a PLAN")
+    if feedback_path.exists() and feedback_path.stat().st_size > 20:
+        content = feedback_path.read_text(encoding="utf-8", errors="ignore")
+        parts.append("open audit feedback" if "AUDIT PASSED" not in content else "audit passed")
+    return f"Project context: {', '.join(parts) or 'new project'}."
+
+
+async def classify_orchestration_intent_async(prompt: str, project_path: Path) -> tuple[str, str]:
+    """Async version: LLM classifier with keyword fallback."""
+    project_context = _build_project_context(project_path)
+    llm_intent = await classify_intent_llm(prompt, project_context)
+    if llm_intent in ("ask", "build", "review"):
+        log.debug("llm_intent=%s prompt=%r", llm_intent, prompt[:80])
+        return llm_intent, f"llm classifier → {llm_intent}"
+    # Fallback: keyword router
+    log.debug("llm_intent failed, falling back to keywords for prompt=%r", prompt[:80])
+    return classify_orchestration_intent(prompt, project_path)
+
+
 def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str, str]:
     """Return (intent, reason) by reading message intent and project state."""
     text = prompt.strip().lower()
@@ -4104,7 +4178,7 @@ async def start_orchestration(
 async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatRequest()) -> dict[str, Any]:
     project_path = tracked_project_path(name)
 
-    intent, route_reason = classify_orchestration_intent(request.prompt, project_path)
+    intent, route_reason = await classify_orchestration_intent_async(request.prompt, project_path)
     workflow_id = workflow_for_intent(intent)
     workflow = ORCHESTRATION_WORKFLOWS[workflow_id]
     if project_has_active_orchestration(name):
