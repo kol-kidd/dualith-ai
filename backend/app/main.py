@@ -480,9 +480,9 @@ ASK_PROMPT = """You are a thoughtful collaborator helping the user with their pr
 
 Answer like a knowledgeable friend who actually looked at the code — clear, direct sentences, no technical jargon unless it's necessary. When something is a file path or a command, keep it brief and only mention it if it actually helps the answer. Don't list bullet points of facts; talk to the person.
 
-You can read files and run read-only checks. Don't edit files or make commits in this mode.
+You can read files and run checks. Don't edit files or make commits in this mode — just talk.
 
-If the user wants you to actually build or change something, just say so directly — something like "I can do that, just ask me to go ahead and I'll make the changes." Give a quick one or two sentence plan of what you'd do, then wait for them to confirm.
+If the user wants you to build or change something, tell them what you'd do in one or two sentences and invite them to say "go ahead" or "do it." Don't mention modes, sessions, or permissions.
 
 If no question is given, just tell them honestly where things stand with the project and what seems like the most useful next step.
 """
@@ -2079,6 +2079,33 @@ def read_agent_chat(project_path: Path) -> str:
         return ""
     content = path.read_text(encoding="utf-8", errors="replace")
     return content[-CHAT_HISTORY_MAX_CHARS:] if len(content) > CHAT_HISTORY_MAX_CHARS else content
+
+
+def last_session_intent(project_path: Path) -> str | None:
+    """Detect what the last activity was so 'continue' resumes the right thing.
+
+    Returns one of: 'build', 'ask', 'review', or None (no history).
+    Priority: agent_chat (team/build) > chat_history last section header.
+    """
+    # If AGENT_CHAT.md has content, a build/team was the last major activity.
+    agent_chat = agent_chat_path(project_path)
+    if agent_chat.exists() and agent_chat.stat().st_size > 40:
+        return "build"
+
+    # Fall back to the last section header in CHAT_HISTORY.md.
+    chat_hist = chat_history_path(project_path)
+    if not chat_hist.exists():
+        return None
+    text = chat_hist.read_text(encoding="utf-8", errors="replace")
+    headers = re.findall(r"^###\s+(.+)", text, re.MULTILINE)
+    if not headers:
+        return None
+    last = headers[-1].lower()
+    if any(k in last for k in ("pipeline kickoff", "team kickoff", "builder", "lead")):
+        return "build"
+    if any(k in last for k in ("dualith answer", "user query")):
+        return "ask"
+    return None
 
 
 def append_agent_chat(project_path: Path, text: str) -> None:
@@ -3910,11 +3937,38 @@ def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str,
 
     # Signals from project state
     spec_path = project_path / "SPEC.md"
+    plan_path = project_path / "PLAN.md"
     feedback_path = project_path / "FEEDBACK.md"
     has_spec = spec_path.exists() and spec_path.stat().st_size > 40
+    has_plan = plan_path.exists() and plan_path.stat().st_size > 40
     has_feedback = feedback_path.exists() and feedback_path.stat().st_size > 20
     feedback_content = feedback_path.read_text(encoding="utf-8", errors="ignore") if has_feedback else ""
     audit_failed = has_feedback and "AUDIT PASSED" not in feedback_content
+    # Project is "in progress" if it already has a spec or an active plan
+    in_progress = has_spec or has_plan
+
+    # Short action confirmations: "continue", "go", "yes", "do it", "go ahead", etc.
+    # Resume whatever the last session was doing rather than always defaulting to build.
+    action_confirms = {
+        "continue", "go", "proceed", "yes", "yep", "yeah", "yup", "ok", "okay",
+        "sure", "do", "start", "run", "execute", "ship", "push", "next",
+    }
+    action_phrases = re.compile(
+        r"^(go ahead|do it|let('s| us) (do|go|start|build|continue)|sounds? good|that('s| is) (good|great|fine|correct|right)|just do it|make it (happen|so)|get (going|started)|keep going|carry on|proceed with (that|it|this)|yes please|please do)\.?$"
+    )
+    words = set(re.findall(r"\b\w+\b", text))
+    is_action_confirm = (words <= action_confirms and bool(words)) or bool(action_phrases.match(text))
+
+    if is_action_confirm and in_progress:
+        prior = last_session_intent(project_path)
+        if prior == "build":
+            return "build", "action confirmation — resuming prior build"
+        if prior == "review":
+            return "review", "action confirmation — resuming prior review"
+        if prior == "ask":
+            return "ask", "action confirmation — resuming prior conversation"
+        # No history but project exists — bias toward build
+        return "build", "action confirmation with active project"
 
     # Intent keywords
     build_words = {"build", "make", "implement", "create", "add", "write", "code", "develop", "scaffold",
@@ -3931,8 +3985,6 @@ def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str,
     )
     team_words = {"team", "together", "collaborate", "pair", "both"}
 
-    words = set(re.findall(r"\b\w+\b", text))
-
     has_build_intent = bool(words & build_words) or any(re.search(pattern, text) for pattern in build_phrases)
     has_audit_intent = bool(words & audit_words) or any(re.search(pattern, text) for pattern in audit_phrases)
 
@@ -3948,6 +4000,10 @@ def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str,
         if has_spec:
             return "build", "build intent + project spec"
         return "build", "build intent + task prompt"
+
+    # If there's open audit feedback and no clear question, bias toward building
+    if audit_failed:
+        return "build", "open feedback with no question intent"
 
     # Default: ask / discuss
     return "ask", "general question or no clear build intent"
