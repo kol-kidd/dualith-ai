@@ -1470,7 +1470,7 @@ function LiveWorkingBubble({ project, projectEvents }: { project: ProjectRecord 
     : [{ id: "starting", text: "I'm getting oriented.", time: activeRun.started_at ?? "", tone: "active" as const }];
   const stale = isRunStale(activeRun);
   const staleItem = stale
-    ? { id: "stale", text: "No new activity for a few minutes. You can stop the run if it looks stuck.", time: activeRun.last_output_at ?? activeRun.started_at ?? "", tone: "warn" as const }
+    ? { id: "stale", text: "Still working — taking longer than usual.", time: activeRun.last_output_at ?? activeRun.started_at ?? "", tone: "warn" as const }
     : null;
   const displayed = staleItem && visible[visible.length - 1]?.id !== "stale" ? [...visible.slice(-3), staleItem] : visible;
   const runner = activeRun.runner === "auto" ? undefined : activeRun.runner;
@@ -1540,7 +1540,7 @@ function ActivityFeed({ project, projectEvents, results }: { project: ProjectRec
     if (currentRun) {
       return {
         label: "Working",
-        detail: isRunStale(currentRun) ? "No new activity for a few minutes." : "The live update is in the chat.",
+        detail: isRunStale(currentRun) ? "Still working — taking longer than usual." : "The live update is in the chat.",
         tone: isRunStale(currentRun) ? "warn" as const : "active" as const,
         time: currentRun.last_output_at || progressEvent?.timestamp || currentRun.started_at || "",
       };
