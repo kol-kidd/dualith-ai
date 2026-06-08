@@ -2946,14 +2946,10 @@ function MemoryPane({ project }: { project: ProjectRecord | null }) {
   );
 }
 
-function DetailsDrawer({ project, appStatus, onClose, onPipelineStart, onPipelineStop, onTeamStart, onTeamStop, onDevServerAction }: {
+function DetailsDrawer({ project, appStatus, onClose, onDevServerAction }: {
   project: ProjectRecord | null;
   appStatus: AppStatus;
   onClose: () => void;
-  onPipelineStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
-  onPipelineStop: (projectName: string) => Promise<void>;
-  onTeamStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
-  onTeamStop: (projectName: string) => Promise<void>;
   onDevServerAction: (projectName: string, action: DevServerAction) => Promise<void>;
 }) {
   return (
@@ -2966,8 +2962,6 @@ function DetailsDrawer({ project, appStatus, onClose, onPipelineStart, onPipelin
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
           <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive />
-          <TeamPane project={project} onStart={onTeamStart} onStop={onTeamStop} />
-          <PipelinePane project={project} onStart={onPipelineStart} onStop={onPipelineStop} />
           <ReviewPane project={project} />
           <CommitPane commits={project?.commits ?? []} />
           <MemoryPane project={project} />
@@ -2978,7 +2972,7 @@ function DetailsDrawer({ project, appStatus, onClose, onPipelineStart, onPipelin
 }
 
 function WorkspaceColumn({
-  project, projectEvents, results, appStatus, mobileView, onSendChat, onStopChat, onAgentAction, onPipelineStart, onPipelineStop, onTeamStart, onTeamStop, onDevServerAction, onHumanAnswer, onClearChat, onClearAgentChat, onApprovePlan, runnerHealth,
+  project, projectEvents, results, appStatus, mobileView, onSendChat, onStopChat, onAgentAction, onDevServerAction, onHumanAnswer, onClearChat, onClearAgentChat, onApprovePlan, runnerHealth,
 }: {
   project: ProjectRecord | null;
   projectEvents: ConsoleEntry[];
@@ -2989,10 +2983,6 @@ function WorkspaceColumn({
   onStopChat: (projectName: string) => Promise<void>;
   onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
   onAgentAction: (projectName: string, agent: AgentMode, action: "start" | "stop", options?: AgentStartOptions) => Promise<void>;
-  onPipelineStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
-  onPipelineStop: (projectName: string) => Promise<void>;
-  onTeamStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
-  onTeamStop: (projectName: string) => Promise<void>;
   onDevServerAction: (projectName: string, action: DevServerAction) => Promise<void>;
   onHumanAnswer: (projectName: string, answer: string) => Promise<void>;
   onClearChat: (projectName: string) => Promise<void>;
@@ -3047,7 +3037,7 @@ function WorkspaceColumn({
         <ChatComposer project={project} onSendChat={onSendChat} onStopChat={onStopChat} runnerHealth={runnerHealth} />
       </div>
       {detailsOpen && (
-        <DetailsDrawer project={project} appStatus={appStatus} onClose={() => setDetailsOpen(false)} onPipelineStart={onPipelineStart} onPipelineStop={onPipelineStop} onTeamStart={onTeamStart} onTeamStop={onTeamStop} onDevServerAction={onDevServerAction} />
+        <DetailsDrawer project={project} appStatus={appStatus} onClose={() => setDetailsOpen(false)} onDevServerAction={onDevServerAction} />
       )}
     </main>
   );
@@ -4063,10 +4053,6 @@ function DualithApp() {
           onSendChat={sendChat}
           onStopChat={stopChat}
           onAgentAction={runAgentAction}
-          onPipelineStart={startPipeline}
-          onPipelineStop={stopPipeline}
-          onTeamStart={startTeam}
-          onTeamStop={stopTeam}
           onDevServerAction={runDevServerAction}
           onHumanAnswer={submitHumanAnswer}
           onClearChat={clearChatHistory}

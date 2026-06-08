@@ -2872,13 +2872,12 @@ def add_runner_args(
         prefix.extend(["--output-last-message", str(result_path)])
     if sandbox == "read-only":
         prefix = with_option_value(prefix, "--sandbox", sandbox)
-    elif sandbox == "workspace-write" and "--sandbox" not in prefix:
-        # On Windows the "unelevated" sandbox mode blocks .git writes, preventing
-        # git commits even when the user explicitly asks for them. Use "full-auto"
-        # so builder/lead agents have unrestricted filesystem access including .git.
-        prefix.extend(["--sandbox", "full-auto"])
     elif "--sandbox" not in prefix:
         prefix.extend(["--sandbox", "workspace-write"])
+    # Disable interactive approval prompts so Codex can run git and other shell
+    # commands non-interactively (e.g. git add, git commit won't hang waiting for input).
+    if "--ask-for-approval" not in prefix and "-a" not in prefix:
+        prefix.extend(["-a", "never"])
     if not ("--disable" in prefix and "memories" in prefix):
         prefix.extend(["--disable", "memories"])
     return [*prefix, *prompt]
@@ -4637,32 +4636,11 @@ async def start_orchestration(
     raise HTTPException(status_code=404, detail="Unknown workflow kind.")
 
 
-_GIT_OP_WORDS = {"commit", "push", "merge", "branch", "stash", "rebase", "tag", "release", "cherry-pick", "checkout"}
-
-
-def _is_git_op_request(prompt: str) -> bool:
-    """True if the prompt is primarily a git operation (commit, push, etc.).
-
-    Git operations must run through Claude because Codex --sandbox full-auto
-    still prompts for approval on git writes when running non-interactively,
-    causing a silent hang. Claude runs shell commands without an approval gate.
-    """
-    words = set(re.sub(r"[^a-z0-9\s-]", " ", prompt.strip().lower()).split())
-    return bool(words & _GIT_OP_WORDS)
-
-
 @app.post("/api/projects/{name}/chat")
 async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatRequest()) -> dict[str, Any]:
     project_path = tracked_project_path(name)
 
     runner = request.runner
-    # Git operations (commit, push, merge, etc.) must use Claude as the lead runner.
-    # Codex --sandbox full-auto on Windows still requires interactive approval for git
-    # writes; running it as a subprocess causes a silent hang. Claude has no such gate.
-    if _is_git_op_request(request.prompt) and runner in ("auto", "codex"):
-        runner = "claude"
-        log.info("→ git op detected — forcing lead runner to claude for project=%s", name)
-
     intent, route_reason = await classify_orchestration_intent_async(request.prompt, project_path, runner)
 
     # Plan-first mode: if user toggled Plan ON and intent is build, use the plan-first workflow
