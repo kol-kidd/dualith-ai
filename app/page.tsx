@@ -2170,12 +2170,20 @@ function ChatComposer({
     setPendingAction("stop");
     try {
       await onStopChat(project.name);
+      // Keep "Stopping…" until the WebSocket confirms the run is gone.
+      // pendingAction is cleared by the useEffect below once isRunning goes false.
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : "unknown");
-    } finally {
       setPendingAction(null);
     }
   };
+
+  // Clear the stop pending state once the run actually ends
+  useEffect(() => {
+    if (!isRunning && pendingAction === "stop") {
+      setPendingAction(null);
+    }
+  }, [isRunning, pendingAction]);
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey && !isRunning && project && (runPrompt.trim() || attachments.length > 0)) {
@@ -2277,7 +2285,7 @@ function ChatComposer({
                   onClick={() => void stop()}
                   className="h-8 rounded-full bg-amber-900/40 px-4 text-[12px] font-medium text-warn outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
                 >
-                  {pendingAction === "stop" ? "..." : "Stop"}
+                  {pendingAction === "stop" ? "Stopping…" : "Stop"}
                 </button>
               ) : (
                 <button
