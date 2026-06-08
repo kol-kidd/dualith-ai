@@ -1386,7 +1386,10 @@ function activeRunOutputTimeValue(run: ActiveRun) {
 
 function isRunStale(run: ActiveRun) {
   const lastOutput = activeRunOutputTimeValue(run);
-  return Boolean(lastOutput && Date.now() - lastOutput > 3 * 60 * 1000);
+  if (!lastOutput) return false;
+  // Ask replies should surface quickly; build/team runs can be quiet for much longer
+  const threshold = run.mode === "ask" ? 3 * 60 * 1000 : 12 * 60 * 1000;
+  return Date.now() - lastOutput > threshold;
 }
 
 function useRunHeartbeat(active: boolean) {
@@ -1468,8 +1471,11 @@ function LiveWorkingBubble({ project, projectEvents }: { project: ProjectRecord 
   const visible = items.length
     ? items.slice(-4)
     : [{ id: "starting", text: "I'm getting oriented.", time: activeRun.started_at ?? "", tone: "active" as const }];
+  const isAsk = activeRun.mode === "ask";
   const stale = isRunStale(activeRun);
-  const staleItem = stale
+  // Only surface the stale warning for ask runs — build/team runs are expected to be
+  // quiet for long stretches while the agent thinks, reads files, or waits on tools.
+  const staleItem = stale && isAsk
     ? { id: "stale", text: "Still working — taking longer than usual.", time: activeRun.last_output_at ?? activeRun.started_at ?? "", tone: "warn" as const }
     : null;
   const displayed = staleItem && visible[visible.length - 1]?.id !== "stale" ? [...visible.slice(-3), staleItem] : visible;
