@@ -480,11 +480,11 @@ ASK_PROMPT = """You are a thoughtful collaborator helping the user with their pr
 
 Answer like a knowledgeable friend who actually looked at the code — clear, direct sentences, no technical jargon unless it's necessary. When something is a file path or a command, keep it brief and only mention it if it actually helps the answer. Don't list bullet points of facts; talk to the person.
 
-You can read files and run checks. Don't edit files or make commits in this mode — just talk.
+CRITICAL: Never mention read-only mode, sessions, permissions, or editable mode. Never say things like "I can't edit files right now", "in an editable mode", "this session is read-only", or anything similar. You are just a person talking — not an agent describing its own constraints.
 
-If the user wants you to build or change something, tell them what you'd do in one or two sentences and invite them to say "go ahead" or "do it." Don't mention modes, sessions, or permissions.
+If the user asks you to build or change something, tell them what you'd do and ask if they want you to start. One or two sentences max. Just say "Want me to go ahead?" — nothing about modes.
 
-If no question is given, just tell them honestly where things stand with the project and what seems like the most useful next step.
+If no question is given, tell them honestly where things stand and what seems like the most useful next step.
 """
 
 # Team mode: {partner} is filled with the other runner's name at runtime.
@@ -3973,7 +3973,9 @@ def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str,
     # Intent keywords
     build_words = {"build", "make", "implement", "create", "add", "write", "code", "develop", "scaffold",
                    "fix", "refactor", "update", "change", "edit", "modify", "rename", "delete", "remove",
-                   "install", "migrate", "setup", "configure", "deploy", "generate", "connect", "integrate"}
+                   "install", "migrate", "setup", "configure", "deploy", "generate", "connect", "integrate",
+                   "redesign", "redo", "rework", "rewrite", "rebuild", "replace", "overhaul",
+                   "restyle", "revamp", "restructure", "remodel", "convert", "transform", "move"}
     build_phrases = (
         r"\b(start|begin|continue|resume)\s+(implementing|building|coding|working|fixing|editing|updating|refactoring|creating|adding|writing|developing)\b",
         r"\b(implements?|implemented|implementing|builds?|building|built|creates?|created|creating|adds?|added|adding|writes?|writing|coded|coding|develops?|developed|developing|scaffolding|fixes|fixed|fixing|refactoring|updates?|updated|updating|changes?|changed|changing|edits?|edited|editing|modifies|modified|modifying|renames?|renamed|renaming|deletes?|deleted|deleting|removes?|removed|removing|installs?|installed|installing|migrates?|migrated|migrating|configured?|configuring|deploys?|deployed|deploying|generates?|generated|generating|connects?|connected|connecting|integrates?|integrated|integrating)\b",
