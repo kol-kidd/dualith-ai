@@ -3933,47 +3933,105 @@ def project_has_active_orchestration(project_name: str) -> bool:
     return any(key.startswith(prefix) for key in active_agent_runs)
 
 
-async def classify_intent_llm(prompt: str, project_context: str) -> str | None:
-    """Ask Claude to classify intent as ask/build/review. Returns None on failure/timeout."""
-    config = RUNNER_COMMANDS.get("claude")
-    if not config:
-        return None
-    cmd = str(config["command"])
+async def classify_intent_llm(prompt: str, project_context: str, runner: str = "auto") -> str | None:
+    """Ask the active runner to classify intent as ask/build/review.
+    Runner 'auto' tries claude first, then codex. Returns None on failure/timeout."""
+
     classification_prompt = (
         f"{project_context}\n\n"
         "Classify the user message below as exactly one of: ask, build, review.\n"
         "- ask: a question, discussion, or request for information/advice\n"
         "- build: a request to create, change, fix, redesign, improve, or otherwise modify code or UI\n"
         "- review: a request to audit, check, test, or verify something\n\n"
-        'Respond with only valid JSON: {"intent": "ask"} or {"intent": "build"} or {"intent": "review"}\n\n'
+        'Respond with ONLY this JSON and nothing else: {"intent": "ask"} or {"intent": "build"} or {"intent": "review"}\n\n'
         f'User message: "{prompt}"'
     )
+
+    # Determine which runners to try
+    if runner == "auto":
+        candidates = ["claude", "codex"]
+    elif runner in RUNNER_COMMANDS:
+        candidates = [runner]
+    else:
+        candidates = ["claude", "codex"]
+
+    for candidate in candidates:
+        config = RUNNER_COMMANDS.get(candidate)
+        if not config:
+            continue
+        cmd = str(config["command"])
+        result = await _run_classifier_subprocess(cmd, candidate, classification_prompt)
+        if result:
+            return result
+
+    return None
+
+
+async def _run_classifier_subprocess(cmd: str, runner: str, classification_prompt: str) -> str | None:
+    """Run a single-shot classifier subprocess for the given runner. Returns intent or None."""
     try:
+        if runner == "claude":
+            argv = [cmd, "-p", "--output-format", "json", classification_prompt]
+        else:
+            # Codex: codex exec <prompt> — plain text output, no JSON format flag
+            argv = [cmd, "exec", classification_prompt]
+
         result = await asyncio.to_thread(
             subprocess.run,
-            [cmd, "-p", "--output-format", "json", classification_prompt],
+            argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=8,
+            timeout=10,
         )
         if result.returncode != 0:
             return None
-        # claude --output-format json wraps in {"type":"result","result":"..."} — unwrap
+
         raw = result.stdout.strip()
-        try:
-            outer = json.loads(raw)
-            inner_text = outer.get("result") or outer.get("content") or raw
-            if isinstance(inner_text, list):
-                inner_text = " ".join(b.get("text", "") for b in inner_text if isinstance(b, dict))
-        except (json.JSONDecodeError, AttributeError):
-            inner_text = raw
-        # Find the intent JSON in the output
+
+        if runner == "claude":
+            # claude --output-format json wraps response: {"type":"result","result":"..."}
+            try:
+                outer = json.loads(raw)
+                inner_text = outer.get("result") or outer.get("content") or raw
+                if isinstance(inner_text, list):
+                    inner_text = " ".join(b.get("text", "") for b in inner_text if isinstance(b, dict))
+            except (json.JSONDecodeError, AttributeError):
+                inner_text = raw
+        else:
+            # Codex: streams event JSON lines mixed with plain text — collect all text
+            lines = []
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("{"):
+                    # Try to extract text from JSON event lines
+                    try:
+                        evt = json.loads(line)
+                        text = evt.get("content") or evt.get("text") or evt.get("message") or ""
+                        if isinstance(text, list):
+                            text = " ".join(b.get("text", "") for b in text if isinstance(b, dict))
+                        if text:
+                            lines.append(str(text))
+                    except json.JSONDecodeError:
+                        pass
+                else:
+                    lines.append(line)
+            inner_text = " ".join(lines)
+
+        # Find the intent JSON anywhere in the output
         match = re.search(r'\{\s*"intent"\s*:\s*"(ask|build|review)"\s*\}', str(inner_text))
         if match:
             return match.group(1)
+
+        # Fallback: look for a bare word answer (Codex may just say "build")
+        bare = re.search(r'\b(ask|build|review)\b', str(inner_text).lower())
+        if bare:
+            return bare.group(1)
+
         return None
     except Exception:
         return None
@@ -3995,15 +4053,15 @@ def _build_project_context(project_path: Path) -> str:
     return f"Project context: {', '.join(parts) or 'new project'}."
 
 
-async def classify_orchestration_intent_async(prompt: str, project_path: Path) -> tuple[str, str]:
+async def classify_orchestration_intent_async(prompt: str, project_path: Path, runner: str = "auto") -> tuple[str, str]:
     """Async version: LLM classifier with keyword fallback."""
     project_context = _build_project_context(project_path)
-    llm_intent = await classify_intent_llm(prompt, project_context)
+    llm_intent = await classify_intent_llm(prompt, project_context, runner)
     if llm_intent in ("ask", "build", "review"):
-        log.debug("llm_intent=%s prompt=%r", llm_intent, prompt[:80])
-        return llm_intent, f"llm classifier → {llm_intent}"
+        log.debug("llm_intent=%s runner=%s prompt=%r", llm_intent, runner, prompt[:80])
+        return llm_intent, f"llm classifier ({runner}) → {llm_intent}"
     # Fallback: keyword router
-    log.debug("llm_intent failed, falling back to keywords for prompt=%r", prompt[:80])
+    log.debug("llm_intent failed (runner=%s), falling back to keywords for prompt=%r", runner, prompt[:80])
     return classify_orchestration_intent(prompt, project_path)
 
 
@@ -4178,7 +4236,8 @@ async def start_orchestration(
 async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatRequest()) -> dict[str, Any]:
     project_path = tracked_project_path(name)
 
-    intent, route_reason = await classify_orchestration_intent_async(request.prompt, project_path)
+    runner = request.runner
+    intent, route_reason = await classify_orchestration_intent_async(request.prompt, project_path, runner)
     workflow_id = workflow_for_intent(intent)
     workflow = ORCHESTRATION_WORKFLOWS[workflow_id]
     if project_has_active_orchestration(name):
@@ -4186,8 +4245,6 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
 
     if workflow_id != "ask":
         await ensure_dualith_files(project_path, "", overwrite_spec=False)
-
-    runner = request.runner
     model = clean_model(request.model)
     reasoning = clean_reasoning(request.reasoning)
 
