@@ -14,6 +14,7 @@ Dualith combines a Next.js frontend with a FastAPI backend:
 - Creates new projects with initial agent-facing files and Git bootstrap.
 - Imports existing project folders while skipping heavy/generated directories.
 - Runs builder and auditor workflows through Codex or Claude.
+- Routes normal chat requests into the right workflow automatically, including a lead/reviewer team for build work.
 - Streams filesystem, Git, and agent events into the UI through WebSockets.
 - Tracks agent run history, token usage, runner status, and quota reserves.
 - Refines rough project ideas into structured specs through the Claude CLI.
@@ -24,14 +25,14 @@ Dualith is useful when you want AI coding agents to behave like part of a local 
 
 - **Centralized control:** start, stop, inspect, and audit agent runs from one UI.
 - **Project visibility:** see tracked workspaces, recent events, commits, and active runs.
-- **Builder/auditor split:** run implementation and review as separate modes.
+- **Automatic team routing:** describe the outcome once; Dualith picks Ask, Audit, or the multi-agent Team workflow.
 - **Quota awareness:** keep a reserve for Codex and Claude usage before starting new runs.
 - **Local-first operation:** project state, usage, quota, and status files live in `.dualith`.
 
 ## Architecture
 
-- **Frontend:** Next.js app in `app/`, served on `http://localhost:3000` by default.
-- **Backend:** FastAPI app in `backend/app/main.py`, served on `http://127.0.0.1:4000` by default.
+- **Frontend:** Next.js app in `app/`, served on `http://localhost:3200` by default.
+- **Backend:** FastAPI app in `backend/app/main.py`, served on `http://127.0.0.1:4200` by default.
 - **Local state:** `.dualith/` stores project registry, usage history, quota settings, and status cache.
 - **Project root:** `DUALITH_PROJECTS_ROOT` controls where new/imported projects are created.
 - **Agent runners:** Codex and Claude commands are configured through environment variables.
@@ -80,7 +81,7 @@ Edit `.env.local` after copying the example file.
 
 | Variable | Purpose |
 | --- | --- |
-| `NEXT_PUBLIC_API_BASE_URL` | Backend API URL used by the frontend. Defaults to `http://127.0.0.1:4000`. |
+| `NEXT_PUBLIC_API_BASE_URL` | Backend API URL used by the frontend. Defaults to `http://127.0.0.1:4200`. |
 | `DUALITH_PROJECTS_ROOT` | Root folder where Dualith creates and imports projects, for example `D:\Git`. |
 | `DUALITH_CODEX_COMMAND` | Codex executable or command path. |
 | `DUALITH_CODEX_ARGS` | Base arguments used when starting Codex. |
@@ -115,13 +116,13 @@ npm run dev
 Open the app at:
 
 ```text
-http://localhost:3000
+http://localhost:3200
 ```
 
 The backend API runs at:
 
 ```text
-http://127.0.0.1:4000
+http://127.0.0.1:4200
 ```
 
 You can also run the two processes separately:
@@ -131,15 +132,49 @@ npm run dev:api
 npm run dev:web
 ```
 
+For LAN mode, use:
+
+```powershell
+npm run dev:lan
+```
+
+This binds Dualith to your local network and prints the phone URL, typically `http://<your-lan-ip>:3200`.
+
+## Auto-Start On Windows
+
+Dualith can start automatically when you log in to Windows. The startup helper runs LAN mode and writes logs to `.tmp/dualith-startup.log`:
+
+```powershell
+.\scripts\start-dualith-lan.ps1
+```
+
+Register or refresh the Windows Task Scheduler entry:
+
+```powershell
+.\scripts\register-dualith-startup.ps1
+```
+
+The task is named `Dualith LAN` and runs `npm run dev:lan` in the background at user logon.
+
+If Windows denies Task Scheduler registration in a non-admin shell, use the current-user Startup folder fallback:
+
+```powershell
+.\scripts\create-dualith-startup-shortcut.ps1
+```
+
+This creates `Dualith LAN.lnk` in your Windows Startup folder and points it at the same LAN startup helper.
+
 ## Usage Workflow
 
 1. **Create or import a project.** Dualith registers the workspace under `.dualith/projects.json`.
 2. **Refine the goal if needed.** The refine action uses the Claude CLI to turn a rough idea into a structured project spec.
-3. **Start a builder or auditor run.** Builder and auditor modes can use Codex, Claude, or Auto runner routing.
+3. **Send the task.** Dualith routes questions to Ask, review requests to Audit, and build/change requests to the multi-agent Team workflow.
 4. **Watch events.** Filesystem changes, Git events, active agents, logs, usage, and quota status stream into the UI.
 5. **Stop or rerun agents as needed.** Active runs are tracked in the dashboard and recorded in local usage history.
 
-Auto runner mode prefers Codex for build work and Claude for audit work. If the preferred runner is over its configured quota reserve, Dualith falls back to the other runner when available.
+Auto runner mode uses the saved runner policy from the Limits panel. Codex-heavy uses Codex as the implementation lead and Claude as reviewer; Claude-heavy flips that pairing; Balanced picks the runner with the most quota headroom; Registry auto uses the agent defaults. If the preferred runner is over its configured quota reserve, Dualith falls back to the other runner when available.
+
+Builder and lead runs do not ask the agent to write Git metadata directly. After a successful run, Dualith creates the Git checkpoint from the backend process when the repository was clean before the run. If the working tree was already dirty, Dualith skips the automatic checkpoint to avoid mixing unrelated changes.
 
 Project imports skip common generated or heavy directories, including `.git`, `node_modules`, `.next`, `dist`, `build`, `.venv`, `__pycache__`, `.cache`, and `.turbo`.
 
@@ -163,7 +198,7 @@ For production-style use, make sure the FastAPI backend is also running and that
 
 ### API Port Is Already In Use
 
-The combined dev script checks `NEXT_PUBLIC_API_BASE_URL`. If port `4000` is already occupied by another server, stop that process and rerun:
+The combined dev script checks `NEXT_PUBLIC_API_BASE_URL`. If port `4200` is already occupied by another server, stop that process and rerun:
 
 ```powershell
 npm run dev
