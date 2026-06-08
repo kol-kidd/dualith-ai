@@ -3185,10 +3185,12 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
     output_path = result_file_path(project_path, str(usage_record["id"]))
     read_only = agent == "ask"
     sandbox = "read-only" if read_only else "workspace-write"
-    # "ask" uses default permission mode (prompts on writes) as a safety net.
-    # "teammate" is NOT read-only: it must write to AGENT_CHAT.md. The prompt
-    # instructs it not to touch source files — no CLI enforcement needed.
-    permission_mode = "default" if read_only and runner == "claude" else None
+    # No --permission-mode for ask/claude: the prompt instructs it not to write,
+    # and --sandbox read-only handles Codex. Passing --permission-mode default
+    # makes Claude perceive itself as write-restricted and it truthfully reports
+    # that to the user ("this session is read-only") regardless of prompt instructions.
+    # "teammate" is NOT read-only: it must write to AGENT_CHAT.md.
+    permission_mode = None
     pre_run_git_status = ""
     if agent in CHECKPOINT_MODES:
         _, pre_run_git_status = await git_status_porcelain(project_path)
@@ -3975,10 +3977,13 @@ def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str,
                    "fix", "refactor", "update", "change", "edit", "modify", "rename", "delete", "remove",
                    "install", "migrate", "setup", "configure", "deploy", "generate", "connect", "integrate",
                    "redesign", "redo", "rework", "rewrite", "rebuild", "replace", "overhaul",
-                   "restyle", "revamp", "restructure", "remodel", "convert", "transform", "move"}
+                   "restyle", "revamp", "restructure", "remodel", "convert", "transform", "move",
+                   "simplify", "clean", "improve", "enhance", "polish"}
     build_phrases = (
         r"\b(start|begin|continue|resume)\s+(implementing|building|coding|working|fixing|editing|updating|refactoring|creating|adding|writing|developing)\b",
         r"\b(implements?|implemented|implementing|builds?|building|built|creates?|created|creating|adds?|added|adding|writes?|writing|coded|coding|develops?|developed|developing|scaffolding|fixes|fixed|fixing|refactoring|updates?|updated|updating|changes?|changed|changing|edits?|edited|editing|modifies|modified|modifying|renames?|renamed|renaming|deletes?|deleted|deleting|removes?|removed|removing|installs?|installed|installing|migrates?|migrated|migrating|configured?|configuring|deploys?|deployed|deploying|generates?|generated|generating|connects?|connected|connecting|integrates?|integrated|integrating)\b",
+        # Desire/preference phrases always imply a change request: "i want it to X", "make it X", "it should be X"
+        r"\b(i\s+want\s+(it|this|the|that)\s+to|i'?d\s+like\s+(it|this|the|that)\s+to|make\s+(it|this|the|that)\s+\w+|it\s+should\s+(be|feel|look|work|have))\b",
     )
     audit_words = {"audit", "review", "check", "test", "verify", "scan", "inspect", "validate",
                    "assess", "analyze", "analyse", "lint", "debug", "investigate"}
