@@ -13,3 +13,18 @@ __pycache__/
 ai-workspace/
 .dualith/
 .env.local
+
+# Dualith-managed project files (seeded when dualith-ai itself is a tracked project)
+.agents/
+.claude/skills/
+AGENTS.md
+DESIGN.md
+PRODUCT.md
+PLAN.md
+SPEC.md
+FEEDBACK.md
+AGENT_CHAT.md
+CHAT_HISTORY.md
+HUMAN_INPUT.md
+CLAUDE_TODO.md
+.dualith_memory
