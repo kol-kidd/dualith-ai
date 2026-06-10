@@ -6719,7 +6719,10 @@ async def upload_attachments(name: str, files: list[UploadFile] = File(...)) -> 
 async def get_attachment(name: str, filename: str) -> FileResponse:
     """Serve a previously uploaded attachment image so the frontend can render thumbnails."""
     project_path = tracked_project_path(name)
-    file_path = project_path / ".dualith" / "attachments" / filename
+    attachments_dir = (project_path / ".dualith" / "attachments").resolve()
+    file_path = (attachments_dir / filename).resolve()
+    if attachments_dir not in file_path.parents:
+        raise HTTPException(status_code=404, detail="Attachment not found.")
     if not file_path.exists() or file_path.suffix.lower() not in ATTACHMENT_EXTENSIONS:
         raise HTTPException(status_code=404, detail="Attachment not found.")
     return FileResponse(file_path)

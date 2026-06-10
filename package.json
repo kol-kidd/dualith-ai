@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "node scripts/dev.mjs",
-    "dev:lan": "node scripts/dev.mjs --lan",
+    "dev": "node scripts/dev.mjs --lan",
     "dev:web": "next dev",
     "dev:api": "node scripts/dev-api.mjs",
+    "claude:statusline": "node scripts/capture-claude-statusline.mjs",
     "build": "node scripts/build.mjs",
     "start": "node scripts/start.mjs",
     "lint": "next lint",

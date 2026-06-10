@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dualith — Direction A (Group chat, keep mono)</title>
+<style>
+  :root{
+    --bg:#0a0e14; --surface:#0f141c; --surface2:#141b25; --line:#1e2733;
+    --line-hard:#2a3645; --text:#cdd6e0; --muted:#6b7888; --cyan:#3dd6d0;
+    --amber:#e8b04b; --emerald:#4fd18b; --red:#e8606b; --violet:#9d7bf0;
+    --blue:#5a9cf0; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;line-height:1.5}
+  .wrap{max-width:760px;margin:0 auto;padding:20px}
+  .head{display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:8px}
+  .head h1{font-size:14px;margin:0;letter-spacing:.5px;text-transform:uppercase;color:var(--text)}
+  .head .badge{margin-left:auto;font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--cyan);border:1px solid var(--cyan);border-radius:3px;padding:2px 7px}
+  .presence{display:flex;gap:6px;flex-wrap:wrap;padding:10px 0 14px;border-bottom:1px solid var(--line);margin-bottom:14px}
+  .chip{display:flex;align-items:center;gap:6px;font-size:11px;background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:3px 10px 3px 5px}
+  .dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+  .av{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;font-size:10px;font-weight:700;color:#06080c}
+  .live .dot{background:var(--cyan);box-shadow:0 0 0 0 var(--cyan);animation:pulse 1.4s infinite}
+  .idle .dot{background:var(--muted)}
+  .done .dot{background:var(--emerald)}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(61,214,208,.5)}70%{box-shadow:0 0 0 6px rgba(61,214,208,0)}100%{box-shadow:0 0 0 0 rgba(61,214,208,0)}}
+  .turn{display:flex;gap:10px;margin-bottom:18px;align-items:flex-start}
+  .turn .avatar{width:30px;height:30px;border-radius:8px;flex:0 0 auto;display:grid;place-items:center;font-weight:700;font-size:12px;color:#06080c;margin-top:2px}
+  .turn .body{flex:1;min-width:0}
+  .turn .who{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+  .turn .who b{font-size:12px;letter-spacing:.3px}
+  .turn .who .role{font-size:9px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);border:1px solid var(--line-hard);padding:1px 5px;border-radius:3px}
+  .turn .who time{font-size:10px;color:var(--muted);margin-left:auto}
+  .bubble{background:var(--surface);border:1px solid var(--line);border-left:2px solid var(--accent,var(--line-hard));border-radius:8px;padding:9px 12px;font-size:12.5px}
+  .verdict{display:inline-flex;align-items:center;gap:5px;font-size:10px;text-transform:uppercase;letter-spacing:.6px;padding:2px 8px;border-radius:3px;margin-top:8px}
+  .v-ok{color:var(--emerald);background:rgba(79,209,139,.1);border:1px solid rgba(79,209,139,.3)}
+  .v-warn{color:var(--amber);background:rgba(232,176,75,.1);border:1px solid rgba(232,176,75,.3)}
+  .typing{display:flex;gap:10px;align-items:center;padding:4px 0}
+  .typing .avatar{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;font-weight:700;font-size:12px;color:#06080c}
+  .typing .tx{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px}
+  .typing .tdots span{display:inline-block;width:4px;height:4px;border-radius:50%;background:var(--cyan);margin-right:3px;animation:bnc 1s infinite}
+  .typing .tdots span:nth-child(2){animation-delay:.15s}.typing .tdots span:nth-child(3){animation-delay:.3s}
+  @keyframes bnc{0%,60%,100%{opacity:.3}30%{opacity:1}}
+  .lanes{margin:6px 0 0;display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .lane{background:var(--surface2);border:1px solid var(--line);border-radius:7px;padding:8px 10px}
+  .lane .lh{display:flex;align-items:center;gap:6px;font-size:10px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px}
+  .lane .lt{font-size:11px;color:var(--muted)}
+  .sys{text-align:center;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin:14px 0;position:relative}
+  .sys::before,.sys::after{content:"";position:absolute;top:50%;width:34%;height:1px;background:var(--line)}
+  .sys::before{left:0}.sys::after{right:0}
+  .note{font-size:11px;color:var(--muted);text-align:center;margin-top:24px;padding-top:12px;border-top:1px solid var(--line)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>budget-tracker · team room</h1>
+    <span class="badge">● live · round 2</span>
+  </div>
+
+  <div class="presence">
+    <span class="chip done"><span class="dot"></span><span class="av" style="background:var(--violet)">PM</span>PM</span>
+    <span class="chip done"><span class="dot"></span><span class="av" style="background:var(--blue)">A</span>Architect</span>
+    <span class="chip done"><span class="dot"></span><span class="av" style="background:var(--blue)">P</span>Planner</span>
+    <span class="chip live"><span class="dot"></span><span class="av" style="background:var(--cyan)">L</span>Lead · Codex</span>
+    <span class="chip idle"><span class="dot"></span><span class="av" style="background:var(--amber)">T</span>Tester</span>
+    <span class="chip idle"><span class="dot"></span><span class="av" style="background:var(--red)">S</span>Security</span>
+    <span class="chip idle"><span class="dot"></span><span class="av" style="background:var(--emerald)">R</span>Reviewer · Claude</span>
+  </div>
+
+  <div class="sys">round 2 started · 18:34</div>
+
+  <div class="turn">
+    <div class="avatar" style="background:var(--cyan)">L</div>
+    <div class="body">
+      <div class="who"><b>Lead</b><span class="role">Codex · implementation</span><time>18:34</time></div>
+      <div class="bubble" style="--accent:var(--cyan)">
+        Scope spans three domains. Spinning up parallel lanes — I'll merge once they're green.
+        <div class="lanes">
+          <div class="lane"><div class="lh"><span class="dot" style="background:var(--cyan);box-shadow:0 0 0 0 var(--cyan);animation:pulse 1.4s infinite"></span>UI Agent</div><div class="lt">building <code>BalanceCard.tsx</code>…</div></div>
+          <div class="lane"><div class="lh"><span class="dot" style="background:var(--cyan)"></span>API Agent</div><div class="lt">wiring <code>/api/budget</code>…</div></div>
+          <div class="lane"><div class="lh"><span class="dot" style="background:var(--emerald)"></span>DB Agent</div><div class="lt">✓ migration applied</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="turn">
+    <div class="avatar" style="background:var(--amber)">T</div>
+    <div class="body">
+      <div class="who"><b>Tester</b><span class="role">Claude · build/lint/test</span><time>18:36</time></div>
+      <div class="bubble" style="--accent:var(--emerald)">
+        Build clean · lint clean · 14/14 tests passing.
+        <div class="verdict v-ok">✓ passed</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="turn">
+    <div class="avatar" style="background:var(--red)">S</div>
+    <div class="body">
+      <div class="who"><b>Security Reviewer</b><span class="role">Claude · specialist</span><time>18:37</time></div>
+      <div class="bubble" style="--accent:var(--amber)">
+        The <code>/api/budget</code> route reads <code>userId</code> from the query string without an ownership check — any authed user can read another user's budget. Add an RLS-backed guard before this merges.
+        <div class="verdict v-warn">⚠ changes requested</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="typing">
+    <div class="avatar" style="background:var(--cyan)">L</div>
+    <div class="tx"><span>Lead is addressing security findings</span><span class="tdots"><span></span><span></span><span></span></span></div>
+  </div>
+
+  <div class="note">Direction A — group chat, monospace preserved. Avatars · presence dots · live lanes · inline verdicts.</div>
+</div>
+</body>
+</html>
