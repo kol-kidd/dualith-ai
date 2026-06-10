@@ -2102,7 +2102,6 @@ function AgentProse({ body }: { body: string }) {
       {quote && (
         <div className="team-quote">
           <div className="team-quote__head">re: {quote.quoteRole}{quote.quoteRef ? ` · ${quote.quoteRef}` : ""}</div>
-          <div className="team-quote__body">{quote.quoteRef || quote.quoteRole}</div>
         </div>
       )}
       {paragraphs.map((para, i) => (
@@ -2183,124 +2182,95 @@ function isSpecialistRole(role: TeamMessageRole) {
     role === "maintainability_reviewer";
 }
 
-function specialistRoleLabel(role: TeamMessageRole) {
-  const id = role.toString();
-  return SPECIALIST_REVIEW_LABELS[id] ?? "Review";
-}
-
 function ensureSentence(value: string) {
   const clean = value.trim().replace(/\s+/g, " ");
   if (!clean) return "";
   return /[.!?]$/.test(clean) ? clean : `${clean}.`;
 }
 
-function firstReadableLine(body: string) {
-  return body
-    .split(/\n+/)
-    .map((line) => line.trim().replace(/^[-*]\s*/, ""))
-    .find((line) => {
-      if (!line) return false;
-      if (/^(```|#{1,6}\s|commands?:|runner:|status:)/i.test(line)) return false;
-      if (/^(TESTER|TEAMMATE|SECURITY REVIEW|PERFORMANCE REVIEW|MAINTAINABILITY REVIEW|ARCHITECTURE REVIEW):/i.test(line)) return false;
-      return true;
-    }) ?? "";
+// Agent prose renders verbatim — no paraphrased ventriloquism. Long bodies keep
+// the leading paragraphs visible and fold the remainder behind "full output".
+const TURN_PREVIEW_LIMIT = 1100;
+
+function splitLongBody(body: string): { lead: string; rest: string } {
+  if (body.length <= TURN_PREVIEW_LIMIT) return { lead: body, rest: "" };
+  const paras = body.split(/\n{2,}/);
+  let lead = "";
+  let index = 0;
+  for (; index < paras.length; index += 1) {
+    const next = lead ? `${lead}\n\n${paras[index]}` : paras[index];
+    if (lead && next.length > TURN_PREVIEW_LIMIT) break;
+    lead = next;
+  }
+  return { lead, rest: paras.slice(index).join("\n\n") };
 }
 
-function shortSentence(body: string) {
-  const line = firstReadableLine(body);
-  if (!line) return "";
-  const match = line.match(/^(.{18,180}?[.!?])(?:\s|$)/);
-  return ensureSentence(match?.[1] ?? line.slice(0, 180));
+type TurnAck = { kind: "ack" | "wait"; text: string; who?: string };
+
+function turnRunner(task: DualithTask | null, project: ProjectRecord | null, role: TeamMessageRole): string {
+  if (!task) return "";
+  if (role === "pm" || role === "architect" || role === "planner" || role === "lead" || role === "tester") {
+    const phaseRunner = task.phases?.[role]?.runner || "";
+    if (phaseRunner) return phaseRunner;
+    if (role === "lead") return project?.team?.lead ?? "";
+    if (role === "tester") return project?.team?.teammate ?? "";
+    return "";
+  }
+  if (isSpecialistRole(role)) {
+    return task.specialist_reviews?.find((review) => review.id === role)?.runner || "";
+  }
+  if (role === "teammate") return task.phases?.reviewer?.runner || project?.team?.teammate || "";
+  return "";
 }
 
-function teamTurnDisplayTitle(message: TeamMessage) {
-  return isSpecialistRole(message.role) ? "Reviewer" : message.title;
-}
-
-function teamTurnSummary(message: TeamMessage, body: string) {
-  const verdict = reviewerVerdict(message);
-  if (message.role === "tester") {
-    if (/TESTER:\s*PASSED/i.test(message.body)) return "Good. Build passed. I'm checking runtime behavior now.";
-    if (/TESTER:\s*FAILED/i.test(message.body)) return "I found a validation failure. Details are below.";
-    return shortSentence(body) || "I'm running the validation suite.";
-  }
-  if (message.role === "lead") {
-    const first = shortSentence(body);
-    if (!first) return "I'm implementing the selected route.";
-    return /^I\b/i.test(first) ? first : `I finished the implementation pass. ${first}`;
-  }
-  if (message.role === "pm") {
-    return shortSentence(body) || "I found multiple useful routes. Pick the one the team should take first.";
-  }
-  if (message.role === "architect") {
-    const first = shortSentence(body);
-    return first ? `I'm checking the approach boundaries. ${first}` : "I'm checking the approach boundaries.";
-  }
-  if (message.role === "planner" || message.role === "plan") {
-    return shortSentence(body) || "I turned the selected route into a build plan.";
-  }
-  if (isSpecialistRole(message.role)) {
-    const label = specialistRoleLabel(message.role);
-    if (verdict.changesRequested) return `${label} concern detected. I'm sending it back with details.`;
-    if (verdict.approved) return `${label}: no findings.`;
-    return shortSentence(body) || `${label} review is in progress.`;
-  }
-  if (message.role === "teammate") {
-    if (verdict.approved) return "Looks good. No blocking review issues.";
-    if (verdict.changesRequested) return "I found review changes. Details are below.";
-    return shortSentence(body) || "I'm reviewing quality gates.";
-  }
-  if (message.role === "summarizer") return "I saved the run summary and project notes.";
-  return shortSentence(body);
-}
-
-function shouldShowTeamMessage(message: TeamMessage) {
-  if (!isSpecialistRole(message.role)) return true;
-  const verdict = reviewerVerdict(message);
-  return verdict.changesRequested || /failed|error|blocked|concern/i.test(verdict.displayBody);
-}
-
-function shouldShowTurnDetails(body: string, summary: string) {
-  if (!body.trim()) return false;
-  if (!summary.trim()) return true;
-  const normalizedBody = body.trim().replace(/\s+/g, " ");
-  const normalizedSummary = summary.trim().replace(/\s+/g, " ");
-  return normalizedBody.length > normalizedSummary.length + 24 || normalizedBody !== normalizedSummary;
-}
-
-function TeamTurn({ message, isLast, lanes, synthetic }: { message: TeamMessage; isLast: boolean; lanes?: LaneInfo[]; synthetic?: boolean }) {
+function TeamTurn({ message, isLast, lanes, synthetic, runner, acks }: {
+  message: TeamMessage;
+  isLast: boolean;
+  lanes?: LaneInfo[];
+  synthetic?: boolean;
+  runner?: string;
+  acks?: TurnAck[];
+}) {
   const body = teamRoomBody(message);
   const { approved, changesRequested } = reviewerVerdict(message);
   const testerPassed = message.role === "tester" && /TESTER:\s*PASSED/i.test(message.body);
   const testerFailed = message.role === "tester" && /TESTER:\s*FAILED/i.test(message.body);
   const glyph = teamTurnGlyph(message.role);
   const active = isLast && teamTurnIsActive(message.role);
-  const summary = teamTurnSummary(message, body);
-  const showDetails = shouldShowTurnDetails(body, summary);
+  const { lead: bodyLead, rest: bodyRest } = splitLongBody(body);
 
   return (
     <div className={`team-turn${active ? " is-active" : ""}${synthetic ? " is-synthetic" : ""}`} role="article" aria-label={`${message.title} turn`}>
       <div className="team-turn__glyph" aria-hidden="true">{glyph}</div>
       <div className="team-turn__body">
         <div className="team-turn__head">
-          <span className="team-turn__who">{teamTurnDisplayTitle(message)}</span>
-          <span className="team-turn__runner">{teamRoomRoleKind(message.role)}</span>
+          <span className="team-turn__who">{message.title}</span>
+          {runner && <span className="team-turn__runner">{runner}</span>}
+          <span className="team-turn__kind">{teamRoomRoleKind(message.role)}</span>
           {message.timestamp && <time className="team-turn__time">{timestampLabel(message.timestamp)}</time>}
         </div>
-        {summary && <p className="team-turn__summary">{summary}</p>}
-        {showDetails && (
+        {bodyLead && <AgentProse body={bodyLead} />}
+        {bodyRest && (
           <details className="team-turn__details">
-            <summary>Details</summary>
-            <AgentProse body={body} />
+            <summary>Full output</summary>
+            <AgentProse body={bodyRest} />
           </details>
         )}
-        {!summary && body && !showDetails && <AgentProse body={body} />}
         {message.role === "lead" && lanes && lanes.length >= 2 && <LaneMatrix lanes={lanes} />}
         {(approved || changesRequested || testerPassed || testerFailed) && (
           <div className={`team-verdict ${approved || testerPassed ? "is-ok" : changesRequested ? "is-warn" : "is-err"}`}>
-            {approved || testerPassed ? "[ok]" : "[!]"}
+            {approved || testerPassed ? "[✓]" : "[!]"}
             {" "}
             {approved ? "approved" : changesRequested ? "changes requested" : testerPassed ? "passed" : "failed"}
+          </div>
+        )}
+        {acks && acks.length > 0 && (
+          <div className="team-acks">
+            {acks.map((ack, i) => (
+              <span key={`${ack.kind}-${i}`} className={`team-ack${ack.kind === "wait" ? " is-wait" : ""}`}>
+                {ack.text}{ack.who ? <b>{ack.who}</b> : null}
+              </span>
+            ))}
           </div>
         )}
       </div>
@@ -2308,14 +2278,31 @@ function TeamTurn({ message, isLast, lanes, synthetic }: { message: TeamMessage;
   );
 }
 
-function WorkingLine({ project, projectEvents }: { project: ProjectRecord | null; projectEvents: ConsoleEntry[] }) {
+function WorkingLine({ project, projectEvents, task }: { project: ProjectRecord | null; projectEvents: ConsoleEntry[]; task?: DualithTask | null }) {
   const activeRun = newestActiveRun(project);
   if (!project || !activeRun) return null;
-  const items = activityTimeline(project, projectEvents, null);
-  const latest = items[items.length - 1];
-  const detail = latest?.text ?? "Getting oriented...";
   const role = activeRun.mode as TeamMessageRole;
   const glyph = teamTurnGlyph(role) ?? "T";
+
+  // Prefer concrete context: active lane · file, then the team step, then the event timeline.
+  const leadLanes = task?.phases?.lead?.lanes ?? [];
+  const laneEntries: { name: string; files?: string[]; status?: string }[] = leadLanes.length
+    ? leadLanes.map((lane) => ({ name: lane.lane, files: lane.files, status: lane.status }))
+    : (task?.subagents ?? []).map((sub) => ({ name: sub.label, files: sub.files, status: sub.status }));
+  const activeLane = laneEntries.find((lane) => lane.status === "running" || lane.status === "active");
+  const teamStep = project.team?.status === "running" ? project.team.step : "";
+
+  let detail: string;
+  if (activeLane) {
+    const file = activeLane.files?.[0]?.split("/").pop();
+    detail = `${activeRun.mode} → ${activeLane.name} lane${file ? ` · ${file}` : ""}`;
+  } else if (teamStep) {
+    detail = `${activeRun.mode} → ${teamStep}${project.team?.round ? ` · round ${project.team.round}` : ""}`;
+  } else {
+    const items = activityTimeline(project, projectEvents, null);
+    detail = items[items.length - 1]?.text ?? "getting oriented...";
+  }
+
   return (
     <div className="working-line" aria-live="polite" aria-label="Agent working">
       <div className="working-line__glyph" aria-hidden="true">{glyph}</div>
@@ -2353,6 +2340,57 @@ function syntheticTurnsFromTask(task: DualithTask): TeamMessage[] {
   return turns;
 }
 
+// Decisions thread into the stream as system turns; the DecisionPanel only handles
+// the *pending* gate. Routing/clarification choices precede the build, so they lead.
+function decisionTurns(task: DualithTask): TeamMessage[] {
+  return (task.decisions ?? [])
+    .filter((decision) => decision.selected)
+    .map((decision) => ({
+      role: "note" as TeamMessageRole,
+      title: "Decision",
+      timestamp: decision.timestamp,
+      body: `${decision.label} → ${decision.selected}${decision.reason ? `\n\n${decision.reason}` : ""}`,
+    }));
+}
+
+// Specialist reviews that never wrote an AGENT_CHAT section still appear in the
+// stream — their broadcast summary becomes the turn body, with the structured
+// verdict line appended so reviewerVerdict() picks it up.
+function specialistTurnsFromReviews(task: DualithTask, present: Set<TeamMessageRole>): TeamMessage[] {
+  return (task.specialist_reviews ?? [])
+    .filter((review) => SPECIALIST_REVIEW_IDS.includes(review.id) && !present.has(review.id as TeamMessageRole))
+    .filter((review) => Boolean(review.summary?.trim()) || reviewHasConcern(review) || reviewIsCleanStatus(review.status))
+    .map((review) => {
+      const prefix = `${review.id.replace("_reviewer", "").toUpperCase()} REVIEW`;
+      const verdictLine = reviewHasConcern(review)
+        ? `\n${prefix}: CHANGES REQUESTED`
+        : reviewIsCleanStatus(review.status)
+          ? `\n${prefix}: APPROVED`
+          : "";
+      return {
+        role: review.id as TeamMessageRole,
+        title: `${SPECIALIST_REVIEW_LABELS[review.id] ?? review.label} Reviewer`,
+        timestamp: review.updated_at ?? "",
+        body: `${review.summary?.trim() || (reviewHasConcern(review) ? "Concern raised — details in FEEDBACK.md." : "No findings.")}${verdictLine}`,
+      };
+    });
+}
+
+// Lightweight acknowledgement state, derived from the stream itself: a
+// changes-requested verdict is "acked" once a later Lead turn exists.
+function turnAcks(visible: TeamMessage[], index: number, task: DualithTask): TurnAck[] | undefined {
+  const message = visible[index];
+  if (!reviewerVerdict(message).changesRequested) return undefined;
+  const later = visible.slice(index + 1);
+  const acks: TurnAck[] = [];
+  if (later.some((m) => m.role === "lead")) acks.push({ kind: "ack", text: "acked by ", who: "Lead" });
+  const reResolved = later.some((m) => m.role === message.role && reviewerVerdict(m).approved);
+  if (!reResolved && (task.status === "active" || task.status === "blocked")) {
+    acks.push({ kind: "wait", text: "waiting on re-review" });
+  }
+  return acks.length ? acks : undefined;
+}
+
 function TeamRoom({
   task,
   messages,
@@ -2365,7 +2403,16 @@ function TeamRoom({
   projectEvents: ConsoleEntry[];
 }) {
   if (!task) return null;
-  const visible = messages.filter((m) => m.body.trim() && m.role !== "task" && shouldShowTeamMessage(m));
+  const chatTurns = messages.filter((m) => m.body.trim() && m.role !== "task");
+  const present = new Set(chatTurns.map((m) => m.role));
+  const specialistTurns = specialistTurnsFromReviews(task, present);
+  // The review pipeline is sequenced lead → tester → specialists → final reviewer,
+  // so synthesized specialist turns splice in before the final reviewer's verdict.
+  const teammateIndex = chatTurns.findIndex((m) => m.role === "teammate");
+  const withSpecialists = teammateIndex === -1
+    ? [...chatTurns, ...specialistTurns]
+    : [...chatTurns.slice(0, teammateIndex), ...specialistTurns, ...chatTurns.slice(teammateIndex)];
+  const visible = [...decisionTurns(task), ...withSpecialists];
   const activeRun = newestActiveRun(project);
   const fallbackTurns = visible.length === 0 && !activeRun ? syntheticTurnsFromTask(task) : [];
 
@@ -2373,14 +2420,15 @@ function TeamRoom({
     <section aria-label="Team room">
       <div className="team-room">
         {visible.length > 0 ? visible.map((msg, i) => {
-          const isLeadMsg = msg.role === "lead";
-          const leadLanes = isLeadMsg ? (task?.phases?.lead?.lanes ?? undefined) : undefined;
+          const leadLanes = msg.role === "lead" ? (task?.phases?.lead?.lanes ?? undefined) : undefined;
           return (
             <TeamTurn
               key={`${msg.role}-${msg.timestamp}-${i}`}
               message={msg}
               isLast={i === visible.length - 1}
               lanes={leadLanes}
+              runner={turnRunner(task, project, msg.role)}
+              acks={turnAcks(visible, i, task)}
             />
           );
         }) : fallbackTurns.map((msg, i) => (
@@ -2388,10 +2436,11 @@ function TeamRoom({
             key={`synthetic-${msg.role}-${i}`}
             message={msg}
             isLast={i === fallbackTurns.length - 1}
+            runner={turnRunner(task, project, msg.role)}
             synthetic
           />
         ))}
-        {activeRun && <WorkingLine project={project} projectEvents={projectEvents} />}
+        {activeRun && <WorkingLine project={project} projectEvents={projectEvents} task={task} />}
         {visible.length === 0 && fallbackTurns.length === 0 && !activeRun && (
           <div className="team-room__waiting">
             <span className="team-room__waiting-glyph">T</span>
@@ -3649,26 +3698,19 @@ function DirectConversation({
 function DirectChatPanel({
   project,
   results,
-  onSendChat,
-  onStopChat,
   onHumanAnswer,
   onApprovePlan,
-  runnerHealth,
 }: {
   project: ProjectRecord | null;
   results: AgentResult[];
-  onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean }) => Promise<void>;
-  onStopChat: (projectName: string) => Promise<void>;
   onHumanAnswer: (projectName: string, answer: string) => Promise<void>;
   onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
-  runnerHealth: RunnerHealth;
 }) {
   const blocked = Boolean(project?.human_input?.blocked);
   return (
     <div className="dualith-direct-panel">
       <DirectConversation project={project} results={results} onApprovePlan={onApprovePlan} />
       {blocked && project && <HumanInputPane project={project} onSubmit={onHumanAnswer} />}
-      <ChatComposer project={project} onSendChat={onSendChat} onStopChat={onStopChat} runnerHealth={runnerHealth} />
     </div>
   );
 }
@@ -3939,6 +3981,18 @@ function promptWithAgenticChoice(choice: AgenticChoiceDraft, option: HumanInputO
   ].join("\n");
 }
 
+// Mirrors the backend intent classifier's keyword fallback closely enough to hint
+// where the brief will route. The backend stays authoritative — this is a preview.
+function likelyWorkflow(prompt: string, planMode: boolean): string {
+  const text = prompt.trim().toLowerCase();
+  if (!text) return "";
+  if (/^(commit|push|revert|merge|rebase|tag)\b/.test(text) || /\bgit\b.*\b(commit|push|branch|merge)\b/.test(text)) return "git-direct";
+  if (planMode) return "plan-first";
+  if (/\b(review|audit|critique|inspect)\b/.test(text) && !/\b(add|build|implement|create|fix|make|write|refactor)\b/.test(text)) return "review-only";
+  if (/\?\s*$/.test(text) || /^(what|why|how|where|when|who|which|can|could|does|do|is|are|should|explain|show me|tell me)\b/.test(text)) return "ask";
+  return "auto-team";
+}
+
 function ChatComposer({
   project, onSendChat, onStopChat, runnerHealth,
 }: {
@@ -4138,7 +4192,7 @@ function ChatComposer({
             onChange={(event) => { setRunPrompt(event.target.value); setAgenticChoice(null); }}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
-            placeholder={project ? "New task or instruction for the team..." : "Select a project first"}
+            placeholder={project ? "Brief the team..." : "Select a project first"}
             rows={1}
             className="block max-h-44 min-h-[2.5rem] w-full resize-none bg-transparent px-2 py-2 leading-6 text-text outline-none placeholder:text-muted"
             spellCheck={false}
@@ -4163,6 +4217,11 @@ function ChatComposer({
                   </button>
                 ))}
               </div>
+            </div>
+          )}
+          {runPrompt.trim() && !agenticChoice && (
+            <div className="dualith-composer-hint" aria-live="polite">
+              route → {likelyWorkflow(runPrompt, planMode)}
             </div>
           )}
           <div className="dualith-composer-toolbar flex flex-wrap items-center justify-between gap-2 px-1">
@@ -4221,7 +4280,7 @@ function ChatComposer({
                   onClick={() => void send()}
                   className="h-8 rounded-full bg-accent/90 px-4 text-[12px] font-medium text-bg outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
                 >
-                  {pendingAction === "start" ? "..." : agenticChoice ? "Choose" : "Send"}
+                  {pendingAction === "start" ? "..." : agenticChoice ? "Choose" : "Dispatch"}
                 </button>
               )}
             </div>
@@ -4964,6 +5023,11 @@ function TeamRoomFull({
             <span className="room-task-header__title">{task.title}</span>
           </div>
           <div className="room-task-header__right">
+            {project.team && (
+              <span className="room-task-header__step">
+                {task.workflow_id} · r{project.team.round}{project.team.status === "running" && project.team.step ? ` · ${project.team.step}` : ""}
+              </span>
+            )}
             <span className={`room-task-header__status is-${taskStatusTone(task.status)}`}>{task.status}</span>
           </div>
         </div>
@@ -6077,11 +6141,8 @@ function WorkspaceRightPanel({
           <DirectChatPanel
             project={project}
             results={results}
-            onSendChat={onSendChat}
-            onStopChat={onStopChat}
             onHumanAnswer={onHumanAnswer}
             onApprovePlan={onApprovePlan}
-            runnerHealth={runnerHealth}
           />
         )}
         {tab === "artifacts" && (

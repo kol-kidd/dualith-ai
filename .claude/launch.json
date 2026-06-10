@@ -7,7 +7,7 @@
       "runtimeArgs": ["next", "dev", "--port", "3200"],
       "port": 3200,
       "env": {
-        "NEXT_PUBLIC_API_BASE_URL": "http://127.0.0.1:4000"
+        "NEXT_PUBLIC_API_BASE_URL": "http://127.0.0.1:4200"
       }
     }
   ]
