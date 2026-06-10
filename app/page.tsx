@@ -3994,12 +3994,13 @@ function likelyWorkflow(prompt: string, planMode: boolean): string {
 }
 
 function ChatComposer({
-  project, onSendChat, onStopChat, runnerHealth,
+  project, onSendChat, onStopChat, runnerHealth, onClearChat,
 }: {
   project: ProjectRecord | null;
   onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean }) => Promise<void>;
   onStopChat: (projectName: string) => Promise<void>;
   runnerHealth: RunnerHealth;
+  onClearChat?: (projectName: string) => Promise<void>;
 }) {
   const [runner, setRunner] = useState<RunnerId>("auto");
   const [modelChoice, setModelChoice] = useState(defaultModelByRunner.auto);
@@ -4262,6 +4263,17 @@ function ChatComposer({
               >
                 {planMode ? "Plan ✓" : "Plan"}
               </button>
+              {onClearChat && project?.agent_chat?.trim() && (
+                <button
+                  type="button"
+                  disabled={pendingAction !== null || isRunning}
+                  onClick={() => { void onClearChat(project.name); }}
+                  className={`${chip(false)} inline-flex items-center gap-1 hover:text-warn`}
+                  title="Clear the agent conversation"
+                >
+                  Clear chat
+                </button>
+              )}
             </div>
             <div className="dualith-composer-submit flex items-center gap-1.5">
               {isRunning ? (
@@ -6668,6 +6680,7 @@ function DualithApp() {
               onSendChat={sendChat}
               onStopChat={stopChat}
               runnerHealth={runnerHealth}
+              onClearChat={onClearAgentChat}
             />
           </div>
         </div>
