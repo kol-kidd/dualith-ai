@@ -6680,7 +6680,7 @@ function DualithApp() {
               onSendChat={sendChat}
               onStopChat={stopChat}
               runnerHealth={runnerHealth}
-              onClearChat={onClearAgentChat}
+              onClearChat={clearAgentChat}
             />
           </div>
         </div>
