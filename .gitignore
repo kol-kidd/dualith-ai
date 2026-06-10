@@ -12,6 +12,7 @@ __pycache__/
 .tmp/
 ai-workspace/
 .dualith/
+.codex/*.log
 .env.local
 
 # Dualith-managed project files (seeded when dualith-ai itself is a tracked project)

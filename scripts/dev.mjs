@@ -58,6 +58,16 @@ function localLanIp() {
 const apiPort = env.DUALITH_API_PORT ?? "4200";
 const webPort = env.DUALITH_WEB_PORT ?? "3200";
 const lanIp = localLanIp();
+const requiredApiFeatures = [
+  "unified-chat",
+  "status-refresh-nonblocking",
+  "chat-clear-results",
+  "task-queue",
+  "workspace-shell",
+  "specialist-reviewers",
+  "structured-hitl",
+  "project-memory",
+];
 
 if (lanMode) {
   env.DUALITH_LAN_MODE = "1";
@@ -115,7 +125,8 @@ function apiState() {
         try {
           const payload = JSON.parse(body);
           const features = Array.isArray(payload.features) ? payload.features : [];
-          resolve(payload.app === "dualith" && features.includes("unified-chat") ? "current" : "occupied");
+          const hasRequiredFeatures = requiredApiFeatures.every((feature) => features.includes(feature));
+          resolve(payload.app === "dualith" && hasRequiredFeatures ? "current" : "occupied");
         } catch {
           resolve("occupied");
         }
