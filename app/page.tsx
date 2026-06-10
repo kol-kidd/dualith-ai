@@ -3698,26 +3698,19 @@ function DirectConversation({
 function DirectChatPanel({
   project,
   results,
-  onSendChat,
-  onStopChat,
   onHumanAnswer,
   onApprovePlan,
-  runnerHealth,
 }: {
   project: ProjectRecord | null;
   results: AgentResult[];
-  onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean }) => Promise<void>;
-  onStopChat: (projectName: string) => Promise<void>;
   onHumanAnswer: (projectName: string, answer: string) => Promise<void>;
   onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
-  runnerHealth: RunnerHealth;
 }) {
   const blocked = Boolean(project?.human_input?.blocked);
   return (
     <div className="dualith-direct-panel">
       <DirectConversation project={project} results={results} onApprovePlan={onApprovePlan} />
       {blocked && project && <HumanInputPane project={project} onSubmit={onHumanAnswer} />}
-      <ChatComposer project={project} onSendChat={onSendChat} onStopChat={onStopChat} runnerHealth={runnerHealth} />
     </div>
   );
 }
@@ -6148,11 +6141,8 @@ function WorkspaceRightPanel({
           <DirectChatPanel
             project={project}
             results={results}
-            onSendChat={onSendChat}
-            onStopChat={onStopChat}
             onHumanAnswer={onHumanAnswer}
             onApprovePlan={onApprovePlan}
-            runnerHealth={runnerHealth}
           />
         )}
         {tab === "artifacts" && (
