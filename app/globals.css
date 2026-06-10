@@ -2,6 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Direction E typography: JetBrains Mono (structural) + IBM Plex Sans (agent prose) */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
 /* Default theme: daylight (light mode). Midnight is still available via the theme picker. */
 :root,
 :root[data-theme="daylight"] {
@@ -114,12 +117,22 @@
   --dualith-bubble-agent: #141d28;
 }
 
-/* Layout density */
+/* Layout density + Direction E CSS var aliases */
 :root {
   --dualith-chat-max: 52rem;
   --dualith-chat-font: 0.9375rem;
   --dualith-chat-leading: 1.7;
   --dualith-chat-gap: 1.5rem;
+  /* Direction E font stacks */
+  --dualith-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --dualith-font-prose: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* Direction E semantic aliases — map to per-theme tokens */
+  --ok: var(--dualith-emerald);
+  --warn: var(--dualith-amber);
+  --danger: var(--dualith-red);
+  --accent: var(--dualith-cyan);
+  --dualith-subtle: var(--dualith-text-muted);
+  --dualith-border: var(--dualith-line);
 }
 :root[data-density="compact"] {
   --dualith-chat-max: 60rem;
@@ -144,7 +157,10 @@ body {
   margin: 0;
   background: var(--dualith-bg);
   color: var(--dualith-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-family: var(--dualith-font-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
 }
 
 body {
@@ -360,23 +376,23 @@ select option:disabled {
 
 .dualith-topbar {
   display: grid;
-  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) minmax(320px, 420px);
   height: 36px;
 }
 
-/* Single-pane: projects sidebar + full-height chat. System lives in a slide-over drawer. */
+/* Three-panel workspace: project queue, AI team room, direct chat/details. */
 .dualith-main-grid {
   display: grid;
-  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+  grid-template-columns: minmax(200px, 260px) minmax(34rem, 1fr) minmax(320px, 420px);
   height: calc(100vh - 36px);
 }
 
-/* Collapsed sidebar -> thin icon rail, chat takes the rest. */
+/* Collapsed sidebar -> thin icon rail, team room and right panel take the rest. */
 .dualith-topbar--sidebar-collapsed {
-  grid-template-columns: 52px minmax(0, 1fr) auto;
+  grid-template-columns: 52px minmax(0, 1fr) minmax(320px, 420px);
 }
 .dualith-main-grid--sidebar-collapsed {
-  grid-template-columns: 0px minmax(0, 1fr);
+  grid-template-columns: 0px minmax(0, 1fr) minmax(320px, 420px);
 }
 .dualith-main-grid--sidebar-collapsed .dualith-project-slot {
   overflow: hidden;
@@ -392,6 +408,116 @@ select option:disabled {
 
 .dualith-rail-slot > * {
   height: 100%;
+}
+
+.dualith-team-panel,
+.dualith-right-panel {
+  min-width: 0;
+  min-height: 0;
+  background: var(--dualith-bg);
+}
+
+.dualith-team-center {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.dualith-right-panel {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--dualith-line);
+}
+
+.dualith-right-tabs {
+  display: flex;
+  min-height: 36px;
+  flex: 0 0 auto;
+  align-items: stretch;
+  border-bottom: 1px solid var(--dualith-line);
+  overflow-x: auto;
+}
+
+.dualith-right-tabs button {
+  display: inline-flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.35rem;
+  border-right: 1px solid var(--dualith-line);
+  padding: 0 0.75rem;
+  color: var(--dualith-text-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  outline: none;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.dualith-right-tabs button:hover,
+.dualith-right-tabs button:focus-visible {
+  background: color-mix(in srgb, var(--dualith-surface) 72%, var(--dualith-bg));
+  color: var(--dualith-text-muted);
+}
+
+.dualith-right-tabs button.is-active {
+  background: var(--dualith-surface);
+  color: var(--dualith-text-strong);
+}
+
+.dualith-right-tabs em {
+  color: var(--dualith-text-faint);
+  font-style: normal;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.dualith-right-content {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dualith-direct-panel {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.dualith-direct-thread {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.dualith-thread--direct {
+  width: 100%;
+  max-width: none;
+  padding: 0.85rem;
+  font-size: 0.78rem;
+  line-height: 1.58;
+}
+
+.dualith-direct-empty {
+  padding: 1rem;
+  color: var(--dualith-text-faint);
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
+.dualith-right-stack,
+.dualith-quota-panel {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.dualith-quota-panel {
+  display: grid;
+  grid-template-rows: minmax(18rem, 1fr) auto;
 }
 
 /* System drawer: fixed right slide-over at all widths (was mobile-only). */
@@ -589,7 +715,714 @@ select option:disabled {
   }
 }
 
-/* Chat thread: centered, full-height, breathing room like Claude/ChatGPT. */
+/* Workspace: task board first, transcript second. */
+.dualith-workspace-scroll {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.dualith-workspace-shell {
+  margin: 1rem auto 0;
+  width: min(calc(100% - 2rem), 72rem);
+  border: 1px solid var(--dualith-line);
+  background: color-mix(in srgb, var(--dualith-surface) 84%, var(--dualith-bg));
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.dualith-workspace-shell__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem;
+  align-items: start;
+  padding: 1rem;
+  border-bottom: 1px solid var(--dualith-line-hard);
+}
+
+.dualith-workspace-kicker,
+.dualith-minihead {
+  font-size: 10px;
+  color: var(--dualith-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.dualith-workspace-shell h2 {
+  margin: 0.25rem 0 0;
+  color: var(--dualith-text-strong);
+  font-size: 1rem;
+  line-height: 1.35;
+  font-weight: 700;
+}
+
+.dualith-workspace-shell p {
+  margin: 0.35rem 0 0;
+  max-width: 74ch;
+  color: var(--dualith-text-muted);
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
+.dualith-workspace-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  min-width: 10rem;
+  color: var(--dualith-text-faint);
+  font-size: 10px;
+}
+
+.dualith-workspace-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+  color: var(--dualith-text-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dualith-workspace-meta span {
+  border: 1px solid var(--dualith-line-hard);
+  padding: 0.18rem 0.42rem;
+  background: color-mix(in srgb, var(--dualith-surface) 76%, var(--dualith-bg));
+}
+
+.dualith-phase-rail {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  border-bottom: 1px solid var(--dualith-line-hard);
+}
+
+.dualith-phase {
+  min-width: 0;
+  border-right: 1px solid var(--dualith-line-hard);
+  padding: 0.6rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.dualith-phase:last-child {
+  border-right: 0;
+}
+
+.dualith-phase__short {
+  color: currentColor;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.dualith-phase__status {
+  color: color-mix(in srgb, currentColor 72%, var(--dualith-text-faint));
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dualith-agent-roster {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.75rem, 1fr));
+  border-bottom: 1px solid var(--dualith-line-hard);
+  background: color-mix(in srgb, var(--dualith-surface) 72%, var(--dualith-bg));
+}
+
+.dualith-agent-roster__item {
+  min-width: 0;
+  border-right: 1px solid var(--dualith-line-hard);
+  border-bottom: 1px solid color-mix(in srgb, var(--dualith-line-hard) 72%, transparent);
+  padding: 0.5rem 0.65rem;
+}
+
+.dualith-agent-roster__item span,
+.dualith-agent-roster__item strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-agent-roster__item span {
+  color: currentColor;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.dualith-agent-roster__item strong {
+  margin-top: 0.15rem;
+  color: color-mix(in srgb, currentColor 72%, var(--dualith-text-faint));
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dualith-team-room {
+  border-bottom: 1px solid var(--dualith-line-hard);
+  background: color-mix(in srgb, var(--dualith-bg) 48%, var(--dualith-surface));
+}
+
+.dualith-team-room__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.85rem 1rem 0.65rem;
+}
+
+.dualith-team-room__header p {
+  margin: 0.28rem 0 0;
+  color: var(--dualith-text-faint);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.dualith-team-room__stream {
+  display: grid;
+  gap: 0.45rem;
+  max-height: 28rem;
+  overflow: auto;
+  padding: 0 1rem 1rem;
+}
+
+.dualith-team-turn {
+  display: grid;
+  grid-template-columns: minmax(7.8rem, 0.24fr) minmax(0, 1fr);
+  min-width: 0;
+  border: 1px solid var(--dualith-line-hard);
+  background: color-mix(in srgb, var(--dualith-surface) 76%, var(--dualith-bg));
+}
+
+.dualith-team-turn__speaker {
+  min-width: 0;
+  border-right: 1px solid var(--dualith-line-hard);
+  padding: 0.55rem 0.65rem;
+  color: var(--dualith-text-muted);
+}
+
+.dualith-team-turn__speaker span,
+.dualith-team-turn__speaker strong,
+.dualith-team-turn__speaker em {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-team-turn__speaker span {
+  color: var(--dualith-text-strong);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.dualith-team-turn__speaker strong {
+  margin-top: 0.18rem;
+  color: var(--dualith-text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dualith-team-turn__speaker em {
+  margin-top: 0.38rem;
+  color: var(--dualith-text-faint);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.dualith-team-turn__body {
+  min-width: 0;
+  padding: 0.55rem 0.7rem 0.65rem;
+  color: var(--dualith-text-muted);
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
+.dualith-team-turn__body .dualith-formatted-output {
+  gap: 0.45rem;
+}
+
+.dualith-team-turn__meta {
+  min-height: 1.05rem;
+  margin-bottom: 0.25rem;
+}
+
+.dualith-team-room__empty {
+  padding: 0 1rem 1rem;
+  color: var(--dualith-text-faint);
+  font-size: 0.74rem;
+}
+
+.dualith-workspace-band {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--dualith-line-hard);
+  background: color-mix(in srgb, var(--dualith-bg) 55%, var(--dualith-surface));
+}
+
+.dualith-workspace-band.is-decision {
+  background: color-mix(in srgb, var(--dualith-amber) 12%, var(--dualith-surface));
+}
+
+.dualith-decision-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.45rem;
+}
+
+.dualith-decision-card__head time,
+.dualith-decision-card__head > span {
+  color: var(--dualith-text-faint);
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dualith-decision-card__head > span {
+  flex-shrink: 0;
+  color: var(--dualith-amber);
+}
+
+.dualith-workspace-band__label {
+  margin-bottom: 0.25rem;
+  color: var(--dualith-amber);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.dualith-workspace-band__body {
+  color: var(--dualith-text-strong);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.dualith-workspace-band__meta {
+  margin-top: 0.25rem;
+  color: var(--dualith-text-muted);
+  font-size: 0.74rem;
+}
+
+.dualith-decision-card__grid {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr);
+  gap: 0.3rem 0.75rem;
+  align-items: start;
+}
+
+.dualith-decision-card__grid span {
+  color: var(--dualith-text-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.dualith-decision-card__grid strong,
+.dualith-decision-card__grid p {
+  min-width: 0;
+  margin: 0;
+  color: var(--dualith-text-strong);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.dualith-decision-card__grid p {
+  color: var(--dualith-text-muted);
+  font-weight: 400;
+}
+
+.dualith-decision-options {
+  margin-top: 0.65rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.dualith-decision-options button {
+  min-width: 0;
+  border: 1px solid var(--dualith-line-hard);
+  background: color-mix(in srgb, var(--dualith-bg) 70%, var(--dualith-surface));
+  color: var(--dualith-text-strong);
+  padding: 0.55rem 0.65rem;
+  text-align: left;
+  outline: none;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.dualith-decision-options button:hover,
+.dualith-decision-options button:focus-visible {
+  border-color: var(--dualith-amber);
+  background: color-mix(in srgb, var(--dualith-amber) 14%, var(--dualith-bg));
+}
+
+.dualith-decision-options button.is-recommended {
+  border-color: color-mix(in srgb, var(--dualith-amber) 70%, var(--dualith-line-hard));
+}
+
+.dualith-decision-options span {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.dualith-decision-options em {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--dualith-text-muted);
+  font-size: 0.68rem;
+  font-style: normal;
+  line-height: 1.45;
+}
+
+.dualith-decision-options strong {
+  display: inline-flex;
+  margin-top: 0.4rem;
+  color: var(--dualith-amber);
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dualith-decision-history {
+  margin-top: 0.6rem;
+  border-top: 1px solid color-mix(in srgb, var(--dualith-line-hard) 68%, transparent);
+  padding-top: 0.55rem;
+}
+
+.dualith-decision-history summary {
+  cursor: pointer;
+  color: var(--dualith-text-faint);
+  font-size: 10px;
+  outline: none;
+}
+
+.dualith-decision-history summary:hover,
+.dualith-decision-history summary:focus-visible {
+  color: var(--dualith-text-strong);
+}
+
+.dualith-decision-history__list {
+  display: grid;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.dualith-decision-history__item {
+  display: grid;
+  grid-template-columns: minmax(5rem, 0.34fr) minmax(0, 1fr) auto;
+  gap: 0.6rem;
+  align-items: baseline;
+  color: var(--dualith-text-muted);
+  font-size: 0.72rem;
+}
+
+.dualith-decision-history__item span,
+.dualith-decision-history__item time {
+  color: var(--dualith-text-faint);
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+}
+
+.dualith-decision-history__item strong {
+  min-width: 0;
+  color: var(--dualith-text-soft);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.dualith-attention-panel {
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--dualith-line-hard);
+  background: color-mix(in srgb, var(--dualith-amber) 10%, var(--dualith-surface));
+}
+
+.dualith-attention-panel.is-stale {
+  background: color-mix(in srgb, var(--dualith-cyan) 8%, var(--dualith-surface));
+}
+
+.dualith-attention-panel__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.dualith-attention-panel button {
+  min-height: 2rem;
+  border: 1px solid var(--dualith-line-hard);
+  background: var(--dualith-bg);
+  color: var(--dualith-amber);
+  padding: 0.35rem 0.65rem;
+  font-size: 0.72rem;
+  outline: none;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.dualith-attention-panel button:hover,
+.dualith-attention-panel button:focus-visible {
+  border-color: var(--dualith-amber);
+  background: color-mix(in srgb, var(--dualith-amber) 12%, var(--dualith-bg));
+}
+
+.dualith-attention-panel button:disabled {
+  color: var(--dualith-text-faint);
+  cursor: not-allowed;
+}
+
+.dualith-attention-list {
+  margin-top: 0.65rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.dualith-attention-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.35rem 0.5rem;
+  align-items: center;
+  color: var(--dualith-text-muted);
+  font-size: 0.74rem;
+}
+
+.dualith-attention-item > span:not(.border) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-attention-item em {
+  grid-column: 2;
+  color: var(--dualith-text-faint);
+  font-size: 0.68rem;
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-attention-error {
+  margin-top: 0.55rem;
+  color: var(--dualith-red);
+  font-size: 0.72rem;
+}
+
+.dualith-workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(18rem, 0.85fr);
+  gap: 0;
+  border-bottom: 1px solid var(--dualith-line-hard);
+}
+
+.dualith-workspace-grid.is-compact {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  border-bottom: 0;
+}
+
+.dualith-workspace-column,
+.dualith-ownership,
+.dualith-workspace-grid.is-compact > div {
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  border-right: 1px solid var(--dualith-line-hard);
+}
+
+.dualith-workspace-column:last-child,
+.dualith-workspace-grid.is-compact > div:last-child {
+  border-right: 0;
+}
+
+.dualith-task-events {
+  margin-top: 0.6rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.dualith-task-event {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  align-items: baseline;
+  color: var(--dualith-text-muted);
+  font-size: 0.74rem;
+}
+
+.dualith-task-event__type {
+  color: var(--dualith-text-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dualith-task-event__type.is-decision,
+.dualith-task-event__type.is-queue_event {
+  color: var(--dualith-amber);
+}
+
+.dualith-task-event__type.is-review {
+  color: var(--dualith-emerald);
+}
+
+.dualith-task-event__title {
+  min-width: 0;
+  color: var(--dualith-text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-task-event__time {
+  color: var(--dualith-text-faint);
+  font-size: 10px;
+}
+
+.dualith-task-event__body {
+  grid-column: 2 / 4;
+  color: var(--dualith-text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-minihead--spaced {
+  margin-top: 0.85rem;
+}
+
+.dualith-review-lane {
+  margin-top: 0.6rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.dualith-review-lane__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.35rem 0.5rem;
+  align-items: center;
+  border: 1px solid var(--dualith-line);
+  background: color-mix(in srgb, var(--dualith-bg) 55%, var(--dualith-surface));
+  padding: 0.5rem 0.6rem;
+}
+
+.dualith-review-lane__item > span {
+  min-width: 0;
+  color: var(--dualith-text-strong);
+  font-size: 0.73rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-review-lane__item em {
+  grid-column: 1 / 3;
+  color: var(--dualith-text-faint);
+  font-size: 0.68rem;
+  font-style: normal;
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-artifact-strip {
+  margin-top: 0.6rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.dualith-artifact {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0.5rem;
+  color: var(--dualith-text-faint);
+  font-size: 0.72rem;
+}
+
+.dualith-artifact span {
+  color: var(--dualith-text-faint);
+}
+
+.dualith-artifact strong {
+  min-width: 0;
+  color: var(--dualith-text-muted);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-artifact.is-ready strong {
+  color: var(--dualith-text-strong);
+}
+
+.dualith-ownership__paths,
+.dualith-subagent-lanes {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.dualith-ownership__paths span {
+  max-width: 18rem;
+  border: 1px solid var(--dualith-line-hard);
+  padding: 0.25rem 0.45rem;
+  color: var(--dualith-text-muted);
+  font-size: 0.7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-muted-line {
+  margin-top: 0.6rem;
+  color: var(--dualith-text-faint);
+  font-size: 0.72rem;
+}
+
+.dualith-subagent-lane {
+  min-width: min(100%, 10rem);
+  flex: 1 1 10rem;
+  border: 1px solid var(--dualith-line-hard);
+  padding: 0.45rem 0.55rem;
+}
+
+.dualith-subagent-lane span {
+  display: block;
+  color: var(--dualith-text-strong);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.dualith-subagent-lane strong {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--dualith-amber);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dualith-subagent-lane em {
+  display: block;
+  margin-top: 0.3rem;
+  color: var(--dualith-text-faint);
+  font-size: 0.68rem;
+  font-style: normal;
+  line-height: 1.45;
+}
+
+/* Chat thread: centered transcript below the workspace. */
 .dualith-thread {
   margin-inline: auto;
   width: 100%;
@@ -597,7 +1430,7 @@ select option:disabled {
   display: flex;
   flex-direction: column;
   gap: var(--dualith-chat-gap);
-  padding: 1.75rem 1.5rem 2.5rem;
+  padding: 1rem 1.5rem 2.5rem;
   font-size: var(--dualith-chat-font);
   line-height: var(--dualith-chat-leading);
 }
@@ -615,10 +1448,11 @@ select option:disabled {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
-/* User message: subtle left accent line, no bubble */
+/* User message: compact command note with a full outline. */
 .dualith-msg--user .dualith-msg__bubble {
-  padding-left: 0.85rem;
-  border-left: 2px solid color-mix(in srgb, var(--dualith-cyan) 55%, transparent);
+  padding: 0.55rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--dualith-cyan) 34%, var(--dualith-line));
+  background: color-mix(in srgb, var(--dualith-cyan) 6%, transparent);
   color: var(--dualith-text-strong);
 }
 /* Agent message: plain text, no background */
@@ -777,6 +1611,15 @@ select option:disabled {
   display: none;
 }
 
+.dualith-workspace-name,
+.dualith-runner-chip__label,
+.dualith-mobile-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dualith-mobile-pane,
 .dualith-mobile-composer-pane {
   display: contents;
@@ -840,6 +1683,50 @@ select option:disabled {
 }
 
 @media (max-width: 860px) {
+  .dualith-workspace-shell {
+    width: calc(100% - 1rem);
+    margin-top: 0.5rem;
+  }
+
+  .dualith-workspace-shell__header,
+  .dualith-workspace-grid,
+  .dualith-workspace-grid.is-compact {
+    grid-template-columns: 1fr;
+  }
+
+  .dualith-workspace-metrics {
+    justify-content: flex-start;
+  }
+
+  .dualith-phase-rail {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .dualith-phase:nth-child(3n) {
+    border-right: 0;
+  }
+
+  .dualith-workspace-column,
+  .dualith-ownership,
+  .dualith-workspace-grid.is-compact > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--dualith-line-hard);
+  }
+
+  .dualith-team-room__header,
+  .dualith-team-turn {
+    grid-template-columns: 1fr;
+  }
+
+  .dualith-team-turn__speaker {
+    border-right: 0;
+    border-bottom: 1px solid var(--dualith-line-hard);
+  }
+
+  .dualith-workspace-grid.is-compact > div:last-child {
+    border-bottom: 0;
+  }
+
   html,
   body {
     width: 100%;
@@ -868,17 +1755,73 @@ select option:disabled {
     display: none;
   }
 
-  .dualith-main-grid,
-  .dualith-main-grid--system-collapsed {
+  .dualith-main-grid {
     display: block;
     height: calc(100dvh - 54px - 58px - env(safe-area-inset-bottom));
     overflow: hidden;
   }
 
-  .dualith-main-grid > main {
+  .dualith-team-panel,
+  .dualith-right-panel {
+    display: none;
     height: 100%;
     min-height: 0;
+    width: 100%;
     border-right: 0;
+    border-left: 0;
+  }
+
+  .dualith-main-grid[data-mobile-view="team"] > .dualith-team-panel,
+  .dualith-main-grid[data-mobile-view="direct"] > .dualith-right-panel,
+  .dualith-main-grid[data-mobile-view="details"] > .dualith-right-panel {
+    display: flex;
+  }
+
+  .dualith-workspace-header {
+    height: auto;
+    min-height: 68px;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: center;
+    gap: 0.45rem;
+    padding: 0.55rem 0.75rem 0.6rem;
+  }
+
+  .dualith-workspace-title {
+    width: 100%;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.5rem;
+  }
+
+  .dualith-workspace-name {
+    flex: 1 1 100%;
+    max-width: 100%;
+    font-size: 0.75rem;
+    letter-spacing: 0.12em;
+  }
+
+  .dualith-workspace-badge {
+    max-width: 100%;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+    letter-spacing: 0.08em;
+  }
+
+  .dualith-workspace-actions {
+    width: 100%;
+    justify-content: flex-end;
+    gap: 0.45rem;
+  }
+
+  .dualith-workspace-action {
+    display: inline-flex;
+    min-height: 36px;
+    align-items: center;
+    justify-content: center;
+    padding-inline: 0.65rem;
   }
 
   .dualith-main-grid > main > .dualith-mobile-pane,
@@ -959,8 +1902,53 @@ select option:disabled {
     min-height: 40px;
   }
 
-  .dualith-composer [title="Run settings"] {
-    display: none;
+  .dualith-composer-toolbar {
+    align-items: stretch;
+    gap: 0.45rem;
+  }
+
+  .dualith-composer-tools {
+    min-width: 0;
+    flex: 1 1 auto;
+    gap: 0.4rem;
+  }
+
+  .dualith-composer-chip,
+  .dualith-runner-chip {
+    min-height: 40px;
+    align-items: center;
+    justify-content: center;
+    padding-inline: 0.65rem;
+  }
+
+  .dualith-runner-chip {
+    max-width: 8.5rem;
+    flex: 0 1 auto;
+  }
+
+  .dualith-composer-submit {
+    margin-left: auto;
+  }
+
+  .dualith-composer-submit button {
+    min-width: 58px;
+  }
+
+  .dualith-composer-settings {
+    left: 0.35rem;
+    right: 0.35rem;
+    bottom: calc(100% + 0.5rem);
+    margin-bottom: 0;
+    width: auto;
+  }
+
+  .dualith-composer-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dualith-composer-hint {
+    line-height: 1.4;
+    text-wrap: pretty;
   }
 
   .dualith-preview-frame {
@@ -1002,22 +1990,25 @@ select option:disabled {
     bottom: 0;
     z-index: 50;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 0.35rem;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.3rem;
     border-top: 1px solid var(--dualith-line);
     background: color-mix(in srgb, var(--dualith-surface) 96%, black);
     padding: 0.45rem 0.55rem calc(0.45rem + env(safe-area-inset-bottom));
   }
 
   .dualith-mobile-tabs button {
+    min-width: 0;
     min-height: 44px;
     border: 1px solid var(--dualith-line-hard);
-    border-radius: 10px;
+    border-radius: 8px;
     color: var(--dualith-text-muted);
     background: var(--dualith-bg);
+    padding-inline: 0.25rem;
     font-size: 0.72rem;
     font-weight: 600;
     letter-spacing: 0.04em;
+    line-height: 1;
   }
 
   .dualith-mobile-tabs button.is-active {
@@ -1028,5 +2019,2065 @@ select option:disabled {
 
   * {
     max-width: 100%;
+  }
+}
+
+@media (max-width: 380px) {
+  .dualith-phase-rail {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dualith-phase:nth-child(3n) {
+    border-right: 1px solid var(--dualith-line-hard);
+  }
+
+  .dualith-phase:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .dualith-workspace-header {
+    padding-inline: 0.65rem;
+  }
+
+  .dualith-workspace-action,
+  .dualith-composer-chip,
+  .dualith-runner-chip {
+    padding-inline: 0.55rem;
+  }
+
+  .dualith-runner-chip {
+    max-width: 7.3rem;
+  }
+
+  .dualith-mobile-tabs {
+    gap: 0.25rem;
+    padding-inline: 0.45rem;
+  }
+
+  .dualith-mobile-tabs button {
+    font-size: 0.67rem;
+    letter-spacing: 0;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────
+   Direction E — Team Room components
+   Engineered CI-dashboard aesthetic with conversational layer.
+   JetBrains Mono (structural) + IBM Plex Sans (agent prose).
+   Single run-green (ok token) = active AND healthy/passing.
+   ───────────────────────────────────────────────────────── */
+
+/* Crew strip: pipeline track showing every in-scope agent */
+.crew-strip {
+  display: grid;
+  grid-template-columns: repeat(var(--crew-cols, 7), 1fr);
+  border: 1px solid var(--dualith-line);
+  border-radius: 8px;
+  overflow: hidden;
+  font-family: var(--dualith-font-mono);
+  background: var(--dualith-surface);
+  margin-bottom: 1rem;
+}
+
+.crew-member {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 10px 11px;
+  border-right: 1px solid var(--dualith-line);
+}
+
+.crew-member:last-child {
+  border-right: 0;
+}
+
+.crew-member__name {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--dualith-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.01em;
+}
+
+.crew-member__runner {
+  font-size: 9px;
+  color: var(--dualith-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.crew-member__activity {
+  min-height: 2.6em;
+  color: var(--dualith-text-muted);
+  font-family: var(--dualith-font-prose);
+  font-size: 11.5px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.crew-member__status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--dualith-text-faint);
+  margin-top: 2px;
+}
+
+.crew-member__status::before {
+  content: '';
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: var(--dualith-line);
+  flex-shrink: 0;
+}
+
+/* Done: green dot */
+.crew-member.is-done .crew-member__name { color: var(--dualith-text-muted); }
+.crew-member.is-done .crew-member__status { color: var(--dualith-emerald); }
+.crew-member.is-done .crew-member__status::before { background: var(--dualith-emerald); }
+
+/* Active/running: green pulse + top rule + light tint */
+.crew-member.is-active {
+  background: color-mix(in srgb, var(--dualith-emerald) 7%, var(--dualith-surface));
+}
+.crew-member.is-active::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: var(--dualith-emerald);
+}
+.crew-member.is-active .crew-member__name { color: var(--dualith-text-strong); }
+.crew-member.is-active .crew-member__status { color: var(--dualith-emerald); }
+.crew-member.is-active .crew-member__status::before {
+  background: var(--dualith-emerald);
+  animation: crew-blink 1.2s steps(1) infinite;
+}
+
+/* Blocked/changes: amber */
+.crew-member.is-warn .crew-member__status { color: var(--dualith-amber); }
+.crew-member.is-warn .crew-member__status::before { background: var(--dualith-amber); }
+
+/* Failed/error: red */
+.crew-member.is-err .crew-member__status { color: var(--dualith-red); }
+.crew-member.is-err .crew-member__status::before { background: var(--dualith-red); }
+
+/* Skipped / not in this workflow: very faint */
+.crew-member.is-na .crew-member__name { color: var(--dualith-text-faint); opacity: 0.5; }
+.crew-member.is-na .crew-member__status { color: var(--dualith-text-faint); opacity: 0.4; }
+.crew-member.is-na .crew-member__status::before { background: var(--dualith-line); }
+
+.crew-review-details {
+  margin-top: 5px;
+  border-top: 1px solid color-mix(in srgb, var(--dualith-line) 72%, transparent);
+  padding-top: 5px;
+}
+
+.crew-review-details summary {
+  cursor: pointer;
+  color: var(--dualith-text-muted);
+  font-family: var(--dualith-font-mono);
+  font-size: 9.5px;
+  list-style: none;
+  outline: none;
+}
+
+.crew-review-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.crew-review-details summary:hover,
+.crew-review-details summary:focus-visible {
+  color: var(--dualith-text-strong);
+}
+
+.crew-review-details__list {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.crew-review-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  color: var(--dualith-text-faint);
+  font-size: 9.5px;
+}
+
+.crew-review-detail span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crew-review-detail strong {
+  color: var(--dualith-text-muted);
+  font-weight: 600;
+}
+
+.crew-review-detail.is-green strong { color: var(--dualith-emerald); }
+.crew-review-detail.is-amber strong { color: var(--dualith-amber); }
+.crew-review-detail.is-cyan strong { color: var(--dualith-cyan); }
+
+@keyframes crew-blink {
+  50% { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crew-member.is-active .crew-member__status::before { animation: none; }
+}
+
+/* Team Room: the full conversational stream */
+.team-room {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-bottom: 1rem;
+}
+
+.team-room__empty {
+  padding: 1.25rem 0;
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  color: var(--dualith-text-faint);
+}
+
+/* Individual turn */
+.team-turn {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 11px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--dualith-line);
+}
+
+.team-turn:last-child {
+  border-bottom: 0;
+}
+
+/* Monogram square — the only "avatar", kept minimal */
+.team-turn__glyph {
+  width: 26px;
+  height: 24px;
+  flex-shrink: 0;
+  border: 1px solid var(--dualith-line);
+  border-radius: 4px;
+  display: grid;
+  place-items: center;
+  font-family: var(--dualith-font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--dualith-text-faint);
+  margin-top: 1px;
+  user-select: none;
+}
+
+/* Active agent gets green-tinted glyph */
+.team-turn.is-active .team-turn__glyph {
+  border-color: var(--dualith-emerald);
+  color: var(--dualith-emerald);
+}
+
+.team-turn__body {
+  min-width: 0;
+}
+
+/* Turn header: name + runner + time */
+.team-turn__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+  font-family: var(--dualith-font-mono);
+}
+
+.team-turn__who {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dualith-text-strong);
+}
+
+.team-turn__runner {
+  font-size: 10px;
+  color: var(--dualith-text-faint);
+}
+
+.team-turn__time {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--dualith-text-faint);
+}
+
+/* Prose: IBM Plex Sans — the only place proportional type appears */
+.team-turn__prose {
+  font-family: var(--dualith-font-prose);
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--dualith-text-soft);
+}
+
+.team-turn__summary {
+  margin: 0;
+  max-width: 76ch;
+  color: var(--dualith-text-soft);
+  font-family: var(--dualith-font-prose);
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.team-turn__details {
+  margin-top: 8px;
+  max-width: 78ch;
+  border: 1px solid var(--dualith-line);
+  background: color-mix(in srgb, var(--dualith-surface) 72%, var(--dualith-bg));
+}
+
+.team-turn__details summary {
+  cursor: pointer;
+  padding: 5px 8px;
+  color: var(--dualith-text-faint);
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  outline: none;
+}
+
+.team-turn__details summary:hover,
+.team-turn__details summary:focus-visible {
+  color: var(--dualith-text-strong);
+}
+
+.team-turn__details .team-turn__prose {
+  padding: 0 8px 8px;
+  font-size: 12.5px;
+}
+
+.team-turn__prose strong {
+  color: var(--dualith-text-strong);
+  font-weight: 600;
+}
+
+.team-turn__prose code {
+  font-family: var(--dualith-font-mono);
+  font-size: 0.86em;
+}
+
+/* @mention tags: run-green mono inline tag */
+.team-mention {
+  font-family: var(--dualith-font-mono);
+  font-size: 0.88em;
+  font-weight: 600;
+  color: var(--dualith-emerald);
+  background: color-mix(in srgb, var(--dualith-emerald) 10%, transparent);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+/* re: quote block — responds to a specific prior finding */
+.team-quote {
+  margin: 7px 0 4px;
+  padding: 6px 10px;
+  border: 1px solid var(--dualith-line);
+  background: color-mix(in srgb, var(--dualith-surface) 80%, var(--dualith-bg));
+  border-radius: 5px;
+}
+
+.team-quote__head {
+  font-family: var(--dualith-font-mono);
+  font-size: 9.5px;
+  color: var(--dualith-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 3px;
+}
+
+.team-quote__body {
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  color: var(--dualith-text-muted);
+}
+
+/* Verdict tag: flat, left-ruled, mono, glyph-led */
+.team-verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 9px;
+  padding: 3px 0 3px 9px;
+  border-left: 2px solid currentColor;
+}
+
+.team-verdict.is-ok { color: var(--dualith-emerald); }
+.team-verdict.is-warn { color: var(--dualith-amber); }
+.team-verdict.is-err { color: var(--dualith-red); }
+
+/* Lightweight ack row below a verdict */
+.team-acks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  font-family: var(--dualith-font-mono);
+  font-size: 9.5px;
+}
+
+.team-ack {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--dualith-text-faint);
+  border: 1px solid var(--dualith-line);
+  border-radius: 3px;
+  padding: 2px 7px;
+}
+
+/* Working line: the active agent's current action with a blinking cursor */
+.working-line {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 11px;
+  padding: 13px 0 4px;
+  font-family: var(--dualith-font-mono);
+}
+
+.working-line__glyph {
+  width: 26px;
+  height: 24px;
+  border: 1px solid var(--dualith-emerald);
+  border-radius: 4px;
+  display: grid;
+  place-items: center;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--dualith-emerald);
+  margin-top: 1px;
+}
+
+.working-line__text {
+  font-size: 11.5px;
+  color: var(--dualith-text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.working-line__cursor {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  background: var(--dualith-emerald);
+  border-radius: 1px;
+  vertical-align: middle;
+  animation: cursor-blink 1.05s steps(1) infinite;
+  flex-shrink: 0;
+}
+
+@keyframes cursor-blink {
+  50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .working-line__cursor { animation: none; opacity: 0.7; }
+  .crew-member.is-active { background: var(--dualith-surface); }
+}
+
+/* ── Lane Matrix (Phase 3: parallel Lead lanes) ──────────────────────── */
+.lane-matrix {
+  margin: 10px 0 4px;
+  border: 1px solid var(--dualith-border);
+  border-radius: 6px;
+  overflow: hidden;
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  background: var(--dualith-surface);
+}
+
+.lane-matrix__head {
+  display: grid;
+  grid-template-columns: 12px 60px 1fr 52px;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--dualith-border);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--dualith-muted);
+}
+
+.lane-matrix__row {
+  display: grid;
+  grid-template-columns: 12px 60px 1fr 52px;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--dualith-border) 50%, transparent);
+  position: relative;
+}
+
+.lane-matrix__row:last-child {
+  border-bottom: none;
+}
+
+.lane-matrix__glyph {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--dualith-muted);
+  flex-shrink: 0;
+}
+
+.lane-matrix__row.is-ok .lane-matrix__glyph { background: var(--ok); }
+.lane-matrix__row.is-run .lane-matrix__glyph {
+  background: var(--ok);
+  animation: crew-blink 1.2s steps(1) infinite;
+}
+.lane-matrix__row.is-err .lane-matrix__glyph { background: var(--danger); }
+.lane-matrix__row.is-na .lane-matrix__glyph { background: var(--dualith-border); }
+
+.lane-matrix__name {
+  font-weight: 600;
+  color: var(--dualith-text);
+}
+
+.lane-matrix__row.is-ok .lane-matrix__name { color: var(--ok); }
+.lane-matrix__row.is-err .lane-matrix__name { color: var(--danger); }
+
+.lane-matrix__files {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--dualith-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lane-matrix__files code {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+}
+
+.lane-matrix__more {
+  font-size: 9px;
+  color: var(--dualith-muted);
+  opacity: 0.7;
+}
+
+.lane-matrix__pct {
+  text-align: right;
+  color: var(--dualith-subtle);
+  font-size: 10.5px;
+}
+
+.lane-matrix__row.is-ok .lane-matrix__pct { color: var(--ok); }
+.lane-matrix__row.is-run .lane-matrix__pct { color: var(--ok); }
+
+/* running lane progress shimmer */
+.lane-matrix__row.is-run::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 1.5px;
+  background: var(--ok);
+  animation: lane-grow 2s ease-in-out infinite;
+}
+
+@keyframes lane-grow {
+  0%   { width: 6%; }
+  50%  { width: 70%; }
+  100% { width: 6%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lane-matrix__row.is-run::after { animation: none; width: 40%; }
+  .lane-matrix__row.is-run .lane-matrix__glyph { animation: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Direction E Shell — applies the engineered aesthetic to the
+   app chrome: topbar, sidebar, workspace header, project items,
+   composer, right panel tabs. Font: JetBrains Mono everywhere
+   structural; IBM Plex Sans only for agent prose (team-turn__prose).
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Topbar ─────────────────────────────────────────────────── */
+.dualith-topbar {
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  background: var(--dualith-surface);
+  border-bottom-color: var(--dualith-line);
+}
+
+.dualith-topbar .dualith-logo {
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+/* Socket status pill */
+.dualith-topbar [class*="text-ok"],
+.dualith-topbar .text-ok {
+  color: var(--ok);
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────── */
+aside.flex.min-h-0.flex-col.border-r {
+  background: var(--dualith-surface);
+  font-family: var(--dualith-font-mono);
+}
+
+/* Section header (Projects / title bars) */
+.flex.h-9.shrink-0.items-center.justify-between.border-b.border-line.px-3.text-xs {
+  font-family: var(--dualith-font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dualith-text-faint);
+  background: var(--dualith-surface);
+}
+
+/* Project list items */
+.group.relative.border-b.border-line-hard {
+  font-family: var(--dualith-font-mono);
+  font-size: 11.5px;
+}
+
+/* Project name in sidebar */
+.group.relative.border-b.border-line-hard .text-xs.font-medium {
+  font-family: var(--dualith-font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Project status/meta line in sidebar */
+.group.relative.border-b.border-line-hard .text-\[10px\],
+.group.relative.border-b.border-line-hard .text-\[11px\] {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.01em;
+}
+
+/* ── Workspace header ────────────────────────────────────────── */
+.dualith-workspace-header {
+  font-family: var(--dualith-font-mono);
+  background: var(--dualith-surface);
+  border-bottom-color: var(--dualith-line);
+}
+
+.dualith-workspace-name {
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dualith-text-soft);
+}
+
+.dualith-workspace-action {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  border-radius: 3px;
+}
+
+/* ── Engineering workspace kicker / project header ───────────── */
+.dualith-workspace-kicker {
+  font-family: var(--dualith-font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dualith-text-faint);
+}
+
+.dualith-workspace-shell__header {
+  font-family: var(--dualith-font-mono);
+  background: var(--dualith-surface);
+  border-bottom: 1px solid var(--dualith-line);
+}
+
+/* Task title in workspace */
+.dualith-workspace-shell__header h2,
+.dualith-workspace-shell__header .text-sm,
+.dualith-workspace-shell__header .text-base {
+  font-family: var(--dualith-font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* COMPLETED / status badge */
+.dualith-workspace-shell__header [class*="Badge"],
+.dualith-workspace-shell__header .border.px-1\.5 {
+  font-family: var(--dualith-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  border-radius: 2px;
+}
+
+/* ── Workflow selector buttons (AUTO TEAM / CODEX ONLY) ──────── */
+.dualith-workspace-meta button,
+.dualith-workspace-meta [role="tab"] {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-radius: 2px;
+}
+
+/* ── Right panel tabs (DIRECT / ARTIFACTS / LOGS / QUOTA) ───── */
+.dualith-right-tabs button {
+  font-family: var(--dualith-font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+
+/* ── Chat composer ───────────────────────────────────────────── */
+.dualith-composer-shell {
+  font-family: var(--dualith-font-mono);
+  background: var(--dualith-surface);
+  border-top: 1px solid var(--dualith-line);
+}
+
+.dualith-composer {
+  background: var(--dualith-bg);
+  border: 1px solid var(--dualith-line);
+  border-radius: 6px;
+}
+
+.dualith-composer textarea {
+  font-family: var(--dualith-font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--dualith-text);
+}
+
+.dualith-composer textarea::placeholder {
+  color: var(--dualith-text-faint);
+  font-style: normal;
+}
+
+.dualith-agentic-choice {
+  margin: 0.15rem 0 0.55rem;
+  border: 1px solid color-mix(in srgb, var(--dualith-amber) 62%, var(--dualith-line));
+  background: color-mix(in srgb, var(--dualith-amber) 8%, var(--dualith-bg));
+  padding: 0.65rem;
+}
+
+.dualith-agentic-choice__head {
+  display: grid;
+  gap: 0.2rem;
+  margin-bottom: 0.5rem;
+}
+
+.dualith-agentic-choice__head span {
+  color: var(--dualith-amber);
+  font-family: var(--dualith-font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.dualith-agentic-choice__head strong {
+  color: var(--dualith-text-strong);
+  font-family: var(--dualith-font-prose);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.dualith-agentic-choice__options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.45rem;
+}
+
+.dualith-agentic-choice__options button {
+  min-height: 52px;
+  border: 1px solid var(--dualith-line-hard);
+  background: color-mix(in srgb, var(--dualith-surface) 76%, var(--dualith-bg));
+  color: var(--dualith-text-strong);
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  outline: none;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.dualith-agentic-choice__options button:hover,
+.dualith-agentic-choice__options button:focus-visible {
+  border-color: var(--dualith-amber);
+  background: color-mix(in srgb, var(--dualith-amber) 13%, var(--dualith-surface));
+}
+
+.dualith-agentic-choice__options button.is-recommended {
+  border-color: var(--dualith-amber);
+}
+
+.dualith-agentic-choice__options span,
+.dualith-agentic-choice__options em {
+  display: block;
+}
+
+.dualith-agentic-choice__options span {
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.dualith-agentic-choice__options em {
+  margin-top: 0.16rem;
+  color: var(--dualith-text-muted);
+  font-size: 10.5px;
+  font-style: normal;
+  line-height: 1.35;
+}
+
+/* Submit button */
+.dualith-composer-submit button,
+.dualith-composer-submit [type="submit"] {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Composer mode chips (Auto team / Plan) */
+.dualith-composer-chip,
+.dualith-runner-chip {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 3px;
+}
+
+/* ── Activity feed / status bar ──────────────────────────────── */
+.shrink-0.border-b.px-4.py-2.text-xs {
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+}
+
+/* ── Artifacts / details panels ──────────────────────────────── */
+details summary {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ── Decision / attention panels ─────────────────────────────── */
+.dualith-workspace-band {
+  font-family: var(--dualith-font-mono);
+  border-left: 0;
+  border-top: 1px solid color-mix(in srgb, var(--dualith-amber) 42%, var(--dualith-line));
+  background: color-mix(in srgb, var(--dualith-amber) 6%, var(--dualith-surface));
+}
+
+.dualith-workspace-band__label {
+  font-family: var(--dualith-font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.dualith-attention-panel {
+  font-family: var(--dualith-font-mono);
+  font-size: 11.5px;
+}
+
+/* ── Miniheads (TEAM ACTIVITY, SPECIALIST REVIEWS, etc.) ─────── */
+.dualith-minihead {
+  font-family: var(--dualith-font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dualith-text-faint);
+  padding: 8px 12px 4px;
+  border-bottom: 1px solid var(--dualith-line);
+}
+
+/* ── Task event list ─────────────────────────────────────────── */
+.dualith-task-event {
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+}
+
+.dualith-task-event__type {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* ── Agent prose — only place IBM Plex Sans is used in shell ─── */
+.dualith-msg__bubble,
+.dualith-thread--direct .prose,
+.dualith-thread--direct p {
+  font-family: var(--dualith-font-prose);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+/* ── Usage / quota panel ─────────────────────────────────────── */
+.min-w-0.border-r.border-line-hard.px-3.py-2 {
+  font-family: var(--dualith-font-mono);
+}
+
+/* ── Borders — use Direction E's line token consistently ─────── */
+.border-line { border-color: var(--dualith-line); }
+.border-line-hard { border-color: var(--dualith-line-hard); }
+
+/* ── Run-green accent for active state everywhere ────────────── */
+.text-ok { color: var(--ok); }
+.text-warn { color: var(--warn); }
+.text-danger { color: var(--danger); }
+
+/* ── Task room header ────────────────────────────────────────── */
+.room-task-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px 8px;
+  border-bottom: 1px solid var(--dualith-line);
+  margin-bottom: 4px;
+}
+.room-task-header__left {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.room-task-header__id {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  color: var(--dualith-muted);
+  flex-shrink: 0;
+}
+.room-task-header__title {
+  font-family: var(--dualith-font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dualith-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.room-task-header__right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.room-task-header__status {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.room-task-header__status.is-green { color: var(--ok); }
+.room-task-header__status.is-cyan { color: var(--dualith-cyan); }
+.room-task-header__status.is-amber { color: var(--warn); }
+.room-task-header__status.is-red { color: var(--danger); }
+.room-task-header__status.is-muted { color: var(--dualith-muted); }
+.room-task-header__queue {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  color: var(--dualith-muted);
+}
+
+.dualith-queue-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto;
+  gap: 0;
+  border-bottom: 1px solid var(--dualith-line);
+  background: color-mix(in srgb, var(--dualith-surface) 82%, var(--dualith-bg));
+}
+
+.dualith-queue-strip__cell,
+.dualith-queue-strip__counts {
+  min-width: 0;
+  padding: 9px 12px;
+  border-right: 1px solid var(--dualith-line);
+}
+
+.dualith-queue-strip__cell span {
+  display: block;
+  color: var(--dualith-text-faint);
+  font-family: var(--dualith-font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.dualith-queue-strip__cell strong {
+  display: block;
+  min-width: 0;
+  margin-top: 0.2rem;
+  color: var(--dualith-text-soft);
+  font-family: var(--dualith-font-mono);
+  font-size: 12px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-queue-strip__cell em {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--dualith-text-muted);
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.dualith-queue-strip__cell.is-current strong {
+  color: var(--dualith-text-strong);
+}
+
+.dualith-queue-strip__counts {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  border-right: 0;
+  flex-wrap: wrap;
+}
+
+.dualith-lane-strip {
+  border-bottom: 1px solid var(--dualith-line);
+  background: color-mix(in srgb, var(--dualith-bg) 58%, var(--dualith-surface));
+  padding: 0.7rem 1rem;
+}
+
+.dualith-lane-strip__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  margin-bottom: 0.55rem;
+  font-family: var(--dualith-font-mono);
+}
+
+.dualith-lane-strip__head span {
+  color: var(--dualith-text-faint);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.dualith-lane-strip__head strong {
+  color: var(--dualith-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.dualith-lane-strip__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.5rem;
+}
+
+.dualith-lane-strip__item {
+  min-width: 0;
+  border-left: 2px solid var(--dualith-line-hard);
+  padding: 0.45rem 0.55rem;
+  background: color-mix(in srgb, var(--dualith-surface) 84%, var(--dualith-bg));
+}
+
+.dualith-lane-strip__item.is-ok { border-left-color: var(--ok); }
+.dualith-lane-strip__item.is-run { border-left-color: var(--ok); background: color-mix(in srgb, var(--ok) 6%, var(--dualith-surface)); }
+.dualith-lane-strip__item.is-err { border-left-color: var(--danger); }
+.dualith-lane-strip__item.is-na { opacity: 0.58; }
+
+.dualith-lane-strip__item > div:first-child,
+.dualith-lane-strip__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-family: var(--dualith-font-mono);
+}
+
+.dualith-lane-strip__item span {
+  min-width: 0;
+  color: var(--dualith-text-strong);
+  font-size: 11px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-lane-strip__item strong,
+.dualith-lane-strip__meta em {
+  color: var(--dualith-text-faint);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dualith-lane-strip__item p {
+  margin: 0.35rem 0 0;
+  color: var(--dualith-text-muted);
+  font-family: var(--dualith-font-prose);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.dualith-lane-strip__meta {
+  margin-top: 0.35rem;
+}
+
+.dualith-lane-strip__meta code {
+  min-width: 0;
+  color: var(--dualith-text-faint);
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-no-task {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px 8px;
+  border-bottom: 1px solid var(--dualith-line);
+  margin-bottom: 4px;
+}
+.room-no-task__name {
+  font-family: var(--dualith-font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dualith-fg);
+}
+.room-no-task__hint {
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  color: var(--dualith-muted);
+}
+
+/* ── Team room waiting state ─────────────────────────────────── */
+.team-room__waiting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 16px;
+  font-family: var(--dualith-font-mono);
+  font-size: 12px;
+  color: var(--dualith-muted);
+}
+.team-room__waiting-glyph {
+  color: var(--dualith-line-hard);
+  font-size: 10px;
+}
+
+/* ── Synthetic turn (no AGENT_CHAT prose, just status record) ── */
+.team-turn.is-synthetic {
+  opacity: 0.65;
+}
+.team-turn.is-synthetic .team-turn__body {
+  font-size: 11px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   OPTION B — Full Bleed Terminal Layout
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Topbar ────────────────────────────────────────────────────── */
+.dualith-topbar-b {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--dualith-line);
+  background: var(--dualith-surface);
+  flex-shrink: 0;
+  z-index: 30;
+  position: relative;
+}
+
+.dualith-topbar-b__logo {
+  font-family: var(--dualith-font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: var(--ok);
+  margin-right: 4px;
+  white-space: nowrap;
+}
+
+.dualith-topbar-b__project-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--dualith-line-hard);
+  background: var(--dualith-bg);
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  color: var(--dualith-fg);
+  transition: border-color 0.15s, background 0.15s;
+}
+.dualith-topbar-b__project-pill:hover {
+  border-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 6%, var(--dualith-bg));
+}
+.dualith-topbar-b__project-pill .chevron {
+  font-size: 9px;
+  color: var(--dualith-muted);
+  transition: transform 0.15s;
+}
+.dualith-topbar-b__project-pill[data-open="true"] .chevron {
+  transform: rotate(180deg);
+}
+
+.dualith-topbar-b__spacer { flex: 1; }
+
+.dualith-topbar-b__status {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  color: var(--dualith-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dualith-topbar-b__action {
+  display: flex;
+  align-items: center;
+  padding: 3px 8px;
+  border: 1px solid var(--dualith-line-hard);
+  background: transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  color: var(--dualith-fg);
+  gap: 5px;
+  transition: border-color 0.15s;
+}
+.dualith-topbar-b__action:hover { border-color: var(--ok); color: var(--ok); }
+
+/* ── Projects dropdown ─────────────────────────────────────────── */
+.dualith-projects-dropdown {
+  position: absolute;
+  top: 40px;
+  left: 12px;
+  width: 260px;
+  background: var(--dualith-surface);
+  border: 1px solid var(--dualith-line-hard);
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  z-index: 50;
+  overflow: hidden;
+}
+
+.dualith-projects-dropdown__header {
+  padding: 8px 12px 6px;
+  font-family: var(--dualith-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dualith-muted);
+  border-bottom: 1px solid var(--dualith-line);
+}
+
+.dualith-projects-dropdown__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  font-family: var(--dualith-font-mono);
+  font-size: 12px;
+  color: var(--dualith-fg);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  text-align: left;
+  transition: background 0.1s;
+}
+.dualith-projects-dropdown__item:hover,
+.dualith-projects-dropdown__item.is-active {
+  background: color-mix(in srgb, var(--ok) 8%, var(--dualith-surface));
+  color: var(--ok);
+}
+.dualith-projects-dropdown__item .dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--dualith-muted);
+  flex-shrink: 0;
+}
+.dualith-projects-dropdown__item.is-active .dot { background: var(--ok); }
+
+.dualith-projects-dropdown__add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  color: var(--dualith-muted);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--dualith-line);
+  text-align: left;
+  transition: color 0.1s;
+}
+.dualith-projects-dropdown__add:hover { color: var(--ok); }
+
+/* ── Main workspace layout ─────────────────────────────────────── */
+.dualith-workspace-b {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Full-width crew strip ─────────────────────────────────────── */
+.dualith-crew-strip-full {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--dualith-line);
+  background: var(--dualith-surface);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.dualith-crew-strip-full::-webkit-scrollbar { display: none; }
+
+/* ── Team room scroll area ─────────────────────────────────────── */
+.dualith-room-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  scroll-behavior: smooth;
+}
+.dualith-room-scroll::-webkit-scrollbar { width: 4px; }
+.dualith-room-scroll::-webkit-scrollbar-track { background: transparent; }
+.dualith-room-scroll::-webkit-scrollbar-thumb {
+  background: var(--dualith-line-hard);
+  border-radius: 2px;
+}
+
+.dualith-room-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 8px;
+  color: var(--dualith-muted);
+  font-family: var(--dualith-font-mono);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+}
+.dualith-room-empty::before {
+  content: "■";
+  font-size: 24px;
+  color: var(--dualith-line-hard);
+}
+
+.dualith-room-inner {
+  padding: 12px 0;
+}
+
+/* ── Bottom bar ────────────────────────────────────────────────── */
+.dualith-bottom-bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--dualith-surface);
+}
+
+.dualith-bottom-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 12px 0;
+  border-bottom: 1px solid var(--dualith-line);
+}
+
+.dualith-bottom-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px 6px;
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--dualith-muted);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.12s, border-color 0.12s;
+  white-space: nowrap;
+}
+.dualith-bottom-tab:hover { color: var(--dualith-fg); }
+.dualith-bottom-tab.is-active {
+  color: var(--ok);
+  border-bottom-color: var(--ok);
+}
+.dualith-bottom-tab em {
+  font-style: normal;
+  background: color-mix(in srgb, var(--ok) 20%, transparent);
+  color: var(--ok);
+  border-radius: 2px;
+  padding: 0 4px;
+  font-size: 9px;
+}
+
+.dualith-bottom-composer {
+  padding: 8px 12px;
+}
+
+/* ── Right drawer overlay ──────────────────────────────────────── */
+.dualith-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  z-index: 40;
+  border: none;
+  cursor: pointer;
+}
+
+.dualith-right-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 420px;
+  background: var(--dualith-surface);
+  border-left: 1px solid var(--dualith-line-hard);
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px 0 32px rgba(0,0,0,0.3);
+}
+.dualith-right-drawer .dualith-right-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: none;
+  border-radius: 0;
+}
+
+/* ── Close button on right panel tabs ─────────────────────────── */
+.dualith-right-close {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--dualith-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: var(--dualith-font-mono);
+  border-radius: 2px;
+  transition: color 0.12s, background 0.12s;
+}
+.dualith-right-close:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+/* Visible shell responsive pass. Keep this after legacy shell rules. */
+.dualith-app-shell {
+  display: flex;
+  min-width: 0;
+  max-width: 100vw;
+  height: 100dvh;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dualith-topbar-b {
+  min-height: 40px;
+  height: auto;
+  overflow: visible;
+}
+
+.dualith-topbar-b__primary,
+.dualith-topbar-b__secondary {
+  min-width: 0;
+}
+
+.dualith-topbar-b__primary {
+  flex: 1 1 auto;
+}
+
+.dualith-topbar-b__secondary {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.dualith-topbar-b__project-trigger {
+  min-width: 0;
+  max-width: min(28rem, 36vw);
+}
+
+.dualith-topbar-b__project-name {
+  min-width: 0;
+  max-width: min(14rem, 26vw);
+}
+
+.dualith-topbar-b__team-badge {
+  min-width: 0;
+  max-width: min(14rem, 24vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-topbar-b__live {
+  min-width: 0;
+}
+
+.dualith-topbar-b__live span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dualith-workspace-b {
+  width: 100%;
+  max-width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dualith-room-scroll {
+  overflow-x: hidden;
+}
+
+.dualith-room-inner {
+  width: 100%;
+  padding: 12px clamp(0.85rem, 2vw, 2rem);
+}
+
+.team-turn__body,
+.team-turn__prose,
+.team-turn__head,
+.working-line__text {
+  min-width: 0;
+}
+
+.team-turn__prose {
+  max-width: 78ch;
+  overflow-wrap: anywhere;
+}
+
+.team-turn__prose p,
+.team-quote,
+.working-line__text span,
+.room-task-header__title,
+.room-no-task__name {
+  overflow-wrap: anywhere;
+}
+
+.lane-matrix {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.dualith-bottom-tabs {
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  overscroll-behavior-x: contain;
+}
+
+.dualith-bottom-bar,
+.dualith-bottom-composer,
+.dualith-composer,
+.dualith-composer-toolbar,
+.dualith-composer-tools,
+.dualith-composer-submit {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.dualith-bottom-tabs::-webkit-scrollbar {
+  height: 5px;
+}
+
+.dualith-bottom-tab {
+  min-height: 34px;
+  flex: 0 0 auto;
+}
+
+.dualith-right-drawer {
+  width: min(420px, 100vw);
+  max-width: 100vw;
+}
+
+.dualith-projects-dropdown {
+  max-width: calc(100vw - 24px);
+}
+
+.dualith-settings-popover,
+.dualith-composer-settings {
+  max-width: calc(100vw - 1rem);
+}
+
+@media (max-width: 1180px) {
+  .dualith-topbar-b {
+    flex-wrap: wrap;
+    gap: 0.25rem 0.5rem;
+    padding-inline: 0.5rem;
+  }
+
+  .dualith-topbar-b__primary,
+  .dualith-topbar-b__secondary {
+    padding-inline: 0.5rem;
+  }
+
+  .dualith-topbar-b__primary {
+    flex: 1 1 28rem;
+  }
+
+  .dualith-topbar-b__secondary {
+    flex: 0 1 auto;
+  }
+
+  .dualith-topbar-b__project-trigger {
+    max-width: min(18rem, 42vw);
+  }
+
+  .dualith-topbar-b__project-name {
+    max-width: min(12rem, 30vw);
+  }
+
+  .dualith-crew-strip-full {
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .dualith-crew-strip-full::-webkit-scrollbar {
+    display: block;
+    height: 6px;
+  }
+
+  .dualith-crew-strip-full .crew-strip {
+    width: max-content;
+    min-width: 100%;
+    grid-template-columns: repeat(var(--crew-cols, 7), minmax(9.25rem, 1fr));
+    margin-bottom: 0;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+
+  .crew-member {
+    min-width: 9.25rem;
+  }
+}
+
+@media (max-width: 860px) {
+  .dualith-app-shell {
+    padding-bottom: 0;
+  }
+
+  .dualith-room-inner {
+    padding: 8px 0.75rem;
+  }
+
+  .team-turn {
+    gap: 0.65rem;
+    padding-block: 0.8rem;
+  }
+
+  .team-turn__head {
+    flex-wrap: wrap;
+    gap: 0.25rem 0.5rem;
+  }
+
+  .team-turn__time {
+    margin-left: 0;
+  }
+
+  .team-turn__prose {
+    max-width: 100%;
+    font-size: 13px;
+    line-height: 1.58;
+  }
+
+  .room-task-header,
+  .room-no-task {
+    align-items: flex-start;
+    padding-inline: 0.75rem;
+  }
+
+  .room-task-header {
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .room-task-header__left,
+  .room-task-header__right,
+  .room-no-task {
+    width: 100%;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .room-task-header__right {
+    justify-content: space-between;
+  }
+
+  .dualith-queue-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .dualith-queue-strip__cell,
+  .dualith-queue-strip__counts {
+    border-right: 0;
+    border-bottom: 1px solid var(--dualith-line);
+  }
+
+  .dualith-queue-strip__counts {
+    justify-content: flex-start;
+  }
+
+  .dualith-decision-card__grid,
+  .dualith-decision-history__item {
+    grid-template-columns: 1fr;
+  }
+
+  .dualith-decision-card__head {
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .dualith-lane-strip {
+    padding-inline: 0.75rem;
+  }
+
+  .dualith-bottom-composer {
+    padding: 0;
+  }
+
+  .dualith-composer-shell {
+    position: static;
+    padding: 0.55rem 0.7rem max(0.7rem, env(safe-area-inset-bottom));
+    background: var(--dualith-surface);
+  }
+
+  .dualith-composer-toolbar {
+    align-items: stretch;
+  }
+
+  .dualith-composer-tools {
+    min-width: 0;
+    flex: 1 1 16rem;
+  }
+
+  .dualith-composer-submit {
+    flex: 0 0 auto;
+  }
+
+  .dualith-composer-settings {
+    left: 0.5rem;
+    right: 0.5rem;
+    width: auto;
+  }
+
+  .dualith-bottom-tabs {
+    padding: 0.35rem 0.5rem 0;
+  }
+
+  .dualith-bottom-tab {
+    min-height: 40px;
+    padding-inline: 0.75rem;
+  }
+}
+
+@media (max-width: 720px) {
+  .dualith-topbar-b {
+    min-height: 112px;
+    align-content: center;
+    gap: 0.25rem;
+    padding: 0.25rem 0.5rem;
+  }
+
+  .dualith-topbar-b__primary,
+  .dualith-topbar-b__secondary {
+    flex: 1 1 100%;
+    min-height: 34px;
+    padding-inline: 0;
+  }
+
+  .dualith-topbar-b__primary {
+    gap: 0.5rem;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    width: 100%;
+  }
+
+  .dualith-topbar-b__secondary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    width: 100%;
+    gap: 0.5rem;
+  }
+
+  .dualith-logo {
+    gap: 6px;
+  }
+
+  .dualith-logo svg {
+    width: 36px;
+    height: 22px;
+  }
+
+  .dualith-logo span,
+  .dualith-topbar-b__divider {
+    display: none;
+  }
+
+  .dualith-topbar-b__project-trigger {
+    flex: 1 1 auto;
+    min-height: 34px;
+    max-width: none;
+    padding-inline: 0.65rem;
+  }
+
+  .dualith-topbar-b__project-name {
+    max-width: none;
+  }
+
+  .dualith-topbar-b__team-badge {
+    flex: 0 1 auto;
+    max-width: 7.5rem;
+  }
+
+  .dualith-topbar-b__live {
+    flex: 1 0 100%;
+    width: 100%;
+  }
+
+  .dualith-settings-menu {
+    flex: 0 0 auto;
+  }
+
+  .dualith-topbar-b__new,
+  .dualith-settings-trigger {
+    min-height: 34px;
+    padding-inline: 0.75rem;
+  }
+
+  .dualith-projects-dropdown {
+    position: fixed;
+    top: calc(112px + env(safe-area-inset-top));
+    left: 0.5rem;
+    right: 0.5rem;
+    width: auto;
+    max-width: none;
+    max-height: calc(100dvh - 88px - env(safe-area-inset-bottom));
+    overflow: auto;
+  }
+
+  .dualith-settings-popover {
+    position: fixed;
+    top: calc(112px + env(safe-area-inset-top));
+    right: 0.5rem;
+    left: 0.5rem;
+    width: auto;
+    max-height: calc(100dvh - 88px - env(safe-area-inset-bottom));
+    overflow: auto;
+  }
+
+  .dualith-right-drawer {
+    width: 100vw;
+  }
+
+  .dualith-room-empty {
+    padding-inline: 1rem;
+    text-align: center;
+  }
+
+  .dualith-room-empty span {
+    display: block;
+    margin-inline: auto;
+    max-width: 30ch;
+    overflow-wrap: anywhere;
+  }
+
+  .dualith-composer-toolbar {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.5rem;
+    padding-right: 0;
+  }
+
+  .dualith-composer-tools {
+    display: flex;
+    grid-column: 1;
+    min-width: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .dualith-composer-tools::-webkit-scrollbar {
+    display: none;
+  }
+
+  .dualith-runner-chip__label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dualith-composer-submit {
+    grid-column: 2;
+    position: static;
+    width: auto;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+
+  .dualith-composer-submit button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 58px;
+    border: 1px solid color-mix(in srgb, var(--dualith-cyan) 52%, var(--dualith-line-hard));
+  }
+
+  .dualith-composer-submit button:disabled {
+    background-color: color-mix(in srgb, var(--dualith-cyan) 24%, var(--dualith-surface));
+    border-color: color-mix(in srgb, var(--dualith-cyan) 38%, var(--dualith-line-hard));
+    color: var(--dualith-text-soft);
+  }
+
+  .dualith-composer-hint {
+    display: none;
+  }
+}
+
+@media (max-width: 460px) {
+  .dualith-room-inner {
+    padding-inline: 0.55rem;
+  }
+
+  .team-turn {
+    grid-template-columns: 22px minmax(0, 1fr);
+    gap: 0.55rem;
+  }
+
+  .team-turn__glyph,
+  .working-line__glyph {
+    width: 22px;
+    height: 22px;
+    font-size: 9px;
+  }
+
+  .working-line {
+    grid-template-columns: 22px minmax(0, 1fr);
+    gap: 0.55rem;
+  }
+
+  .crew-member {
+    min-width: 8.5rem;
+    padding: 0.55rem 0.65rem 0.65rem;
+  }
+
+  .dualith-crew-strip-full .crew-strip {
+    grid-template-columns: repeat(var(--crew-cols, 7), minmax(8.5rem, 1fr));
+  }
+
+  .dualith-composer-toolbar {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .dualith-composer-tools {
+    min-width: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .dualith-composer-tools::-webkit-scrollbar {
+    display: none;
+  }
+
+  .dualith-composer-submit {
+    position: static;
+    width: auto;
+    margin-left: auto;
+    justify-content: flex-end;
+  }
+
+  .dualith-composer-submit button {
+    min-width: 58px;
+    border: 1px solid color-mix(in srgb, var(--dualith-cyan) 52%, var(--dualith-line-hard));
+  }
+
+  .dualith-composer-hint {
+    display: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .dualith-topbar-b button,
+  .dualith-bottom-tab,
+  .dualith-composer button,
+  .dualith-composer select,
+  .dualith-projects-dropdown button {
+    min-height: 44px;
   }
 }

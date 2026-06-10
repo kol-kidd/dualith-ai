@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -88,8 +88,29 @@ CHECKPOINT_MODES = {"builder", "lead"}
 USAGE_RUN_LIMIT = 500
 STATUS_OUTPUT_LIMIT = 8_000
 STATUS_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_STATUS_TIMEOUT_SECONDS", "15"))
+STATUS_REFRESH_TTL_SECONDS = int(os.environ.get("DUALITH_STATUS_REFRESH_TTL_SECONDS", "60"))
+CLAUDE_STATUSLINE_TTL_SECONDS = int(os.environ.get("DUALITH_CLAUDE_STATUSLINE_TTL_SECONDS", "1800"))
+CODEX_APP_SERVER_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_CODEX_APP_SERVER_TIMEOUT_SECONDS", str(STATUS_TIMEOUT_SECONDS)))
 RESULT_LIMIT = 100
 RESULT_CONTENT_MAX_CHARS = 32_000
+APP_FEATURES = [
+    "status-refresh",
+    "status-refresh-singleflight",
+    "status-refresh-nonblocking",
+    "quota-status",
+    "project-preview",
+    "lan-mode",
+    "unified-chat",
+    "dynamic-orchestration",
+    "chat-clear-results",
+    "task-queue",
+    "typed-events",
+    "workspace-shell",
+    "architect-agent",
+    "specialist-reviewers",
+    "structured-hitl",
+    "project-memory",
+]
 DUALITH_WEB_PORT = int(os.environ.get("DUALITH_WEB_PORT", "3200"))
 DUALITH_API_PORT = int(os.environ.get("DUALITH_API_PORT", "4200"))
 DUALITH_WEB_HOST = os.environ.get("DUALITH_WEB_HOST", "127.0.0.1")
@@ -136,8 +157,30 @@ QUOTA_INTEGER_SETTINGS = {
     "claude_five_hour_tokens",
     "claude_weekly_tokens",
 }
-IMPLEMENTATION_AGENTS = {"ask", "builder", "lead", "team"}
-REVIEW_AGENTS = {"auditor", "teammate"}
+IMPLEMENTATION_AGENTS = {"ask", "builder", "lead", "team", "git"}
+SPECIALIST_REVIEWERS = (
+    "architecture_reviewer",
+    "security_reviewer",
+    "performance_reviewer",
+    "maintainability_reviewer",
+)
+SPECIALIST_REVIEWER_LABELS = {
+    "architecture_reviewer": "Architecture Reviewer",
+    "security_reviewer": "Security Reviewer",
+    "performance_reviewer": "Performance Reviewer",
+    "maintainability_reviewer": "Maintainability Reviewer",
+}
+SPECIALIST_REVIEWER_VERDICTS = {
+    "architecture_reviewer": "ARCHITECTURE REVIEW",
+    "security_reviewer": "SECURITY REVIEW",
+    "performance_reviewer": "PERFORMANCE REVIEW",
+    "maintainability_reviewer": "MAINTAINABILITY REVIEW",
+}
+REVIEW_AGENTS = {"auditor", "teammate", *SPECIALIST_REVIEWERS}
+TASK_STATUSES = {"pending", "active", "blocked", "completed", "failed"}
+TASK_PHASES = ("pm", "architect", "planner", "lead", "tester", "reviewer")
+TASK_EVENT_TYPES = {"conversation", "agent_activity", "decision", "system", "review", "queue_event"}
+TASK_LIMIT_PER_PROJECT = 80
 DEFAULT_STATUS_CACHE = {
     "codex": {
         "checked_at": "",
@@ -170,6 +213,8 @@ team_resume_events: dict[str, asyncio.Event] = {}
 plan_approval_events: dict[str, asyncio.Event] = {}
 plan_approval_results: dict[str, dict[str, Any]] = {}
 active_dev_servers: dict[str, dict[str, Any]] = {}
+status_refresh_lock: asyncio.Lock | None = None
+status_refresh_task: asyncio.Task[tuple[dict[str, Any], str]] | None = None
 runner_health: dict[str, dict[str, Any]] = {
     "codex": {"ready": False, "version": "", "error": ""},
     "claude": {"ready": False, "version": "", "error": ""},
@@ -240,6 +285,14 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "sandbox": "read-only",
         "default_runner": "claude",
     },
+    "architect": {
+        "label": "Architect",
+        "role": "system-design",
+        "capabilities": ["architecture-review", "component-boundaries", "decision-logging"],
+        "prompt": "architect",
+        "sandbox": "read-only",
+        "default_runner": "claude",
+    },
     "pm": {
         "label": "PM",
         "role": "clarification",
@@ -254,6 +307,62 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "capabilities": ["build-runner", "test-runner", "lint"],
         "prompt": "tester",
         "sandbox": "workspace-write",
+        "default_runner": "claude",
+    },
+    "architecture_reviewer": {
+        "label": "Architecture Reviewer",
+        "role": "specialist-review",
+        "capabilities": ["architecture-risk", "boundary-review", "design-consistency"],
+        "prompt": "architecture_reviewer",
+        "sandbox": "read-only",
+        "default_runner": "claude",
+    },
+    "security_reviewer": {
+        "label": "Security Reviewer",
+        "role": "specialist-review",
+        "capabilities": ["threat-review", "secret-handling", "unsafe-flow-detection"],
+        "prompt": "security_reviewer",
+        "sandbox": "read-only",
+        "default_runner": "claude",
+    },
+    "performance_reviewer": {
+        "label": "Performance Reviewer",
+        "role": "specialist-review",
+        "capabilities": ["latency-review", "scaling-risk", "resource-use"],
+        "prompt": "performance_reviewer",
+        "sandbox": "read-only",
+        "default_runner": "claude",
+    },
+    "maintainability_reviewer": {
+        "label": "Maintainability Reviewer",
+        "role": "specialist-review",
+        "capabilities": ["code-health", "testability", "ownership-boundaries"],
+        "prompt": "maintainability_reviewer",
+        "sandbox": "read-only",
+        "default_runner": "claude",
+    },
+    "summarizer": {
+        "label": "Summarizer",
+        "role": "memory",
+        "capabilities": ["context-compression", "project-memory", "lessons"],
+        "prompt": "summarizer",
+        "sandbox": "workspace-write",
+        "default_runner": "claude",
+    },
+    "git": {
+        "label": "Git",
+        "role": "git-operation",
+        "capabilities": ["git-status", "git-commit", "git-push", "git-stash", "git-tag"],
+        "prompt": "git",
+        "sandbox": "workspace-write",
+        "default_runner": "codex",
+    },
+    "decomposer": {
+        "label": "Decomposer",
+        "role": "decomposition",
+        "capabilities": ["spec-reading", "domain-analysis", "lane-planning"],
+        "prompt": "decomposer",
+        "sandbox": "read-only",
         "default_runner": "claude",
     },
 }
@@ -299,23 +408,29 @@ ORCHESTRATION_WORKFLOWS: dict[str, dict[str, Any]] = {
     "auto-team": {
         "label": "Auto Team",
         "kind": "team",
-        "agents": ["lead", "teammate"],
-        "description": "Lead implements; teammate reviews each round until sign-off.",
+        "agents": ["lead", "tester", *SPECIALIST_REVIEWERS, "teammate", "summarizer"],
+        "description": "Lead implements; Tester validates; specialist reviewers gate risk before final teammate sign-off.",
         "max_rounds": TEAM_MAX_ROUNDS,
     },
     "plan-first": {
         "label": "Plan First",
         "kind": "plan-team",
-        "agents": ["planner", "lead", "teammate"],
-        "description": "Planner writes a plan for user approval, then team builds.",
+        "agents": ["architect", "planner", "lead", "tester", *SPECIALIST_REVIEWERS, "teammate", "summarizer"],
+        "description": "Architect frames the system, Planner writes a plan for user approval, then the team builds and reviews.",
         "max_rounds": TEAM_MAX_ROUNDS,
     },
     "pm-clarify": {
         "label": "PM Clarify",
         "kind": "pm-team",
-        "agents": ["pm", "lead", "teammate"],
-        "description": "PM clarifies ambiguous request, then team builds.",
+        "agents": ["pm", "lead", "tester", *SPECIALIST_REVIEWERS, "teammate", "summarizer"],
+        "description": "PM clarifies ambiguous request, then the team builds and reviews.",
         "max_rounds": TEAM_MAX_ROUNDS,
+    },
+    "git-direct": {
+        "label": "Git",
+        "kind": "single",
+        "agent": "git",
+        "description": "Run a direct Git operation without review rounds.",
     },
 }
 
@@ -388,7 +503,7 @@ RUNNER_COMMANDS = {
         "model_args": os.environ.get("DUALITH_CLAUDE_MODEL_ARGS", "--model {model}"),
         "reasoning_args": os.environ.get("DUALITH_CLAUDE_REASONING_ARGS", ""),
         "status_command": os.environ.get("DUALITH_CLAUDE_STATUS_COMMAND", os.environ.get("DUALITH_CLAUDE_COMMAND", "claude")),
-        "status_args": os.environ.get("DUALITH_CLAUDE_STATUS_ARGS", "-p /status"),
+        "status_args": os.environ.get("DUALITH_CLAUDE_STATUS_ARGS", "-p /usage"),
         "start_action": "CLAUDE_STARTED",
         "log_action": "CLAUDE_LOG",
         "error_action": "CLAUDE_ERR",
@@ -569,13 +684,51 @@ HITL_INSTRUCTION = (
     "question, then stop and exit without making further changes. Do not guess past a "
     "blocking ambiguity."
 )
+HITL_INSTRUCTION = (
+    "Human-in-the-loop: If you hit deep specification ambiguity, a critical package "
+    "dependency conflict, or a major architectural fork that you cannot safely resolve "
+    "on your own, HALT immediately. Overwrite HUMAN_INPUT.md with one question using "
+    "the existing QUESTION prefix, then stop and exit without making further changes. "
+    "If the user can choose between clear paths, include an OPTIONS block with lines "
+    "like [1] Simple - fast, [2] Standard (recommended) - balanced, and DEFAULT: 2. "
+    "Do not guess past a blocking ambiguity."
+)
+HANDOFF_CONVENTION = (
+    "Talk to your teammates like a real team. When you hand work off, address the next "
+    "agent directly by role with an @ tag (e.g. @tester, @security, @lead, @reviewer). "
+    "When your update responds to a specific earlier finding, open your section with one "
+    "line `re: <role> · <short reference>` (e.g. `re: Security Reviewer · /api/budget`) "
+    "before your prose. Keep it natural — these tags are how the human watching sees the "
+    "team coordinate."
+)
+DECOMPOSER_PROMPT = """You are the Decomposer. Your only job is to read the current task and decide whether the work naturally splits into 2–3 independent implementation domains (e.g. UI, API, database).
+
+Read: SPEC.md, PLAN.md, and the latest git diff (if any).
+
+Rules:
+- Only decompose if the task genuinely spans 2 or more independent file domains with no mandatory ordering between them.
+- Single-domain tasks, refactors, bug fixes, and tasks under ~3 files must NOT be decomposed — output empty lanes.
+- Max 3 lanes. Each lane gets a short domain label (ui / api / db / auth / infra / etc.) and a comma-separated list of the key file paths it owns.
+- Scope each lane tightly to its files so lanes don't write to the same paths.
+
+Write your decision as a JSON object to the file DECOMPOSE.json in the project root. No other files should be created or modified.
+
+JSON schema:
+If decomposing:
+{"lanes":[{"lane":"ui","scope":"<one sentence>","files":["path/to/file.tsx"]},{"lane":"api","scope":"<one sentence>","files":["path/to/route.ts"]}]}
+
+If NOT decomposing (single domain, simple task, or uncertain):
+{"lanes":[]}
+
+Write ONLY the JSON object to DECOMPOSE.json. No markdown, no explanation, no other content.
+"""
 BUILDER_PROMPT = f"""Read SPEC.md and implement the app.
 
 You are the builder. Follow CLAUDE.md, keep your active blueprint in PLAN.md, and read FEEDBACK.md (or legacy CLAUDE_TODO.md) for auditor notes. Run the checks from SPEC.md and make small working checkpoints.
 
 For frontend or UI work, read PRODUCT.md and DESIGN.md before editing. Use the Impeccable standard in those files: shape the UX first, preserve existing tokens/components, check accessibility and responsive states, and avoid generic AI/SaaS visuals.
 
-Do not create Git commits automatically as part of your normal build work — Dualith creates a checkpoint commit after your run succeeds. However, if the user explicitly asks you to commit or push changes (e.g. "commit this", "push to main"), you must do so. Use this exact sequence: `git add -A` to stage everything (including untracked files), then `git commit -m "<message>"`. To push, run `git push origin <branch>` — check the current branch with `git branch --show-current` first. You have full git access; there are no sandbox restrictions on `.git`.
+Do not create Git commits automatically as part of your normal build work — Dualith creates a checkpoint commit after your run succeeds. If the user explicitly asks for a Git operation such as commit or push, Dualith should route that request to the direct Git workflow. If you still receive one, try the requested Git command once and report any Git or sandbox error plainly.
 
 If the task is large or naturally parallel (e.g. updating multiple independent files, running tests while writing code), you may spawn subagents to work in parallel. Use your judgment — don't spawn subagents for simple sequential tasks.
 
@@ -609,13 +762,15 @@ Read SPEC.md, PLAN.md, FEEDBACK.md, and AGENT_CHAT.md (the running conversation 
 
 For frontend or UI work, read PRODUCT.md and DESIGN.md before editing. Use the Impeccable standard in those files: shape the UX first, preserve existing tokens/components, check accessibility and responsive states, and avoid generic AI/SaaS visuals.
 
-Do not create Git commits automatically as part of your normal build work — Dualith creates a checkpoint commit after your run succeeds. However, if the user explicitly asks you to commit or push changes (e.g. "commit this", "push to main"), you must do so. Use this exact sequence: `git add -A` to stage everything (including untracked files), then `git commit -m "<message>"`. To push, run `git push origin <branch>` — check the current branch with `git branch --show-current` first. You have full git access; there are no sandbox restrictions on `.git`.
+Do not create Git commits automatically as part of your normal build work — Dualith creates a checkpoint commit after your run succeeds. If the user explicitly asks for a Git operation such as commit or push, Dualith should route that request to the direct Git workflow. If you still receive one, try the requested Git command once and report any Git or sandbox error plainly.
 
 If the task is large or naturally parallel (e.g. updating multiple independent files, running tests while writing code), you may spawn subagents to work in parallel. Use your judgment — don't spawn subagents for simple sequential tasks.
 
 First, address any review notes your teammate left in the latest `### Teammate` section of AGENT_CHAT.md. Then continue the implementation.
 
 When you finish this round, append a section to AGENT_CHAT.md that starts with a markdown header `### Lead`. Write your update as if you're giving the user a quick, friendly status — what you did, what you noticed, and what you're handing off to your teammate to look at. Keep it short (2–4 sentences), warm, and jargon-free. No bullet points, no sub-headers. Write to be read by a person watching over your shoulder, not a machine.
+
+{HANDOFF_CONVENTION}
 
 {HITL_INSTRUCTION}
 """
@@ -630,6 +785,38 @@ For frontend or UI review, audit against PRODUCT.md, DESIGN.md, and the Impeccab
 End your section with exactly one of these verdicts on its own line:
 - `TEAMMATE: APPROVED` if the implementation meets SPEC.md and you have no blocking concerns.
 - `TEAMMATE: CHANGES REQUESTED` if the lead should keep working.
+
+{HANDOFF_CONVENTION}
+
+{HITL_INSTRUCTION}
+"""
+
+GIT_PROMPT = f"""You are handling one direct Git operation for the user.
+
+Read the latest user request carefully and do only the requested Git operation. Do not review the code, do not implement product changes, and do not start a build/review loop.
+
+Always start by checking `git status --short` and `git branch --show-current`. For commits, inspect `git diff --stat` and enough of the diff to write a concise commit message, then run `git add -A` and `git commit -m "<message>"`. If there are no changes to commit, say so and stop. For pushes, push the current branch unless the user named a branch. For stashes, include untracked files with `git stash push -u -m "<message>"`. For tags or releases, use the exact tag/version the user provided; if it is missing, use the human-in-the-loop question flow instead of inventing one.
+
+When finished, respond with the Git command result and any commit hash, branch, stash, or tag that was created.
+
+{HITL_INSTRUCTION}
+"""
+
+ARCHITECT_PROMPT = f"""You are the Architect on this engineering team. Your job is to frame the system design before implementation begins.
+
+Read SPEC.md, PRODUCT.md, DESIGN.md, CHAT_HISTORY.md, and any existing ARCHITECTURE.md / DECISIONS.md.
+
+Write ARCHITECTURE.md with:
+- The intended system shape
+- Component or module boundaries
+- Important constraints and compatibility notes
+- Risks the Lead and Reviewer should watch
+
+Append a short entry to DECISIONS.md for any non-obvious direction you choose. If there are no meaningful design decisions, write that no architecture fork was needed.
+
+Append a `### Architect` section to AGENT_CHAT.md with a concise handoff for the Planner and Lead. Keep it practical and specific.
+
+Do not edit source code.
 
 {HITL_INSTRUCTION}
 """
@@ -646,6 +833,24 @@ The plan should cover:
 Keep it brief and human-readable. No code blocks, no file trees, no technical jargon. Write it so the user can glance at it in 20 seconds and say yes or no.
 
 After writing, stop immediately. Do not implement anything.
+
+{HITL_INSTRUCTION}
+"""
+
+TEAMMATE_PROMPT = f"""You are the TEAMMATE and final reviewer on a multi-agent engineering team. The LEAD is {{partner}}, who does the implementation.
+
+Do not edit source files and do not create commits. Read SPEC.md, ARCHITECTURE.md, DECISIONS.md, PLAN.md, FEEDBACK.md, LESSONS.md, AGENT_CHAT.md, and the latest git diff. Review the lead's work after Tester and specialist reviewers have had their turns.
+
+Append a section to AGENT_CHAT.md that starts with `### Teammate`. Write 2-4 direct sentences with at least two concrete observations: what is solid, what still looks risky, and whether the lead should keep working.
+
+For frontend or UI review, audit against PRODUCT.md, DESIGN.md, and the Impeccable anti-pattern standard. Call out contrast, focus, responsive behavior, text overflow, missing states, token drift, nested cards, decorative glass, gradient text, and generic AI/SaaS visuals when present.
+
+Approval only counts if your section includes at least two concrete observations.
+
+End your section with exactly one of these verdicts on its own line:
+TEAMMATE: APPROVED
+or
+TEAMMATE: CHANGES REQUESTED
 
 {HITL_INSTRUCTION}
 """
@@ -674,6 +879,130 @@ Write your findings to FEEDBACK.md:
 - If checks fail, write the relevant error output (trimmed, most important errors only) followed by "TESTER: FAILED" as the last line. Do not fix the errors yourself.
 
 Keep the report concise (under 20 lines). Just results, no prose explanation.
+
+{HITL_INSTRUCTION}
+"""
+
+
+PM_PROMPT = f"""You are the Product Manager on this engineering team. Your job is to make sure the team builds the right thing.
+
+Read SPEC.md and CHAT_HISTORY.md to understand what's been built so far. Then read the user's latest message.
+
+If the request is clear enough to implement without guessing, write a one-sentence summary of what should be built to SPEC.md, then stop immediately.
+
+If the request is genuinely ambiguous and you would need to guess to start, ask the user one specific question using the HITL mechanism. The first line must use the existing QUESTION prefix before the question text. Prefer structured choices when possible, with the question followed by:
+
+OPTIONS:
+[1] Simple - smallest change
+[2] Standard (recommended) - balanced implementation
+[3] Scalable - more architecture and tests
+DEFAULT: 2
+
+Whether the request is clear or blocked, append a `### PM` section to AGENT_CHAT.md with one short sentence describing the scope decision or the user decision needed.
+
+Keep the question short and direct. One question only. No preamble.
+
+{HITL_INSTRUCTION}
+"""
+
+TESTER_PROMPT = f"""You are the Tester. Your job is to verify the implementation compiles and passes checks, not to write new code.
+
+Read SPEC.md and PLAN.md to understand what was built. Run the project's build and test commands. Look for package.json, Makefile, or pyproject.toml to find the right commands. Common ones: npm run build, tsc --noEmit, npm test, eslint ., pytest.
+
+If the project has no test suite yet, run whatever build/lint commands exist and report what you find.
+
+Write your findings to FEEDBACK.md:
+- If all checks pass, write "TESTER: PASSED" as the last line.
+- If checks fail, write the relevant error output (trimmed, most important errors only) followed by "TESTER: FAILED" as the last line. Do not fix the errors yourself.
+
+Append a short section to LESSONS.md:
+- For passes, record the commands that proved the task is healthy.
+- For failures or circuit-breaker risk, record the likely failure class and the next verification command.
+- If there is no useful lesson, write one line saying no new testing lesson.
+
+Append a `### Tester` section to AGENT_CHAT.md with the commands you ran, the short result, and the same TESTER verdict line.
+
+Keep the report concise, under 20 lines. Just results, no prose explanation.
+
+{HITL_INSTRUCTION}
+"""
+
+ARCHITECTURE_REVIEWER_PROMPT = f"""You are the Architecture Reviewer in an adversarial review pipeline.
+
+Do not edit source files. Read SPEC.md, ARCHITECTURE.md, DECISIONS.md, PLAN.md, FEEDBACK.md, AGENT_CHAT.md, and the latest git diff. Review whether the implementation respects the intended architecture, module boundaries, existing conventions, and compatibility constraints.
+
+Append a `### Architecture Reviewer` section to AGENT_CHAT.md and a matching short section to FEEDBACK.md. Include at least two concrete observations. If there are no blocking issues, say what you checked.
+
+End with exactly one verdict line:
+ARCHITECTURE REVIEW: APPROVED
+or
+ARCHITECTURE REVIEW: CHANGES REQUESTED
+
+{HANDOFF_CONVENTION}
+
+{HITL_INSTRUCTION}
+"""
+
+SECURITY_REVIEWER_PROMPT = f"""You are the Security Reviewer in an adversarial review pipeline.
+
+Do not edit source files. Read SPEC.md, PLAN.md, FEEDBACK.md, AGENT_CHAT.md, and the latest git diff. Look for secrets, unsafe shell or file operations, injection surfaces, auth and trust boundary mistakes, data exposure, dependency risk, and dangerous defaults.
+
+Append a `### Security Reviewer` section to AGENT_CHAT.md and a matching short section to FEEDBACK.md. Include at least two concrete observations. If there are no blocking issues, say what attack paths you checked.
+
+End with exactly one verdict line:
+SECURITY REVIEW: APPROVED
+or
+SECURITY REVIEW: CHANGES REQUESTED
+
+{HANDOFF_CONVENTION}
+
+{HITL_INSTRUCTION}
+"""
+
+PERFORMANCE_REVIEWER_PROMPT = f"""You are the Performance Reviewer in an adversarial review pipeline.
+
+Do not edit source files. Read SPEC.md, PLAN.md, FEEDBACK.md, AGENT_CHAT.md, and the latest git diff. Look for avoidable blocking work, unbounded loops, large payloads, inefficient polling, expensive renders, startup regressions, and unnecessary serialization.
+
+Append a `### Performance Reviewer` section to AGENT_CHAT.md and a matching short section to FEEDBACK.md. Include at least two concrete observations. If there are no blocking issues, say what runtime paths you checked.
+
+End with exactly one verdict line:
+PERFORMANCE REVIEW: APPROVED
+or
+PERFORMANCE REVIEW: CHANGES REQUESTED
+
+{HANDOFF_CONVENTION}
+
+{HITL_INSTRUCTION}
+"""
+
+MAINTAINABILITY_REVIEWER_PROMPT = f"""You are the Maintainability Reviewer in an adversarial review pipeline.
+
+Do not edit source files. Read SPEC.md, PLAN.md, FEEDBACK.md, AGENT_CHAT.md, and the latest git diff. Look for unclear ownership, duplicated logic, brittle parsing, confusing names, missing tests around shared behavior, and changes that will be hard to extend.
+
+Append a `### Maintainability Reviewer` section to AGENT_CHAT.md and a matching short section to FEEDBACK.md. Include at least two concrete observations. If there are no blocking issues, say what maintenance risks you checked.
+
+End with exactly one verdict line:
+MAINTAINABILITY REVIEW: APPROVED
+or
+MAINTAINABILITY REVIEW: CHANGES REQUESTED
+
+{HANDOFF_CONVENTION}
+
+{HITL_INSTRUCTION}
+"""
+
+SUMMARIZER_PROMPT = f"""You are the Summarizer for the engineering workspace.
+
+Read SPEC.md, ARCHITECTURE.md, DECISIONS.md, PLAN.md, FEEDBACK.md, LESSONS.md, AGENT_CHAT.md, and CHAT_HISTORY.md. Update PROJECT_MEMORY.md with durable context the next task should know:
+- Current project shape
+- Important decisions
+- Recent task outcomes
+- Known risks or failed checks
+- Useful commands or lessons
+
+Keep PROJECT_MEMORY.md concise. Prefer stable facts over transcript recap. Do not edit source files.
+
+Append a `### Summarizer` section to AGENT_CHAT.md with one sentence describing what memory was updated.
 
 {HITL_INSTRUCTION}
 """
@@ -845,6 +1174,14 @@ def status_path() -> Path:
     return DUALITH_DIR / "status.json"
 
 
+def claude_rate_limits_path() -> Path:
+    return DUALITH_DIR / "claude-rate-limits.json"
+
+
+def tasks_path() -> Path:
+    return DUALITH_DIR / "tasks.json"
+
+
 def central_memory_path() -> Path:
     return DUALITH_DIR / "memory.json"
 
@@ -861,6 +1198,10 @@ def project_memory_path(project_path: Path) -> Path:
     return project_path / ".dualith_memory"
 
 
+def project_memory_doc_path(project_path: Path) -> Path:
+    return project_path / "PROJECT_MEMORY.md"
+
+
 def plan_path(project_path: Path) -> Path:
     return project_path / "PLAN.md"
 
@@ -871,6 +1212,18 @@ def feedback_path(project_path: Path) -> Path:
 
 def agent_chat_path(project_path: Path) -> Path:
     return project_path / "AGENT_CHAT.md"
+
+
+def architecture_path(project_path: Path) -> Path:
+    return project_path / "ARCHITECTURE.md"
+
+
+def decisions_path(project_path: Path) -> Path:
+    return project_path / "DECISIONS.md"
+
+
+def lessons_path(project_path: Path) -> Path:
+    return project_path / "LESSONS.md"
 
 
 # HITL marker prefixes (kept as exact strings per spec).
@@ -893,6 +1246,8 @@ def ensure_dualith_store() -> None:
         quota_path().write_text(json.dumps(DEFAULT_QUOTA_SETTINGS, indent=2) + "\n", encoding="utf-8")
     if not status_path().exists():
         status_path().write_text(json.dumps(DEFAULT_STATUS_CACHE, indent=2) + "\n", encoding="utf-8")
+    if not tasks_path().exists():
+        tasks_path().write_text('{"tasks":[]}\n', encoding="utf-8")
     if not central_memory_path().exists():
         central_memory_path().write_text("{}\n", encoding="utf-8")
 
@@ -999,6 +1354,668 @@ def write_result(result: dict[str, Any]) -> dict[str, Any]:
     results.append(result)
     write_results(results)
     return result
+
+
+def clear_project_results(project_name: str) -> None:
+    remaining = [item for item in read_results() if str(item.get("project", "")) != project_name]
+    write_results(remaining)
+
+
+def task_title(prompt: str, fallback: str = "New engineering task") -> str:
+    for line in prompt.splitlines():
+        cleaned = line.strip().strip("#*- ")
+        if cleaned:
+            return cleaned[:96]
+    return fallback
+
+
+def task_event_type_for_action(action: str) -> str:
+    upper = action.upper()
+    if any(token in upper for token in ("QUEUE", "TASK")):
+        return "queue_event"
+    if any(token in upper for token in ("PLAN_READY", "HUMAN", "QUESTION", "APPROVAL", "DECISION")):
+        return "decision"
+    if any(token in upper for token in ("AUDIT", "REVIEW", "TEAMMATE")):
+        return "review"
+    if any(token in upper for token in ("CHAT", "GIT")):
+        return "conversation"
+    if any(token in upper for token in ("TEAM", "PIPELINE", "CODEX", "CLAUDE", "STATUS")):
+        return "agent_activity"
+    return "system"
+
+
+def typed_console_events() -> list[dict[str, str]]:
+    return [
+        {
+            "timestamp": entry.get("timestamp", ""),
+            "action": entry.get("action", ""),
+            "path": entry.get("path", ""),
+            "type": task_event_type_for_action(entry.get("action", "")),
+        }
+        for entry in console_events
+    ]
+
+
+def read_tasks() -> list[dict[str, Any]]:
+    ensure_dualith_store()
+    try:
+        data = json.loads(tasks_path().read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        data = {"tasks": []}
+    tasks = data.get("tasks", [])
+    return [normalize_task_record(task) for task in tasks if isinstance(task, dict)] if isinstance(tasks, list) else []
+
+
+def write_tasks(tasks: list[dict[str, Any]]) -> None:
+    ensure_dualith_store()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for task in tasks:
+        project = str(task.get("project", ""))
+        grouped.setdefault(project, []).append(task)
+
+    trimmed: list[dict[str, Any]] = []
+    for project_tasks in grouped.values():
+        ordered = sorted(project_tasks, key=lambda item: str(item.get("created_at", "")))
+        pinned = [task for task in ordered if str(task.get("status", "")) in {"active", "blocked", "pending"}]
+        history = [task for task in ordered if task not in pinned]
+        trimmed.extend([*history[-TASK_LIMIT_PER_PROJECT:], *pinned])
+
+    payload = {"tasks": sorted(trimmed, key=lambda item: str(item.get("created_at", "")))}
+    temp_path = tasks_path().with_suffix(".json.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    temp_path.replace(tasks_path())
+
+
+def task_phase_state(status: str = "pending", runner: str = "") -> dict[str, str]:
+    return {"status": status, "runner": runner, "updated_at": ""}
+
+
+def workflow_agents(workflow_id: str) -> set[str]:
+    workflow = ORCHESTRATION_WORKFLOWS.get(workflow_id, {})
+    agents = workflow.get("agents", [])
+    if isinstance(agents, list):
+        return {str(agent) for agent in agents}
+    agent = str(workflow.get("agent", ""))
+    return {agent} if agent else set()
+
+
+def workflow_task_phases(workflow_id: str) -> set[str]:
+    agents = workflow_agents(workflow_id)
+    phases: set[str] = set()
+    if "pm" in agents:
+        phases.add("pm")
+    if "architect" in agents:
+        phases.add("architect")
+    if "planner" in agents:
+        phases.add("planner")
+    if agents.intersection({"lead", "builder"}):
+        phases.add("lead")
+    if "tester" in agents:
+        phases.add("tester")
+    if agents.intersection({"teammate", "auditor", *SPECIALIST_REVIEWERS}):
+        phases.add("reviewer")
+    return phases
+
+
+def initial_task_phases(workflow_id: str) -> dict[str, dict[str, str]]:
+    active_phases = workflow_task_phases(workflow_id)
+    return {
+        phase: task_phase_state("pending" if phase in active_phases else "skipped")
+        for phase in TASK_PHASES
+    }
+
+
+def normalize_task_decision(decision: dict[str, Any]) -> dict[str, str]:
+    return {
+        "id": str(decision.get("id", "")) or uuid4().hex,
+        "label": str(decision.get("label", ""))[:120],
+        "selected": str(decision.get("selected", ""))[:240],
+        "reason": str(decision.get("reason", ""))[:500],
+        "source": str(decision.get("source", ""))[:80],
+        "timestamp": str(decision.get("timestamp", "")) or utc_now(),
+        "status": str(decision.get("status", ""))[:80],
+    }
+
+
+def normalize_task_record(task: dict[str, Any]) -> dict[str, Any]:
+    workflow_id = str(task.get("workflow_id", ""))
+    active_phases = workflow_task_phases(workflow_id)
+    phases = task.get("phases", {})
+    if not isinstance(phases, dict):
+        phases = {}
+    for phase in TASK_PHASES:
+        current = phases.get(phase, {})
+        if not isinstance(current, dict):
+            current = {}
+        status = str(current.get("status", ""))
+        runner = str(current.get("runner", ""))
+        updated_at = str(current.get("updated_at", ""))
+        if phase not in active_phases and status in {"", "pending", "waiting"} and not runner and not updated_at:
+            current["status"] = "skipped"
+        elif not status:
+            current["status"] = "pending" if phase in active_phases else "skipped"
+        current.setdefault("runner", "")
+        current.setdefault("updated_at", "")
+        phases[phase] = current
+    task["phases"] = phases
+
+    reviews = task.get("specialist_reviews")
+    if (
+        not isinstance(reviews, list)
+        and workflow_agents(workflow_id).intersection(SPECIALIST_REVIEWERS)
+        and str(task.get("status", "")) in {"pending", "active", "blocked"}
+    ):
+        task["specialist_reviews"] = [specialist_review_state(reviewer) for reviewer in SPECIALIST_REVIEWERS]
+
+    decisions = task.get("decisions", [])
+    if not isinstance(decisions, list):
+        decisions = []
+    task["decisions"] = [
+        normalize_task_decision(decision)
+        for decision in decisions
+        if isinstance(decision, dict) and str(decision.get("selected", "")).strip()
+    ][-24:]
+
+    subagents = task.get("subagents", [])
+    if not isinstance(subagents, list):
+        subagents = []
+    task["subagents"] = [item for item in subagents if isinstance(item, dict)]
+    return task
+
+
+def specialist_review_state(reviewer: str, status: str = "pending", runner: str = "", summary: str = "") -> dict[str, str]:
+    return {
+        "id": reviewer,
+        "label": SPECIALIST_REVIEWER_LABELS.get(reviewer, reviewer.replace("_", " ").title()),
+        "status": status,
+        "runner": runner,
+        "summary": summary,
+        "updated_at": "",
+    }
+
+
+def new_task_record(
+    project_name: str,
+    workflow_id: str,
+    runner: str,
+    model: str,
+    reasoning: str,
+    prompt: str,
+    route_reason: str,
+    attachment_paths: list[str] | None = None,
+    status: str = "pending",
+) -> dict[str, Any]:
+    now = utc_now()
+    phases = initial_task_phases(workflow_id)
+    specialist_reviews = [specialist_review_state(reviewer) for reviewer in SPECIALIST_REVIEWERS]
+    return {
+        "id": uuid4().hex,
+        "project": project_name,
+        "title": task_title(prompt),
+        "prompt": prompt.strip(),
+        "workflow_id": workflow_id,
+        "runner": runner,
+        "model": model,
+        "reasoning": reasoning,
+        "route_reason": route_reason,
+        "attachment_paths": attachment_paths or [],
+        "status": status if status in TASK_STATUSES else "pending",
+        "active_phase": "",
+        "created_at": now,
+        "updated_at": now,
+        "started_at": now if status == "active" else "",
+        "completed_at": "",
+        "phases": phases,
+        "specialist_reviews": specialist_reviews,
+        "decisions": [],
+        "events": [
+            {
+                "id": uuid4().hex,
+                "type": "queue_event",
+                "title": "Task created" if status == "active" else "Task queued",
+                "body": route_reason,
+                "role": "",
+                "status": status,
+                "timestamp": now,
+            }
+        ],
+        "ownership": {"mode": "sequential", "claimed_paths": []},
+        "subagents": [],
+    }
+
+
+def project_tasks(project_name: str) -> list[dict[str, Any]]:
+    return [task for task in read_tasks() if str(task.get("project", "")) == project_name]
+
+
+def active_task_for_project(project_name: str) -> dict[str, Any] | None:
+    for task in project_tasks(project_name):
+        if str(task.get("status", "")) in {"active", "blocked"}:
+            return task
+    return None
+
+
+def next_pending_task(project_name: str) -> dict[str, Any] | None:
+    pending = [task for task in project_tasks(project_name) if str(task.get("status", "")) == "pending"]
+    return sorted(pending, key=lambda item: str(item.get("created_at", "")))[0] if pending else None
+
+
+def task_counts(project_name: str) -> dict[str, int]:
+    counts = {status: 0 for status in TASK_STATUSES}
+    for task in project_tasks(project_name):
+        status = str(task.get("status", ""))
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def update_task(task_id: str, mutate: Any) -> dict[str, Any] | None:
+    tasks = read_tasks()
+    found: dict[str, Any] | None = None
+    for task in tasks:
+        if str(task.get("id", "")) == task_id:
+            mutate(task)
+            task["updated_at"] = utc_now()
+            found = task
+            break
+    if found:
+        write_tasks(tasks)
+    return found
+
+
+def create_task(
+    project_name: str,
+    workflow_id: str,
+    runner: str,
+    model: str,
+    reasoning: str,
+    prompt: str,
+    route_reason: str,
+    attachment_paths: list[str] | None = None,
+    status: str = "pending",
+) -> dict[str, Any]:
+    task = new_task_record(project_name, workflow_id, runner, model, reasoning, prompt, route_reason, attachment_paths, status)
+    tasks = read_tasks()
+    tasks.append(task)
+    write_tasks(tasks)
+    return task
+
+
+def task_by_id(task_id: str | None) -> dict[str, Any] | None:
+    if not task_id:
+        return None
+    for task in read_tasks():
+        if str(task.get("id", "")) == task_id:
+            return task
+    return None
+
+
+def append_task_event(task_id: str | None, event_type: str, title: str, body: str = "", role: str = "", status: str = "") -> None:
+    if not task_id:
+        return
+    event_type = event_type if event_type in TASK_EVENT_TYPES else "system"
+
+    def mutate(task: dict[str, Any]) -> None:
+        now = utc_now()
+        events = task.setdefault("events", [])
+        if not isinstance(events, list):
+            events = []
+            task["events"] = events
+        events.append(
+            {
+                "id": uuid4().hex,
+                "type": event_type,
+                "title": title[:120],
+                "body": body[:500],
+                "role": role,
+                "status": status,
+                "timestamp": now,
+            }
+        )
+        task["events"] = events[-80:]
+        if event_type == "decision" and re.search(r"(^|\n)\s*selected\s*:", body, flags=re.IGNORECASE):
+            selected = re.search(r"(^|\n)\s*selected\s*:\s*(.+)", body, flags=re.IGNORECASE)
+            reason = re.search(r"(^|\n)\s*reason\s*:\s*(.+)", body, flags=re.IGNORECASE)
+            decision = normalize_task_decision(
+                {
+                    "id": uuid4().hex,
+                    "label": title,
+                    "selected": selected.group(2).strip() if selected else title,
+                    "reason": reason.group(2).strip() if reason else body,
+                    "source": role,
+                    "timestamp": now,
+                    "status": status,
+                }
+            )
+            decisions = task.setdefault("decisions", [])
+            if not isinstance(decisions, list):
+                decisions = []
+            decisions.append(decision)
+            task["decisions"] = decisions[-24:]
+
+    update_task(task_id, mutate)
+
+
+def append_task_decision(
+    task_id: str | None,
+    label: str,
+    selected: str,
+    reason: str = "",
+    source: str = "",
+    status: str = "",
+) -> None:
+    if not task_id or not selected.strip():
+        return
+
+    now = utc_now()
+    decision = normalize_task_decision(
+        {
+            "id": uuid4().hex,
+            "label": label or "Decision",
+            "selected": selected.strip(),
+            "reason": reason.strip(),
+            "source": source.strip(),
+            "timestamp": now,
+            "status": status.strip(),
+        }
+    )
+
+    def mutate(task: dict[str, Any]) -> None:
+        decisions = task.setdefault("decisions", [])
+        if not isinstance(decisions, list):
+            decisions = []
+        decisions.append(decision)
+        task["decisions"] = decisions[-24:]
+
+        events = task.setdefault("events", [])
+        if not isinstance(events, list):
+            events = []
+        events.append(
+            {
+                "id": uuid4().hex,
+                "type": "decision",
+                "title": decision["label"],
+                "body": f"selected: {decision['selected']}\nreason: {decision['reason']}".strip(),
+                "role": decision["source"],
+                "status": decision["status"],
+                "timestamp": now,
+            }
+        )
+        task["events"] = events[-80:]
+
+    update_task(task_id, mutate)
+
+
+def set_task_status(task_id: str | None, status: str, active_phase: str = "", body: str = "") -> None:
+    if not task_id or status not in TASK_STATUSES:
+        return
+
+    def mutate(task: dict[str, Any]) -> None:
+        now = utc_now()
+        task["status"] = status
+        task["active_phase"] = active_phase
+        if status == "active" and not task.get("started_at"):
+            task["started_at"] = now
+        if status in {"completed", "failed"}:
+            task["completed_at"] = now
+
+    update_task(task_id, mutate)
+    append_task_event(task_id, "queue_event", f"Task {status}", body, active_phase, status)
+
+
+def set_task_phase(task_id: str | None, phase: str, status: str, runner: str = "", body: str = "") -> None:
+    if not task_id or phase not in TASK_PHASES:
+        return
+
+    def mutate(task: dict[str, Any]) -> None:
+        phases = task.setdefault("phases", {})
+        if not isinstance(phases, dict):
+            phases = {}
+            task["phases"] = phases
+        current = phases.get(phase, {})
+        if not isinstance(current, dict):
+            current = {}
+        current.update({"status": status, "runner": runner, "updated_at": utc_now()})
+        phases[phase] = current
+        task["active_phase"] = phase if status in {"running", "blocked"} else task.get("active_phase", "")
+
+    update_task(task_id, mutate)
+    event_type = "review" if phase == "reviewer" else "decision" if phase in {"pm", "architect", "planner"} else "agent_activity"
+    append_task_event(task_id, event_type, f"{phase.title()} {status}", body, phase, status)
+
+
+def set_task_specialist_review(task_id: str | None, reviewer: str, status: str, runner: str = "", summary: str = "") -> None:
+    if not task_id or reviewer not in SPECIALIST_REVIEWERS:
+        return
+
+    def mutate(task: dict[str, Any]) -> None:
+        reviews = task.setdefault("specialist_reviews", [])
+        if not isinstance(reviews, list):
+            reviews = []
+            task["specialist_reviews"] = reviews
+        by_id = {str(item.get("id", "")): item for item in reviews if isinstance(item, dict)}
+        current = by_id.get(reviewer, specialist_review_state(reviewer))
+        current.update({
+            "status": status,
+            "runner": runner,
+            "summary": summary[:240],
+            "updated_at": utc_now(),
+        })
+        by_id[reviewer] = current
+        task["specialist_reviews"] = [by_id.get(item, specialist_review_state(item)) for item in SPECIALIST_REVIEWERS]
+
+    update_task(task_id, mutate)
+    append_task_event(task_id, "review", f"{SPECIALIST_REVIEWER_LABELS[reviewer]} {status}", summary, reviewer, status)
+
+
+def task_subagent_from_lane(lane: dict[str, Any]) -> dict[str, Any]:
+    label = str(lane.get("lane", "")).strip()
+    files = lane.get("files", [])
+    if not isinstance(files, list):
+        files = []
+    try:
+        pct = int(lane.get("pct", 0) or 0)
+    except (TypeError, ValueError):
+        pct = 0
+    return {
+        "id": label,
+        "label": label.upper() if len(label) <= 4 else label.replace("_", " ").title(),
+        "status": str(lane.get("status", "queued")) or "queued",
+        "scope": str(lane.get("scope", ""))[:240],
+        "files": [str(file) for file in files][:8],
+        "pct": pct,
+        "updated_at": str(lane.get("updated_at", "")),
+    }
+
+
+def set_task_lead_lanes(task_id: str | None, lanes: list[dict[str, Any]]) -> None:
+    """Store the decomposer's lane plan on the lead phase so the UI can render LaneMatrix."""
+    if not task_id:
+        return
+
+    def mutate(task: dict[str, Any]) -> None:
+        phases = task.setdefault("phases", {})
+        lead_phase = phases.setdefault("lead", {})
+        lead_phase["lanes"] = lanes
+        lead_phase["updated_at"] = utc_now()
+        task["subagents"] = [task_subagent_from_lane(lane) for lane in lanes if isinstance(lane, dict)]
+
+    update_task(task_id, mutate)
+
+
+def update_task_lane_progress(task_id: str | None, lane_label: str, status: str, pct: int = 0) -> None:
+    """Update a single lane's status/progress inside the lead phase lanes list."""
+    if not task_id:
+        return
+
+    def mutate(task: dict[str, Any]) -> None:
+        lanes = task.get("phases", {}).get("lead", {}).get("lanes", [])
+        for lane in lanes:
+            if isinstance(lane, dict) and lane.get("lane") == lane_label:
+                lane["status"] = status
+                lane["pct"] = pct
+                lane["updated_at"] = utc_now()
+                break
+        subagents = task.get("subagents", [])
+        if isinstance(subagents, list):
+            for subagent in subagents:
+                if not isinstance(subagent, dict):
+                    continue
+                if subagent.get("id") == lane_label or str(subagent.get("label", "")).lower() == lane_label.lower():
+                    subagent["status"] = status
+                    subagent["pct"] = pct
+                    subagent["updated_at"] = utc_now()
+                    break
+
+    update_task(task_id, mutate)
+
+
+def parse_decomposer_file(project_path: Path) -> list[dict[str, Any]]:
+    """Read DECOMPOSE.json written by the decomposer agent.
+
+    Returns [] on any parse failure or when the decomposer signals no split.
+    """
+    import json as _json
+    import re as _re
+    decompose_file = project_path / "DECOMPOSE.json"
+    if not decompose_file.exists():
+        return []
+    try:
+        raw = decompose_file.read_text(encoding="utf-8", errors="ignore").strip()
+    except Exception:  # noqa: BLE001
+        return []
+    # Strip markdown fences if the model wrapped anyway.
+    clean = _re.sub(r"```[a-z]*\n?", "", raw).strip()
+    m = _re.search(r'\{.*\}', clean, _re.DOTALL)
+    if not m:
+        return []
+    try:
+        data = _json.loads(m.group())
+        lanes = data.get("lanes", [])
+        if not isinstance(lanes, list):
+            return []
+        valid: list[dict[str, Any]] = []
+        for item in lanes:
+            if isinstance(item, dict) and item.get("lane"):
+                valid.append({
+                    "lane": str(item["lane"])[:32],
+                    "scope": str(item.get("scope", ""))[:200],
+                    "files": [str(f)[:200] for f in item.get("files", []) if f][:20],
+                    "status": "queued",
+                    "pct": 0,
+                })
+        return valid[:3]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def update_task_ownership_from_git(task_id: str | None, project_path: Path, owner: str = "Lead") -> None:
+    if not task_id or not (project_path / ".git").exists():
+        return
+    code, output = run_git_sync(project_path, ("status", "--short"))
+    if code != 0:
+        return
+    _, paths = git_status_paths(output)
+    if not paths:
+        return
+
+    def mutate(task: dict[str, Any]) -> None:
+        ownership = task.setdefault("ownership", {"mode": "sequential", "claimed_paths": []})
+        claimed = ownership.get("claimed_paths", [])
+        if not isinstance(claimed, list):
+            claimed = []
+        existing = {str(item.get("path", "")) for item in claimed if isinstance(item, dict)}
+        for path in paths[:40]:
+            if path in existing:
+                continue
+            claimed.append({"path": path, "owner": owner, "phase": "lead", "claimed_at": utc_now()})
+        ownership["claimed_paths"] = claimed[-80:]
+
+    update_task(task_id, mutate)
+
+
+def task_final_status_from_state(state: dict[str, Any] | None, success_step: str) -> tuple[str, str]:
+    if not state:
+        return "failed", "No final runtime state was captured."
+    status = str(state.get("status", ""))
+    step = str(state.get("step", ""))
+    if status == "done" and step == success_step:
+        return "completed", step
+    if status == "done" and step not in {"circuit-breaker", "max-rounds", "max-iterations"}:
+        return "completed", step or status
+    return "failed", step or status or "stopped"
+
+
+def taskable_workflow(workflow_id: str) -> bool:
+    workflow = ORCHESTRATION_WORKFLOWS.get(workflow_id, {})
+    kind = str(workflow.get("kind", ""))
+    return kind in {"team", "plan-team", "pm-team", "pipeline"}
+
+
+def recover_interrupted_tasks() -> None:
+    tasks = read_tasks()
+    changed = False
+    now = utc_now()
+    for task in tasks:
+        if str(task.get("status", "")) not in {"active", "blocked"}:
+            continue
+        task["status"] = "failed"
+        task["active_phase"] = ""
+        task["completed_at"] = now
+        task["updated_at"] = now
+        events = task.setdefault("events", [])
+        if isinstance(events, list):
+            events.append(
+                {
+                    "id": uuid4().hex,
+                    "type": "system",
+                    "title": "Task interrupted",
+                    "body": "The backend restarted before this task finished.",
+                    "role": "",
+                    "status": "failed",
+                    "timestamp": now,
+                }
+            )
+        changed = True
+    if changed:
+        write_tasks(tasks)
+
+
+async def start_next_queued_task(project_name: str) -> None:
+    if project_has_active_orchestration(project_name) or active_task_for_project(project_name):
+        return
+    task = next_pending_task(project_name)
+    if not task:
+        return
+
+    project_path = tracked_project_path(project_name)
+    task_id = str(task.get("id", ""))
+    workflow_id = str(task.get("workflow_id", "auto-team"))
+    runner = str(task.get("runner", "auto"))
+    model = str(task.get("model", ""))
+    reasoning = str(task.get("reasoning", "medium"))
+    prompt = str(task.get("prompt", ""))
+    attachment_paths = [str(path) for path in task.get("attachment_paths", []) if str(path).strip()]
+
+    set_task_status(task_id, "active", body="Dequeued after the previous task finished.")
+    record_event("TASK_STARTED", f"{relative_path(project_path)} :: {task_title(prompt)}")
+    await start_orchestration(project_name, project_path, workflow_id, runner, model, reasoning, prompt, attachment_paths, task_id=task_id)
+    await broadcast("team_event")
+
+
+async def finish_task_and_start_next(
+    project_name: str,
+    project_path: Path,
+    task_id: str | None,
+    runtime_state: dict[str, Any] | None,
+    success_step: str,
+) -> None:
+    if task_id:
+        status, detail = task_final_status_from_state(runtime_state, success_step)
+        set_task_status(task_id, status, body=detail)
+        record_event("TASK_COMPLETED" if status == "completed" else "TASK_FAILED", f"{relative_path(project_path)} :: {detail}")
+        await summarize_project_memory(project_name, project_path, task_id, status, detail)
+    await start_next_queued_task(project_name)
 
 
 def read_quota_settings() -> dict[str, Any]:
@@ -1163,9 +2180,294 @@ def parse_status_limits(runner: str, raw_output: str) -> dict[str, Any]:
     return parsed
 
 
+def optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def codex_rate_limit_snapshot(response: dict[str, Any]) -> dict[str, Any]:
+    result = response.get("result", {})
+    if not isinstance(result, dict):
+        return {}
+
+    snapshot: Any = None
+    by_limit_id = result.get("rateLimitsByLimitId")
+    if isinstance(by_limit_id, dict):
+        snapshot = by_limit_id.get("codex")
+    if not isinstance(snapshot, dict):
+        snapshot = result.get("rateLimits")
+    if not isinstance(snapshot, dict):
+        return {}
+
+    primary = snapshot.get("primary")
+    primary = primary if isinstance(primary, dict) else {}
+    used_percentage = parse_rate_limit_percentage(primary.get("usedPercent"))
+    return {
+        "limit_id": str(snapshot.get("limitId") or ""),
+        "limit_name": str(snapshot.get("limitName") or ""),
+        "used_percentage": used_percentage,
+        "window_minutes": optional_int(primary.get("windowDurationMins")),
+        "resets_at": primary.get("resetsAt"),
+        "plan_type": str(snapshot.get("planType") or ""),
+        "rate_limit_reached_type": str(snapshot.get("rateLimitReachedType") or ""),
+    }
+
+
+async def stop_codex_app_server(process: asyncio.subprocess.Process | None) -> str:
+    if process is None:
+        return ""
+
+    try:
+        if process.stdin and not process.stdin.is_closing():
+            process.stdin.close()
+    except Exception:
+        pass
+
+    if process.returncode is None:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+
+    if process.stderr:
+        try:
+            data = await asyncio.wait_for(process.stderr.read(), timeout=1)
+            return data.decode("utf-8", errors="replace")[-1000:]
+        except Exception:
+            return ""
+    return ""
+
+
+async def read_codex_rate_limits_from_app_server() -> dict[str, Any]:
+    command = str(RUNNER_COMMANDS["codex"]["status_command"])
+    raw_args = os.environ.get("DUALITH_CODEX_APP_SERVER_ARGS", "app-server")
+    args = parse_shell_words(raw_args) or ["app-server"]
+    timeout_seconds = max(1, CODEX_APP_SERVER_TIMEOUT_SECONDS)
+    process: asyncio.subprocess.Process | None = None
+    stdout_lines: list[str] = []
+    result: dict[str, Any] = {
+        "status": "error",
+        "snapshot": {},
+        "raw": "",
+        "error": "Codex app-server did not return rate limits.",
+    }
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            command,
+            *args,
+            cwd=ROOT_DIR,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        if not process.stdin or not process.stdout:
+            result["error"] = "Codex app-server stdio was not available."
+            return result
+
+        messages = (
+            {
+                "id": 0,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "dualith",
+                        "title": "Dualith",
+                        "version": "0.1.0",
+                    },
+                    "capabilities": {"experimentalApi": True},
+                },
+            },
+            {"method": "initialized", "params": {}},
+            {"id": 2, "method": "account/rateLimits/read", "params": None},
+        )
+        for message in messages:
+            process.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+        await process.stdin.drain()
+
+        deadline = datetime.now(timezone.utc).timestamp() + timeout_seconds
+        while True:
+            remaining = deadline - datetime.now(timezone.utc).timestamp()
+            if remaining <= 0:
+                result["error"] = f"Codex app-server rate-limit read timed out after {timeout_seconds}s."
+                break
+            line_bytes = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
+            if not line_bytes:
+                result["error"] = "Codex app-server closed before returning rate limits."
+                break
+            line = line_bytes.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            stdout_lines.append(line)
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(message, dict) or message.get("id") != 2:
+                continue
+            if isinstance(message.get("error"), dict):
+                result["error"] = str(message["error"].get("message") or message["error"])
+                break
+            snapshot = codex_rate_limit_snapshot(message)
+            if snapshot:
+                result = {"status": "ok", "snapshot": snapshot, "raw": json.dumps({"rateLimits": snapshot})}
+            else:
+                result["error"] = "Codex app-server response did not include Codex rate limits."
+            break
+    except FileNotFoundError:
+        result["error"] = f"command not found: {command}"
+    except asyncio.TimeoutError:
+        result["error"] = f"Codex app-server rate-limit read timed out after {timeout_seconds}s."
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        stderr = await stop_codex_app_server(process)
+        if stderr and result["status"] != "ok":
+            result["error"] = f"{result['error']} :: {stderr}"
+        if stdout_lines and not result.get("raw"):
+            result["raw"] = "\n".join(stdout_lines)[-STATUS_OUTPUT_LIMIT:]
+
+    result["error"] = str(result.get("error", ""))[-1000:]
+    result["raw"] = str(result.get("raw", ""))[-STATUS_OUTPUT_LIMIT:]
+    return result
+
+
+def codex_rate_limit_period(snapshot: dict[str, Any], used: int, fallback_reset: str) -> dict[str, Any]:
+    period: dict[str, Any] = {"used": used, "limit": 0, "resets": fallback_reset}
+    if not snapshot:
+        return period
+
+    used_percentage = snapshot.get("used_percentage")
+    parsed_percentage = parse_rate_limit_percentage(used_percentage)
+    if parsed_percentage is not None:
+        period["used_percentage"] = parsed_percentage
+    window_minutes = optional_int(snapshot.get("window_minutes"))
+    if window_minutes is not None:
+        period["window_minutes"] = window_minutes
+    if snapshot.get("plan_type"):
+        period["plan_type"] = str(snapshot.get("plan_type"))
+    if snapshot.get("rate_limit_reached_type"):
+        period["rate_limit_reached_type"] = str(snapshot.get("rate_limit_reached_type"))
+
+    limit = derived_limit_from_percentage(used, parsed_percentage)
+    if limit <= 0:
+        return period
+
+    period["limit"] = limit
+    period["resets"] = statusline_reset_label(snapshot.get("resets_at"), fallback_reset)
+    period["limit_source"] = "rate_limit"
+    return period
+
+
+def read_claude_rate_limits() -> dict[str, Any]:
+    try:
+        data = json.loads(claude_rate_limits_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def claude_rate_limits_fresh(cache: dict[str, Any]) -> bool:
+    if CLAUDE_STATUSLINE_TTL_SECONDS <= 0:
+        return True
+    captured_at = parse_timestamp(str(cache.get("captured_at", "")))
+    if not captured_at:
+        return False
+    if captured_at.tzinfo is None:
+        captured_at = captured_at.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - captured_at).total_seconds()
+    return age_seconds <= CLAUDE_STATUSLINE_TTL_SECONDS
+
+
+def parse_rate_limit_percentage(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        percentage = float(value)
+    elif isinstance(value, str):
+        match = re.search(r"-?\d+(?:\.\d+)?", value)
+        if not match:
+            return None
+        percentage = float(match.group(0))
+    else:
+        return None
+
+    if percentage <= 0 or percentage > 1000:
+        return None
+    return percentage
+
+
+def derived_limit_from_percentage(used: int, used_percentage: Any) -> int:
+    percentage = parse_rate_limit_percentage(used_percentage)
+    if used <= 0 or percentage is None:
+        return 0
+    return max(1, int((used * 100 / percentage) + 0.999999))
+
+
+def statusline_reset_label(value: Any, fallback: str) -> str:
+    reset_dt: datetime | None = None
+    if isinstance(value, (int, float)):
+        timestamp = float(value) / 1000 if value > 10_000_000_000 else float(value)
+        try:
+            reset_dt = datetime.fromtimestamp(timestamp, timezone.utc)
+        except (OSError, ValueError):
+            reset_dt = None
+    elif isinstance(value, str) and value.strip():
+        reset_dt = parse_timestamp(value.strip())
+
+    if not reset_dt:
+        return fallback
+    if reset_dt.tzinfo is None:
+        reset_dt = reset_dt.replace(tzinfo=timezone.utc)
+    hours = (reset_dt - datetime.now(timezone.utc)).total_seconds() / 3600
+    if hours <= 0:
+        return "now"
+    return _next_reset_label(hours)
+
+
+def claude_statusline_period(
+    rate_limit_cache: dict[str, Any],
+    key: str,
+    used: int,
+    fallback_reset: str,
+) -> dict[str, Any]:
+    period: dict[str, Any] = {"used": used, "limit": 0, "resets": fallback_reset}
+    if not claude_rate_limits_fresh(rate_limit_cache):
+        return period
+
+    rate_limits = rate_limit_cache.get("rate_limits", {})
+    if not isinstance(rate_limits, dict):
+        return period
+    window = rate_limits.get(key)
+    if not isinstance(window, dict):
+        return period
+
+    used_percentage = window.get("used_percentage")
+    limit = derived_limit_from_percentage(used, used_percentage)
+    if limit <= 0:
+        return period
+
+    period["limit"] = limit
+    period["resets"] = statusline_reset_label(window.get("resets_at"), fallback_reset)
+    period["limit_source"] = "statusline"
+    period["used_percentage"] = parse_rate_limit_percentage(used_percentage)
+    return period
+
+
 def claude_home() -> Path:
     """Return the ~/.claude directory."""
     return Path.home() / ".claude"
+
+
+def jsonl_file_older_than(path: str, cutoff: datetime) -> bool:
+    """Use file mtime as a cheap guard before opening large session logs."""
+    try:
+        modified_at = datetime.fromtimestamp(os.path.getmtime(path), timezone.utc)
+    except OSError:
+        return False
+    return modified_at < cutoff
 
 
 def read_claude_usage_from_jsonl(window_hours: float) -> int:
@@ -1174,6 +2476,8 @@ def read_claude_usage_from_jsonl(window_hours: float) -> int:
     total = 0
     pattern = str(claude_home() / "projects" / "**" / "*.jsonl")
     for path in glob_module.glob(pattern, recursive=True):
+        if jsonl_file_older_than(path, cutoff):
+            continue
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 for raw in f:
@@ -1222,6 +2526,8 @@ def read_codex_usage_from_jsonl(window_hours: float) -> int:
     total = 0
     pattern = str(codex_home() / "sessions" / "**" / "*.jsonl")
     for path in glob_module.glob(pattern, recursive=True):
+        if jsonl_file_older_than(path, cutoff):
+            continue
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 for raw in f:
@@ -1472,6 +2778,13 @@ def finish_result_record(
 
 
 def summarize_usage(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    token_runs = sum(
+        1
+        for run in runs
+        if run.get("total_tokens") is not None
+        or run.get("input_tokens") is not None
+        or run.get("output_tokens") is not None
+    )
     return {
         "runs": len(runs),
         "duration_ms": sum(int(run.get("duration_ms") or 0) for run in runs),
@@ -1479,6 +2792,14 @@ def summarize_usage(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "output_tokens": sum(int(run.get("output_tokens") or 0) for run in runs),
         "total_tokens": sum(int(run.get("total_tokens") or 0) for run in runs),
         "cost_usd": round(sum(float(run.get("cost_usd") or 0) for run in runs), 6),
+        "token_runs": token_runs,
+        "unknown_token_runs": max(0, len(runs) - token_runs),
+        "prompt_chars": sum(int(run.get("prompt_chars") or 0) for run in runs),
+        "output_lines": sum(int(run.get("output_lines") or 0) for run in runs),
+        "output_chars": sum(int(run.get("output_chars") or 0) for run in runs),
+        "ok_runs": sum(1 for run in runs if str(run.get("status", "")) == "ok"),
+        "error_runs": sum(1 for run in runs if str(run.get("status", "")) == "error"),
+        "stopped_runs": sum(1 for run in runs if str(run.get("status", "")) == "stopped"),
     }
 
 
@@ -1499,10 +2820,31 @@ def runs_since(runs: list[dict[str, Any]], start: datetime, runner: str) -> list
     return scoped
 
 
-def quota_period(limit: int, used: int, reserve_percent: int, source: str, checked_at: str = "") -> dict[str, Any]:
+def quota_period(
+    limit: int,
+    used: int,
+    reserve_percent: int,
+    source: str,
+    checked_at: str = "",
+    limit_source: str = "",
+    resets: str = "",
+) -> dict[str, Any]:
+    limit_known = limit > 0
     usable_limit = int(limit * max(0, 100 - reserve_percent) / 100) if limit else 0
     remaining = max(0, limit - used) if limit else 0
     usable_remaining = max(0, usable_limit - used) if usable_limit else 0
+    percent_used = round((used / limit) * 100, 1) if limit_known else None
+    percent_usable = round((used / usable_limit) * 100, 1) if usable_limit else None
+    if not limit_known:
+        state = "limit_unknown"
+    elif used >= usable_limit:
+        state = "over_reserve"
+    elif percent_usable is not None and percent_usable >= 90:
+        state = "near_limit"
+    elif percent_usable is not None and percent_usable >= 75:
+        state = "watch"
+    else:
+        state = "ok"
     return {
         "limit": limit,
         "used": used,
@@ -1511,12 +2853,19 @@ def quota_period(limit: int, used: int, reserve_percent: int, source: str, check
         "usable_remaining": usable_remaining,
         "available": limit == 0 or used < usable_limit,
         "source": source,
+        "limit_source": limit_source,
+        "limit_known": limit_known,
+        "usage_known": source == "status" or used > 0,
+        "percent_used": percent_used,
+        "percent_usable": percent_usable,
+        "state": state,
+        "resets": resets,
         "checked_at": checked_at,
     }
 
 
-def status_period(cache: dict[str, Any], runner: str, key: str) -> dict[str, int] | None:
-    """Return {"used": N, "limit": N} if the cache has real data for this period, else None."""
+def status_period(cache: dict[str, Any], runner: str, key: str) -> dict[str, Any] | None:
+    """Return period status if the cache has real data for this period, else None."""
     entry = cache.get(runner, {})
     if not isinstance(entry, dict):
         return None
@@ -1533,8 +2882,11 @@ def status_period(cache: dict[str, Any], runner: str, key: str) -> dict[str, int
         limit = max(0, int(period.get("limit", 0)))
     except (TypeError, ValueError):
         return None
+    limit_source = str(period.get("limit_source", ""))
+    if limit_source not in {"status", "statusline", "rate_limit", "manual", ""}:
+        limit_source = ""
     # Accept even when limit=0 (usage known but no cap configured)
-    return {"used": used, "limit": limit}
+    return {"used": used, "limit": limit, "resets": str(period.get("resets", "")), "limit_source": limit_source}
 
 
 def merged_quota_period(
@@ -1548,11 +2900,23 @@ def merged_quota_period(
     period = status_period(cache, runner, key)
     checked_at = str(cache.get(runner, {}).get("checked_at", "")) if isinstance(cache.get(runner), dict) else ""
     if period is not None:
-        # Use real measured usage from status; prefer status limit over fallback if available
+        # Use real measured usage from status; prefer provider limit over configured cap if available.
         real_limit = period["limit"] if period["limit"] > 0 else fallback_limit
-        return quota_period(real_limit, period["used"], reserve_percent, "status", checked_at)
+        provider_limit_source = str(period.get("limit_source") or "status")
+        if provider_limit_source not in {"status", "statusline", "rate_limit"}:
+            provider_limit_source = "status"
+        limit_source = provider_limit_source if period["limit"] > 0 else "manual" if fallback_limit > 0 else ""
+        return quota_period(real_limit, period["used"], reserve_percent, "status", checked_at, limit_source, str(period.get("resets", "")))
 
-    return quota_period(fallback_limit, local_used, reserve_percent, "manual", checked_at)
+    return quota_period(
+        fallback_limit,
+        local_used,
+        reserve_percent,
+        "manual",
+        checked_at,
+        "manual" if fallback_limit > 0 else "",
+        "",
+    )
 
 
 def quota_snapshot() -> dict[str, Any]:
@@ -1622,6 +2986,26 @@ def usage_by_model(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         grouped[key]["output_tokens"] += int(run.get("output_tokens") or 0)
         grouped[key]["total_tokens"] += int(run.get("total_tokens") or 0)
         grouped[key]["cost_usd"] = round(float(grouped[key]["cost_usd"]) + float(run.get("cost_usd") or 0), 6)
+        grouped[key]["prompt_chars"] += int(run.get("prompt_chars") or 0)
+        grouped[key]["output_lines"] += int(run.get("output_lines") or 0)
+        grouped[key]["output_chars"] += int(run.get("output_chars") or 0)
+        if (
+            run.get("total_tokens") is not None
+            or run.get("input_tokens") is not None
+            or run.get("output_tokens") is not None
+        ):
+            grouped[key]["token_runs"] += 1
+        else:
+            grouped[key]["unknown_token_runs"] += 1
+        status = str(run.get("status", ""))
+        if status == "ok":
+            grouped[key]["ok_runs"] += 1
+        elif status == "error":
+            grouped[key]["error_runs"] += 1
+        elif status == "stopped":
+            grouped[key]["stopped_runs"] += 1
+        grouped[key]["last_started_at"] = str(run.get("started_at", "")) or str(grouped[key].get("last_started_at", ""))
+        grouped[key]["last_status"] = status or str(grouped[key].get("last_status", ""))
 
     return sorted(
         grouped.values(),
@@ -1653,13 +3037,17 @@ def usage_snapshot() -> dict[str, Any]:
                 "reasoning": str(state.get("reasoning", "")) or "medium",
                 "started_at": started_at,
                 "ended_at": "",
+                "last_output_at": str(state.get("last_output_at", "")),
                 "duration_ms": elapsed_ms(started_at),
                 "status": "running",
                 "exit_code": None,
-                "input_tokens": None,
-                "output_tokens": None,
-                "total_tokens": None,
-                "cost_usd": None,
+                "prompt_chars": int(state.get("prompt_chars") or 0),
+                "output_lines": int(state.get("output_lines") or 0),
+                "output_chars": int(state.get("output_chars") or 0),
+                "input_tokens": state.get("input_tokens"),
+                "output_tokens": state.get("output_tokens"),
+                "total_tokens": state.get("total_tokens"),
+                "cost_usd": state.get("cost_usd"),
             }
         )
 
@@ -2111,45 +3499,207 @@ async def stop_project_dev_server(project_name: str, project_path: Path) -> dict
     return dev_server_snapshot(project_name, project_path)
 
 
-def parse_claude_todos(project_path: Path) -> tuple[list[str], str]:
-    # Prefer the spec-named FEEDBACK.md; fall back to the legacy CLAUDE_TODO.md.
+def attention_empty(status: str = "none") -> dict[str, Any]:
+    return {
+        "status": status,
+        "source": "",
+        "summary": "No AI notes yet." if status == "none" else status.title(),
+        "items": [],
+        "priority_counts": {"p0": 0, "p1": 0, "p2": 0, "p3": 0, "other": 0},
+        "updated_at": "",
+    }
+
+
+def clean_note_text(text: str) -> str:
+    cleaned = text.strip().lstrip("\ufeff").strip()
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"\*([^*]+)\*", r"\1", cleaned)
+    cleaned = cleaned.replace("**", "").replace("__", "")
+    return cleaned.strip()
+
+
+def parse_attention_item(line: str) -> dict[str, str]:
+    text = clean_note_text(line.lstrip("-* ").strip())
+    priority = "other"
+    title_source = re.sub(r"\s+Suggested command:.*$", "", text, flags=re.IGNORECASE).strip()
+    match = re.match(r"^(P[0-3])\s*[-:]\s*(.+)$", text, flags=re.IGNORECASE)
+    if match:
+        priority = match.group(1).lower()
+        title_source = re.sub(r"\s+Suggested command:.*$", "", match.group(2).strip(), flags=re.IGNORECASE).strip()
+    elif re.match(r"^\[x\]\s*", text, flags=re.IGNORECASE):
+        title_source = re.sub(r"^\[x\]\s*", "", title_source, flags=re.IGNORECASE).strip()
+    elif re.match(r"^\[\s\]\s*", text):
+        title_source = re.sub(r"^\[\s\]\s*", "", title_source).strip()
+    title = re.split(r"(?<=\.)\s+", title_source, maxsplit=1)[0].strip()
+
+    suggested = ""
+    suggested_match = re.search(r"Suggested command:\s*([^.\n]+)", text, flags=re.IGNORECASE)
+    if suggested_match:
+        suggested = suggested_match.group(1).strip()
+
+    return {
+        "priority": priority,
+        "title": title[:140],
+        "text": text[:900],
+        "suggested_command": suggested[:160],
+    }
+
+
+def latest_completed_task_time(project_name: str) -> str:
+    completed = [
+        str(task.get("completed_at", "") or task.get("updated_at", ""))
+        for task in project_tasks(project_name)
+        if str(task.get("status", "")) == "completed"
+    ]
+    return max(completed) if completed else ""
+
+
+def project_attention(project_path: Path, project_name: str) -> dict[str, Any]:
     source = feedback_path(project_path)
+    source_label = "FEEDBACK.md"
     if not source.exists():
         source = project_path / "CLAUDE_TODO.md"
+        source_label = "CLAUDE_TODO.md"
     if not source.exists():
-        return [], "PENDING"
+        return attention_empty("none")
 
     content = source.read_text(encoding="utf-8", errors="replace")
-    todos = []
+    updated_at = datetime.fromtimestamp(source.stat().st_mtime, timezone.utc).isoformat()
+    items = []
     for line in content.splitlines():
         stripped = line.strip().lstrip("\ufeff")
         if stripped.startswith(("-", "*")):
-            todos.append(stripped[1:].strip())
+            item = parse_attention_item(stripped)
+            if item["text"]:
+                items.append(item)
 
-    if "AUDIT PASSED" in content.upper():
+    counts = {"p0": 0, "p1": 0, "p2": 0, "p3": 0, "other": 0}
+    for item in items:
+        priority = item.get("priority", "other")
+        counts[priority if priority in counts else "other"] += 1
+
+    upper = content.upper()
+    if "AUDIT PASSED" in upper:
+        status = "clean"
+        summary = "AI notes are clean."
+    else:
+        has_findings = bool(items) or any(flag in upper for flag in ("TESTER: FAILED", "CHANGES REQUESTED", "FAIL", "BLOCKED", "TODO", "CRITIQUE"))
+        status = "attention" if has_findings else "none"
+        summary = "AI notes need work." if status == "attention" else "No active AI notes."
+
+    latest_completed = latest_completed_task_time(project_name)
+    if status == "attention" and latest_completed and updated_at < latest_completed:
+        status = "stale"
+        summary = "Review notes may be stale."
+
+    return {
+        "status": status,
+        "source": source_label,
+        "summary": summary,
+        "items": items[:40],
+        "priority_counts": counts,
+        "updated_at": updated_at,
+    }
+
+
+def parse_claude_todos(project_path: Path) -> tuple[list[str], str]:
+    attention = project_attention(project_path, project_path.name)
+    todos = [str(item.get("text", "")) for item in attention.get("items", []) if str(item.get("text", "")).strip()]
+    status = str(attention.get("status", "none"))
+    if status == "clean":
         return todos, "CLEAN"
-
-    if any(flag in content.upper() for flag in ("TODO", "FAIL", "BLOCKED", "CRITIQUE")):
+    if status in {"attention", "stale"}:
         return todos, "ATTENTION"
-
     return todos, "PENDING"
+
+
+def parse_hitl_options(question: str) -> tuple[str, list[dict[str, Any]], str]:
+    options: list[dict[str, Any]] = []
+    default_option = ""
+    question_lines: list[str] = []
+    in_options = False
+
+    for raw_line in question.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if not in_options:
+                question_lines.append(raw_line)
+            continue
+        if line.upper() == "OPTIONS:":
+            in_options = True
+            continue
+        default_match = re.match(r"^DEFAULT:\s*(.+)$", line, flags=re.IGNORECASE)
+        if default_match:
+            default_option = default_match.group(1).strip()
+            continue
+        option_match = re.match(r"^\[([A-Za-z0-9_-]+)\]\s*(.+)$", line)
+        if option_match:
+            option_id = option_match.group(1).strip()
+            body = option_match.group(2).strip()
+            label = body
+            description = ""
+            if " - " in body:
+                label, description = body.split(" - ", 1)
+            options.append({
+                "id": option_id,
+                "label": label.strip(),
+                "description": description.strip(),
+                "recommended": "recommended" in body.lower() or option_id == default_option,
+            })
+            in_options = True
+            continue
+        if not in_options:
+            question_lines.append(raw_line)
+
+    if default_option:
+        for option in options:
+            option["recommended"] = bool(option.get("recommended")) or str(option.get("id", "")) == default_option
+
+    cleaned_question = "\n".join(line for line in question_lines).strip()
+    return cleaned_question or question.strip(), options, default_option
 
 
 def parse_human_input(project_path: Path) -> dict[str, Any]:
     """Read HUMAN_INPUT.md. Blocked when a question is present with no answer after it."""
     path = human_input_path(project_path)
+    empty = {"blocked": False, "question": "", "answer": "", "options": [], "default_option": ""}
     if not path.exists():
-        return {"blocked": False, "question": "", "answer": ""}
+        return empty
 
     content = path.read_text(encoding="utf-8", errors="replace")
     q_index = content.find(QUESTION_PREFIX)
     if q_index == -1:
-        return {"blocked": False, "question": "", "answer": ""}
+        return empty
 
     a_index = content.find(ANSWER_PREFIX, q_index)
-    question = content[q_index + len(QUESTION_PREFIX) : (a_index if a_index != -1 else len(content))].strip()
+    question_raw = content[q_index + len(QUESTION_PREFIX) : (a_index if a_index != -1 else len(content))].strip()
+    question, options, default_option = parse_hitl_options(question_raw)
     answer = content[a_index + len(ANSWER_PREFIX) :].strip() if a_index != -1 else ""
-    return {"blocked": a_index == -1, "question": question, "answer": answer}
+    return {
+        "blocked": a_index == -1,
+        "question": question,
+        "answer": answer,
+        "options": options,
+        "default_option": default_option,
+    }
+
+
+def decision_from_human_answer(answer: str, human_input: dict[str, Any]) -> tuple[str, str, str]:
+    clean = answer.strip()
+    options = human_input.get("options", [])
+    if not isinstance(options, list):
+        options = []
+    match = re.match(r"^\[([A-Za-z0-9_-]+)\]\s*(.+?)(?:\s+-\s+(.+))?$", clean, flags=re.DOTALL)
+    option_id = match.group(1) if match else ""
+    option = next((item for item in options if isinstance(item, dict) and str(item.get("id", "")) == option_id), None)
+    if option:
+        selected = str(option.get("label", "")).strip() or (match.group(2).strip() if match else clean)
+        reason = str(option.get("description", "")).strip() or str(human_input.get("question", "")).strip()
+        return "Agentic choice", selected, reason
+    if options:
+        return "Agentic choice", clean, str(human_input.get("question", "")).strip()
+    return "Human input", clean, str(human_input.get("question", "")).strip()
 
 
 def write_human_answer(project_path: Path, text: str) -> None:
@@ -2254,6 +3804,24 @@ def read_agent_chat(project_path: Path) -> str:
     return content[-CHAT_HISTORY_MAX_CHARS:] if len(content) > CHAT_HISTORY_MAX_CHARS else content
 
 
+def read_limited_text(path: Path, limit: int = 12_000) -> str:
+    if not path.exists():
+        return ""
+    content = path.read_text(encoding="utf-8", errors="replace")
+    return content[-limit:] if len(content) > limit else content
+
+
+def project_artifacts(project_path: Path) -> dict[str, str]:
+    return {
+        "architecture": read_limited_text(architecture_path(project_path)),
+        "decisions": read_limited_text(decisions_path(project_path)),
+        "lessons": read_limited_text(lessons_path(project_path)),
+        "project_memory": read_limited_text(project_memory_doc_path(project_path)),
+        "plan": read_limited_text(plan_path(project_path)),
+        "feedback": read_limited_text(feedback_path(project_path)),
+    }
+
+
 def last_session_intent(project_path: Path) -> str | None:
     """Detect what the last activity was so 'continue' resumes the right thing.
 
@@ -2288,8 +3856,37 @@ def append_agent_chat(project_path: Path, text: str) -> None:
     path.write_text(f"{existing}{separator}{text}", encoding="utf-8")
 
 
+def agent_chat_size(project_path: Path) -> int:
+    path = agent_chat_path(project_path)
+    return len(path.read_text(encoding="utf-8", errors="replace")) if path.exists() else 0
+
+
+def agent_chat_section_added_since(project_path: Path, label: str, start_offset: int) -> bool:
+    content = read_agent_chat(project_path)
+    tail = content[max(0, min(start_offset, len(content))):].upper()
+    return f"### {label}".upper() in tail
+
+
+def append_agent_chat_section_if_missing(project_path: Path, label: str, start_offset: int, body: str) -> None:
+    if agent_chat_section_added_since(project_path, label, start_offset):
+        return
+    append_agent_chat(project_path, f"### {label} - {utc_now()}\n\n{body.strip()}\n\n")
+
+
 def clear_agent_chat(project_path: Path) -> None:
     agent_chat_path(project_path).write_text("", encoding="utf-8")
+
+
+def review_observation_count(section: str) -> int:
+    relevant_lines = []
+    for line in section.splitlines():
+        cleaned = line.strip().strip("-* ")
+        upper = cleaned.upper()
+        if not cleaned or cleaned.startswith("#") or "APPROVED" in upper or "CHANGES REQUESTED" in upper:
+            continue
+        relevant_lines.append(cleaned)
+    sentence_count = len(re.findall(r"[.!?](?:\s|$)", " ".join(relevant_lines)))
+    return max(len(relevant_lines), sentence_count)
 
 
 def parse_team_signoff(project_path: Path) -> bool:
@@ -2300,7 +3897,11 @@ def parse_team_signoff(project_path: Path) -> bool:
         return False
     changes = content.upper().rfind("TEAMMATE: CHANGES REQUESTED")
     # Approved only counts if it is the latest verdict.
-    return marker > changes
+    if marker <= changes:
+        return False
+    section_marker = content.upper().rfind("### TEAMMATE", 0, marker)
+    section = content[section_marker:] if section_marker != -1 else content[max(0, marker - 1200):]
+    return review_observation_count(section) >= 2
 
 
 def run_git_sync(project_path: Path, args: tuple[str, ...]) -> tuple[int, str]:
@@ -2323,6 +3924,126 @@ async def run_git(project_path: Path, *args: str) -> tuple[int, str]:
 def git_output_tail(output: str, limit: int = 220) -> str:
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     return (lines[-1] if lines else output.strip())[:limit]
+
+
+def strip_wrapping_quotes(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1].strip()
+    return text
+
+
+def direct_git_operation(prompt: str) -> str:
+    text = re.sub(r"\s+", " ", prompt.strip().lower())
+    has_commit = bool(re.search(r"\bcommit\b|\bsave\s+(?:the\s+)?(?:changes?|diff|workspace|working tree)\b", text))
+    has_push = bool(re.search(r"\bpush\b", text))
+    if has_commit and has_push:
+        return "commit-push"
+    if has_commit:
+        return "commit"
+    if has_push:
+        return "push"
+    if re.search(r"\bstash\b", text):
+        return "stash"
+    if re.search(r"\btag\b|\brelease\b", text):
+        return "tag"
+    return "status"
+
+
+def git_message_from_prompt(prompt: str, fallback: str) -> str:
+    patterns = (
+        r"(?:^|\s)(?:-m|--message)\s+(?P<message>\"[^\"]+\"|'[^']+'|.+)$",
+        r"\bmessage\s*[:=]\s*(?P<message>.+)$",
+        r"\bwith\s+(?:the\s+)?message\s+(?P<message>.+)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, prompt.strip(), flags=re.IGNORECASE)
+        if not match:
+            continue
+        message = strip_wrapping_quotes(match.group("message")).strip()
+        if message:
+            return message[:180]
+    return fallback
+
+
+def git_status_paths(status_output: str) -> tuple[list[str], list[str]]:
+    codes: list[str] = []
+    paths: list[str] = []
+    for line in status_output.splitlines():
+        if len(line) < 4:
+            continue
+        code = line[:2]
+        raw_path = line[3:].strip()
+        if " -> " in raw_path:
+            raw_path = raw_path.split(" -> ", 1)[1].strip()
+        path = strip_wrapping_quotes(raw_path)
+        if not path:
+            continue
+        codes.append(code)
+        paths.append(path.replace("\\", "/"))
+    return codes, paths
+
+
+def generated_commit_message(status_output: str) -> str:
+    codes, paths = git_status_paths(status_output)
+    if not paths:
+        return "Update project files"
+
+    top_levels: list[str] = []
+    for path in paths:
+        top = path.split("/", 1)[0]
+        if top and top not in top_levels:
+            top_levels.append(top)
+
+    if all(code.strip() in {"A", "??"} for code in codes):
+        verb = "Add"
+    elif all("D" in code and not any(marker in code for marker in ("M", "A", "R", "C", "?")) for code in codes):
+        verb = "Remove"
+    else:
+        verb = "Update"
+
+    if len(top_levels) == 1:
+        target = top_levels[0]
+    elif len(top_levels) == 2:
+        target = f"{top_levels[0]} and {top_levels[1]}"
+    elif len(top_levels) == 3:
+        target = f"{top_levels[0]}, {top_levels[1]}, and {top_levels[2]}"
+    else:
+        target = "project files"
+    return f"{verb} {target}"[:72]
+
+
+def branch_from_push_prompt(prompt: str, current_branch: str) -> str:
+    text = prompt.strip()
+    patterns = (
+        r"\bpush\s+(?:to\s+)?origin[/\s]+(?P<branch>[A-Za-z0-9._/-]+)\b",
+        r"\bpush\s+(?:to\s+)?(?P<branch>[A-Za-z0-9._/-]+)\b",
+    )
+    ignored = {"this", "the", "current", "branch", "changes", "diff", "it", "workspace"}
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        branch = match.group("branch").strip()
+        if branch.lower() not in ignored:
+            return branch
+    return current_branch
+
+
+def tag_from_prompt(prompt: str) -> str:
+    patterns = (
+        r"\b(?:tag|release)\s+(?:the\s+)?(?:release\s+)?(?P<tag>v?[0-9][A-Za-z0-9._/-]*)\b",
+        r"\btag\s+(?P<tag>[A-Za-z0-9][A-Za-z0-9._/-]*)\b",
+    )
+    ignored = {"release", "this", "the", "current", "branch", "changes", "diff", "it"}
+    for pattern in patterns:
+        match = re.search(pattern, prompt.strip(), flags=re.IGNORECASE)
+        if not match:
+            continue
+        tag = match.group("tag").strip().rstrip(".,;:")
+        if tag.lower() not in ignored:
+            return tag
+    return ""
 
 
 async def git_status_porcelain(project_path: Path) -> tuple[int, str]:
@@ -2440,6 +4161,179 @@ async def backend_git_checkpoint(
     return checkpoint
 
 
+async def current_git_branch(project_path: Path) -> tuple[int, str]:
+    code, output = await run_git(project_path, "branch", "--show-current")
+    return code, output.strip()
+
+
+def git_result_content(title: str, rows: list[tuple[str, str]], details: str = "") -> str:
+    lines = [f"### {title}", ""]
+    for label, value in rows:
+        if value:
+            lines.append(f"- {label}: {value}")
+    if details.strip():
+        lines.extend(["", "```text", details.strip(), "```"])
+    return "\n".join(lines).strip()
+
+
+async def backend_git_commit(project_path: Path, prompt: str, push_after: bool = False) -> tuple[str, str, str, int]:
+    branch_code, branch = await current_git_branch(project_path)
+    if branch_code != 0:
+        return "error", "", f"git branch failed: {branch or 'unknown error'}", branch_code
+
+    status_code, status_output = await git_status_porcelain(project_path)
+    if status_code != 0:
+        return "error", "", f"git status failed: {git_output_tail(status_output)}", status_code
+    if not status_output.strip():
+        content = git_result_content("Nothing To Commit", [("Branch", branch), ("Status", "working tree clean")])
+        return "ok", content, "", 0
+
+    stat_code, stat_output = await run_git(project_path, "diff", "--stat")
+    if stat_code != 0:
+        stat_output = ""
+
+    add_code, add_output = await run_git(project_path, "add", "-A")
+    if add_code != 0:
+        return "error", "", f"git add -A failed: {git_output_tail(add_output)}", add_code
+
+    diff_code, diff_output = await run_git(project_path, "diff", "--cached", "--quiet")
+    if diff_code == 0:
+        content = git_result_content("Nothing To Commit", [("Branch", branch), ("Status", "no staged changes after git add")])
+        return "ok", content, "", 0
+    if diff_code not in {0, 1}:
+        return "error", "", f"git diff --cached failed: {git_output_tail(diff_output)}", diff_code
+
+    message = git_message_from_prompt(prompt, generated_commit_message(status_output))
+    commit_code, commit_output = await run_git(
+        project_path,
+        "-c",
+        "user.name=Dualith",
+        "-c",
+        "user.email=dualith@localhost",
+        "commit",
+        "-m",
+        message,
+    )
+    if commit_code != 0:
+        return "error", "", f"git commit failed: {git_output_tail(commit_output)}", commit_code
+
+    rev_code, rev_output = await run_git(project_path, "rev-parse", "--short", "HEAD")
+    commit = rev_output.strip() if rev_code == 0 else ""
+    rows = [("Branch", branch), ("Commit", commit), ("Message", message)]
+    details = stat_output.strip() or status_output.strip()
+
+    if push_after:
+        push_code, push_output = await run_git(project_path, "push", "origin", branch)
+        if push_code != 0:
+            content = git_result_content("Commit Created, Push Failed", rows, push_output)
+            return "error", content, f"git push failed: {git_output_tail(push_output)}", push_code
+        rows.append(("Push", f"origin/{branch}"))
+        details = push_output.strip() or details
+
+    content = git_result_content("Commit Created", rows, details)
+    return "ok", content, "", 0
+
+
+async def backend_git_push(project_path: Path, prompt: str) -> tuple[str, str, str, int]:
+    branch_code, current_branch = await current_git_branch(project_path)
+    if branch_code != 0 or not current_branch:
+        return "error", "", f"git branch failed: {current_branch or 'not on a branch'}", branch_code or 128
+    branch = branch_from_push_prompt(prompt, current_branch)
+    push_code, push_output = await run_git(project_path, "push", "origin", branch)
+    if push_code != 0:
+        return "error", "", f"git push failed: {git_output_tail(push_output)}", push_code
+    content = git_result_content("Push Complete", [("Branch", branch), ("Remote", f"origin/{branch}")], push_output)
+    return "ok", content, "", 0
+
+
+async def backend_git_stash(project_path: Path, prompt: str) -> tuple[str, str, str, int]:
+    status_code, status_output = await git_status_porcelain(project_path)
+    if status_code != 0:
+        return "error", "", f"git status failed: {git_output_tail(status_output)}", status_code
+    if not status_output.strip():
+        content = git_result_content("Nothing To Stash", [("Status", "working tree clean")])
+        return "ok", content, "", 0
+    message = git_message_from_prompt(prompt, f"Dualith stash {utc_now()}")
+    stash_code, stash_output = await run_git(project_path, "stash", "push", "-u", "-m", message)
+    if stash_code != 0:
+        return "error", "", f"git stash failed: {git_output_tail(stash_output)}", stash_code
+    content = git_result_content("Stash Created", [("Message", message)], stash_output or status_output)
+    return "ok", content, "", 0
+
+
+async def backend_git_tag(project_path: Path, prompt: str) -> tuple[str, str, str, int]:
+    tag = tag_from_prompt(prompt)
+    if not tag:
+        return "error", "", "No tag name was provided. Try `tag v1.2.3` or `git tag v1.2.3`.", 2
+    tag_code, tag_output = await run_git(project_path, "tag", tag)
+    if tag_code != 0:
+        return "error", "", f"git tag failed: {git_output_tail(tag_output)}", tag_code
+    content = git_result_content("Tag Created", [("Tag", tag)], tag_output)
+    return "ok", content, "", 0
+
+
+async def perform_backend_git_operation(project_path: Path, prompt: str) -> tuple[str, str, str, int]:
+    if not (project_path / ".git").exists():
+        return "error", "", "Project is not a Git repository.", 128
+    operation = direct_git_operation(prompt)
+    if operation == "commit":
+        return await backend_git_commit(project_path, prompt)
+    if operation == "commit-push":
+        return await backend_git_commit(project_path, prompt, push_after=True)
+    if operation == "push":
+        return await backend_git_push(project_path, prompt)
+    if operation == "stash":
+        return await backend_git_stash(project_path, prompt)
+    if operation == "tag":
+        return await backend_git_tag(project_path, prompt)
+    status_code, status_output = await git_status_porcelain(project_path)
+    if status_code != 0:
+        return "error", "", f"git status failed: {git_output_tail(status_output)}", status_code
+    content = git_result_content("Git Status", [("Status", status_output.strip() or "working tree clean")])
+    return "ok", content, "", 0
+
+
+async def run_backend_git_operation(
+    project_name: str,
+    project_path: Path,
+    runner_pref: str,
+    model: str,
+    reasoning: str,
+    prompt: str,
+) -> dict[str, Any]:
+    runner = runner_pref
+    route_reason = "manual"
+    if runner == "auto":
+        runner, route_reason = auto_runner_for_agent("git")
+        record_event("AUTO_ROUTED", f"{relative_path(project_path)} :: Git -> {RUNNER_COMMANDS[runner]['label']} :: {route_reason}")
+    if runner not in RUNNER_COMMANDS:
+        runner = "codex"
+    resolved_model = resolve_runner_model(runner, model)
+    usage_record = new_usage_record(project_name, "git", runner, resolved_model, reasoning, prompt)
+    usage_record["user_prompt"] = prompt.strip()
+    runner_label = str(RUNNER_COMMANDS[runner]["label"])
+
+    await broadcast("agent_event", record_event("GIT_STARTED", f"{relative_path(project_path)} :: Git via {runner_label} :: backend operation"))
+    try:
+        status, content, error, exit_code = await perform_backend_git_operation(project_path, prompt)
+    except Exception as exc:
+        status, content, error, exit_code = "error", "", f"{type(exc).__name__}: {exc}", None
+
+    output_text = content if status == "ok" else error
+    usage_record["output_lines"] = len(output_text.splitlines())
+    usage_record["output_chars"] = len(output_text)
+    finish_usage_record(usage_record, status, exit_code)
+    result = finish_result_record(usage_record, status, content, error)
+    if content.strip():
+        append_chat_history(project_path, f"### Git Operation - {utc_now()}\n\n{content.strip()}\n\n")
+
+    if status == "ok":
+        await broadcast("agent_event", record_event("GIT_EXIT", f"{relative_path(project_path)} :: Git operation completed"))
+    else:
+        await broadcast("agent_event", record_event("GIT_ERR", f"{relative_path(project_path)} :: {error[:180]}"))
+    return result
+
+
 async def latest_project_commits(project_path: Path) -> list[str]:
     if not (project_path / ".git").exists():
         return []
@@ -2465,11 +4359,16 @@ def path_belongs_to_project(entry_path: str, project_path: Path) -> bool:
 
 
 async def project_record(project_path: Path, name: str | None = None) -> dict[str, Any]:
-    todos, audit_state = parse_claude_todos(project_path)
+    project_name = name or project_path.name
+    attention = project_attention(project_path, project_name)
+    todos = [str(item.get("text", "")) for item in attention.get("items", []) if str(item.get("text", "")).strip()]
+    attention_status = str(attention.get("status", "none"))
+    audit_state = "CLEAN" if attention_status == "clean" else "ATTENTION" if attention_status in {"attention", "stale"} else "PENDING"
     project_events = [entry for entry in reversed(console_events) if path_belongs_to_project(entry["path"], project_path)]
     last_event = project_events[0] if project_events else None
     agent_state = "IDLE"
-    project_name = name or project_path.name
+    tasks = project_tasks(project_name)
+    active_task = active_task_for_project(project_name)
     active_agents = sorted(mode for mode in RUN_MODES if f"{project_name}:{mode}" in active_agent_runs)
     active_runs = []
     for mode in active_agents:
@@ -2499,6 +4398,7 @@ async def project_record(project_path: Path, name: str | None = None) -> dict[st
         "last_event_at": last_event["timestamp"] if last_event else None,
         "agent_state": agent_state,
         "audit_state": audit_state,
+        "attention": attention,
         "claude_todos": todos,
         "commits": await latest_project_commits(project_path),
         "active_agents": active_agents,
@@ -2511,6 +4411,10 @@ async def project_record(project_path: Path, name: str | None = None) -> dict[st
         "agent_chat": read_agent_chat(project_path),
         "memory": load_memory(project_path),
         "plan_pending": project_name in plan_approval_events and not plan_approval_events[project_name].is_set(),
+        "tasks": sorted(tasks, key=lambda item: str(item.get("created_at", "")), reverse=True),
+        "active_task": active_task,
+        "task_counts": task_counts(project_name),
+        "artifacts": project_artifacts(project_path),
     }
 
 
@@ -2531,11 +4435,19 @@ async def collect_snapshot() -> dict[str, Any]:
                     "last_event_at": utc_now(),
                     "agent_state": "IDLE",
                     "audit_state": "ATTENTION",
+                    "attention": {
+                        "status": "attention",
+                        "source": "",
+                        "summary": "Project snapshot failed.",
+                        "items": [],
+                        "priority_counts": {"p0": 0, "p1": 0, "p2": 0, "p3": 0, "other": 0},
+                        "updated_at": "",
+                    },
                     "claude_todos": [],
                     "commits": [],
                     "active_agents": [],
                     "active_runs": [],
-                    "human_input": {"blocked": False, "question": "", "answer": ""},
+                    "human_input": {"blocked": False, "question": "", "answer": "", "options": [], "default_option": ""},
                     "chat_history": "",
                     "pipeline": None,
                     "team": None,
@@ -2553,6 +4465,10 @@ async def collect_snapshot() -> dict[str, Any]:
                     },
                     "agent_chat": "",
                     "memory": {},
+                    "tasks": [],
+                    "active_task": None,
+                    "task_counts": {status: 0 for status in TASK_STATUSES},
+                    "artifacts": {"architecture": "", "decisions": "", "lessons": "", "project_memory": "", "plan": "", "feedback": ""},
                 }
             )
 
@@ -2563,6 +4479,7 @@ async def collect_snapshot() -> dict[str, Any]:
     return {
         "projects": projects,
         "console": list(console_events),
+        "events": typed_console_events(),
         "commits": all_commits[:5],
         "usage": usage_snapshot(),
         "quota": quota_snapshot(),
@@ -2710,8 +4627,15 @@ async def ensure_dualith_files(project_path: Path, spec: str, *, overwrite_spec:
     if not project_memory_path(project_path).exists():
         project_memory_path(project_path).write_text("{}\n", encoding="utf-8")
 
+    if not project_memory_doc_path(project_path).exists():
+        project_memory_doc_path(project_path).write_text("# Project Memory\n\n", encoding="utf-8")
+
     if not agent_chat_path(project_path).exists():
         agent_chat_path(project_path).write_text("", encoding="utf-8")
+
+    for artifact in (architecture_path(project_path), decisions_path(project_path), lessons_path(project_path)):
+        if not artifact.exists():
+            artifact.write_text("", encoding="utf-8")
 
 
 async def ensure_registered_project_files() -> None:
@@ -2874,10 +4798,6 @@ def add_runner_args(
         prefix = with_option_value(prefix, "--sandbox", sandbox)
     elif "--sandbox" not in prefix:
         prefix.extend(["--sandbox", "workspace-write"])
-    # Disable interactive approval prompts so Codex can run git and other shell
-    # commands non-interactively (e.g. git add, git commit won't hang waiting for input).
-    if "--ask-for-approval" not in prefix and "-a" not in prefix:
-        prefix.extend(["-a", "never"])
     if not ("--disable" in prefix and "memories" in prefix):
         prefix.extend(["--disable", "memories"])
     return [*prefix, *prompt]
@@ -2977,9 +4897,17 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
         "auditor": AUDITOR_PROMPT,
         "lead": LEAD_PROMPT,
         "teammate": TEAMMATE_PROMPT,
+        "git": GIT_PROMPT,
+        "architect": ARCHITECT_PROMPT,
         "planner": PLANNER_PROMPT,
         "pm": PM_PROMPT,
         "tester": TESTER_PROMPT,
+        "architecture_reviewer": ARCHITECTURE_REVIEWER_PROMPT,
+        "security_reviewer": SECURITY_REVIEWER_PROMPT,
+        "performance_reviewer": PERFORMANCE_REVIEWER_PROMPT,
+        "maintainability_reviewer": MAINTAINABILITY_REVIEWER_PROMPT,
+        "summarizer": SUMMARIZER_PROMPT,
+        "decomposer": DECOMPOSER_PROMPT,
     }
     agent_config = AGENT_REGISTRY.get(agent)
     prompt_key = str(agent_config.get("prompt", "")) if agent_config else ""
@@ -3043,8 +4971,25 @@ def _next_reset_label(hours: float) -> str:
     return f"{rem_h}h"
 
 
-async def refresh_codex_status() -> dict[str, Any]:
-    """Read Codex token usage from ~/.codex/sessions/**/*.jsonl session files."""
+def status_entry_has_period_data(entry: dict[str, Any]) -> bool:
+    parsed = entry.get("parsed", {})
+    if not isinstance(parsed, dict):
+        return False
+    for period in parsed.values():
+        if not isinstance(period, dict):
+            continue
+        try:
+            used = int(period.get("used") or 0)
+            limit = int(period.get("limit") or 0)
+        except (TypeError, ValueError):
+            continue
+        if used > 0 or limit > 0:
+            return True
+    return False
+
+
+async def refresh_codex_status_from_logs() -> dict[str, Any]:
+    """Fallback: read Codex token usage from ~/.codex/sessions/**/*.jsonl session files."""
     checked_at = utc_now()
     try:
         monthly_hours = _month_start_hours()
@@ -3078,15 +5023,83 @@ async def refresh_codex_status() -> dict[str, Any]:
         }
 
 
-async def refresh_claude_status() -> dict[str, Any]:
-    """Read Claude token usage from ~/.claude/projects/**/*.jsonl session files."""
+async def refresh_codex_status_from_rate_limits() -> dict[str, Any]:
+    checked_at = utc_now()
+    try:
+        monthly_hours = _month_start_hours()
+        monthly, rate_limit_result = await asyncio.gather(
+            asyncio.to_thread(read_codex_usage_from_jsonl, monthly_hours),
+            read_codex_rate_limits_from_app_server(),
+        )
+        now = datetime.now(timezone.utc)
+        if now.month == 12:
+            reset_dt = now.replace(year=now.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            reset_dt = now.replace(month=now.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        resets_in = _next_reset_label((reset_dt - now).total_seconds() / 3600)
+
+        snapshot = rate_limit_result.get("snapshot", {}) if isinstance(rate_limit_result, dict) else {}
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        monthly_period = codex_rate_limit_period(snapshot, monthly, resets_in)
+        monthly_cap = int(monthly_period.get("limit") or 0)
+        summary_parts = [
+            f"Month: {monthly:,} tokens" + (f" / ~{monthly_cap:,} cap" if monthly_cap else ""),
+            f"resets in {monthly_period.get('resets') or resets_in}",
+        ]
+        if monthly_cap:
+            used_percentage = monthly_period.get("used_percentage")
+            if isinstance(used_percentage, (int, float)):
+                summary_parts.append(f"{used_percentage:g}% used from Codex app-server")
+            else:
+                summary_parts.append("cap derived from Codex app-server")
+        else:
+            error = str(rate_limit_result.get("error", "")) if isinstance(rate_limit_result, dict) else ""
+            summary_parts.append(f"Codex app-server rate limits unavailable{': ' + error if error else ''}")
+
+        return {
+            "checked_at": checked_at,
+            "status": "ok",
+            "raw": " | ".join(summary_parts),
+            "error": "",
+            "exit_code": 0,
+            "parsed": {
+                "monthly": monthly_period,
+            },
+        }
+    except Exception as exc:
+        return {
+            "checked_at": checked_at,
+            "status": "error",
+            "raw": "",
+            "error": f"{type(exc).__name__}: {exc}",
+            "exit_code": None,
+            "parsed": default_status_cache()["codex"]["parsed"],
+        }
+
+
+async def refresh_claude_status_from_logs() -> dict[str, Any]:
+    """Fallback: read Claude token usage from ~/.claude/projects/**/*.jsonl session files."""
     checked_at = utc_now()
     try:
         five_hour, weekly = await asyncio.gather(
             asyncio.to_thread(read_claude_usage_from_jsonl, 5),
             asyncio.to_thread(read_claude_usage_from_jsonl, 24 * 7),
         )
+        rate_limit_cache = read_claude_rate_limits()
+        five_hour_period = claude_statusline_period(rate_limit_cache, "five_hour", five_hour, "4h")
+        weekly_period = claude_statusline_period(rate_limit_cache, "weekly", weekly, "4d")
+        five_hour_cap = int(five_hour_period.get("limit") or 0)
+        weekly_cap = int(weekly_period.get("limit") or 0)
+        summary_parts = [
+            f"5h: {five_hour:,} tokens" + (f" / ~{five_hour_cap:,} cap" if five_hour_cap else ""),
+            f"7d: {weekly:,} tokens" + (f" / ~{weekly_cap:,} cap" if weekly_cap else ""),
+        ]
+        if five_hour_cap or weekly_cap:
+            summary_parts.append("caps derived from Claude statusline")
+        elif rate_limit_cache:
+            summary_parts.append("Claude statusline cache missing or stale")
         summary = f"5h: {five_hour:,} tokens · 7d: {weekly:,} tokens"
+        summary = " | ".join(summary_parts)
         return {
             "checked_at": checked_at,
             "status": "ok",
@@ -3094,8 +5107,8 @@ async def refresh_claude_status() -> dict[str, Any]:
             "error": "",
             "exit_code": 0,
             "parsed": {
-                "five_hour": {"used": five_hour, "limit": 0, "resets": "4h"},
-                "weekly": {"used": weekly, "limit": 0, "resets": "4d"},
+                "five_hour": five_hour_period,
+                "weekly": weekly_period,
             },
         }
     except Exception as exc:
@@ -3109,12 +5122,7 @@ async def refresh_claude_status() -> dict[str, Any]:
         }
 
 
-async def refresh_runner_status(runner: str) -> dict[str, Any]:
-    if runner == "codex":
-        return await refresh_codex_status()
-    if runner == "claude":
-        return await refresh_claude_status()
-
+async def refresh_runner_status_from_command(runner: str) -> dict[str, Any]:
     config = RUNNER_COMMANDS[runner]
     command = str(config["status_command"])
     args = parse_shell_words(str(config["status_args"]))
@@ -3174,12 +5182,87 @@ async def refresh_runner_status(runner: str) -> dict[str, Any]:
         }
 
 
-async def refresh_status_cache() -> dict[str, Any]:
+async def refresh_runner_status(runner: str) -> dict[str, Any]:
+    if runner == "codex":
+        return await refresh_codex_status_from_rate_limits()
+
+    command_entry = await refresh_runner_status_from_command(runner)
+    if status_entry_has_period_data(command_entry):
+        return command_entry
+
+    if runner == "claude":
+        return await refresh_claude_status_from_logs()
+
+    return command_entry
+
+
+def get_status_refresh_lock() -> asyncio.Lock:
+    global status_refresh_lock
+    if status_refresh_lock is None:
+        status_refresh_lock = asyncio.Lock()
+    return status_refresh_lock
+
+
+def status_cache_fresh(cache: dict[str, Any], ttl_seconds: int = STATUS_REFRESH_TTL_SECONDS) -> bool:
+    if ttl_seconds <= 0:
+        return False
+    checked_times: list[datetime] = []
+    for runner in ("codex", "claude"):
+        checked_at = str((cache.get(runner) or {}).get("checked_at") or "")
+        parsed = parse_timestamp(checked_at)
+        if not parsed:
+            return False
+        checked_times.append(parsed)
+    oldest = min(checked_times)
+    return (datetime.now(timezone.utc) - oldest).total_seconds() < ttl_seconds
+
+
+async def compute_status_cache() -> dict[str, Any]:
     cache = read_status_cache()
     codex, claude = await asyncio.gather(refresh_runner_status("codex"), refresh_runner_status("claude"))
     cache["codex"] = codex
     cache["claude"] = claude
     return write_status_cache(cache)
+
+
+async def run_status_refresh_scan(emit_events: bool = False, force: bool = False) -> tuple[dict[str, Any], str]:
+    lock = get_status_refresh_lock()
+    async with lock:
+        cache = read_status_cache()
+        if not force and status_cache_fresh(cache):
+            return cache, "fresh"
+
+        if emit_events:
+            await broadcast("agent_event", record_event("STATUS_REFRESH_STARTED", "Runner usage refreshing"))
+        try:
+            refreshed = await compute_status_cache()
+        except Exception as exc:
+            if emit_events:
+                await broadcast("agent_event", record_event("STATUS_REFRESH_ERROR", f"Runner usage refresh failed: {type(exc).__name__}: {str(exc)[:180]}"))
+            return read_status_cache(), "error"
+        if emit_events:
+            await broadcast("agent_event", record_event("STATUS_REFRESHED", "Runner usage refreshed"))
+        return refreshed, "refreshed"
+
+
+def status_refresh_running() -> bool:
+    return bool(status_refresh_task and not status_refresh_task.done()) or get_status_refresh_lock().locked()
+
+
+async def refresh_status_cache(emit_events: bool = False, wait: bool = True, force: bool = False) -> tuple[dict[str, Any], str]:
+    global status_refresh_task
+    cache = read_status_cache()
+    if not force and status_cache_fresh(cache):
+        return cache, "fresh"
+
+    if status_refresh_running() and not force:
+        return cache, "running"
+
+    if wait:
+        return await run_status_refresh_scan(emit_events=emit_events, force=force)
+
+    status_refresh_task = asyncio.create_task(run_status_refresh_scan(emit_events=emit_events, force=force))
+    return cache, "refreshing"
 
 
 def runner_quota_available(runner: str, quota: dict[str, Any]) -> bool:
@@ -3296,20 +5379,39 @@ def auto_runner_for_agent(agent: str) -> tuple[str, str]:
     return preferred_runner_for_agent(agent, quota)
 
 
+def is_manual_runner_pref(runner_pref: str) -> bool:
+    return runner_pref in RUNNER_COMMANDS
+
+
 def team_runners(runner_pref: str) -> tuple[str, str, str]:
     """Resolve (lead, teammate, reason) for Team mode, decoupling role from runner.
 
-    The user's runner choice selects the LEAD; the other runner becomes the teammate.
-    For "auto", the saved runner policy selects the lead and quota fallback can swap it.
+    Manual runner choices are literal: every team role uses that runner. For
+    "auto", the saved runner policy selects a mixed lead/reviewer pair.
     """
     if runner_pref == "codex":
-        return "codex", "claude", "manual lead"
+        return "codex", "codex", "Codex-only manual runner"
     if runner_pref == "claude":
-        return "claude", "codex", "manual lead"
+        return "claude", "claude", "Claude-only manual runner"
 
     quota = quota_snapshot()
     policy = runner_policy_from_settings(quota.get("settings", {}))
     return team_pair_for_policy(policy, quota)
+
+
+def team_runner_mode(runner_pref: str, lead: str, teammate: str) -> str:
+    if is_manual_runner_pref(runner_pref) and lead == teammate:
+        return f"{RUNNER_COMMANDS[lead]['label']}-only"
+    return "Auto team"
+
+
+def role_runner_for_pref(runner_pref: str, role: str) -> str:
+    if is_manual_runner_pref(runner_pref):
+        return runner_pref
+    if role in {"architect", "planner", "pm", "tester", "summarizer", *SPECIALIST_REVIEWERS}:
+        return "claude"
+    runner, _ = auto_runner_for_agent(role)
+    return runner
 
 
 class QuotaExhaustedError(RuntimeError):
@@ -3325,6 +5427,13 @@ def resolve_round_runner(assigned: str, partner: str) -> tuple[str, bool]:
     so the team loop can surface a readable message in the chat thread.
     """
     quota = quota_snapshot()
+    if assigned == partner:
+        if runner_quota_available(assigned, quota):
+            return assigned, False
+        raise QuotaExhaustedError(
+            f"{RUNNER_COMMANDS[assigned]['label']} is over its configured quota reserve. "
+            "Adjust your quota settings in the System panel or wait for the limit to reset."
+        )
     if runner_quota_available(assigned, quota):
         return assigned, False
     if runner_quota_available(partner, quota):
@@ -3348,15 +5457,18 @@ def runner_accepts_model(runner: str, model: str) -> bool:
     return False
 
 
+def resolve_runner_model(runner: str, requested_model: str) -> str:
+    requested = clean_model(requested_model)
+    if requested and runner_accepts_model(runner, requested):
+        return requested
+    return runner_default_model(runner)
+
+
 def resolve_team_step_model(role: str, assigned_runner: str, executing_runner: str, requested_lead_model: str) -> str:
     """Resolve a Team step model without leaking one runner's model to another."""
     if executing_runner not in RUNNER_COMMANDS:
         executing_runner = "codex"
-    if role == "lead" and assigned_runner == executing_runner:
-        requested_model = clean_model(requested_lead_model)
-        if requested_model and runner_accepts_model(executing_runner, requested_model):
-            return requested_model
-    return runner_default_model(executing_runner)
+    return resolve_runner_model(executing_runner, requested_lead_model)
 
 
 async def stream_agent_output(project_path: Path, stream: Any, action: str, usage_record: dict[str, Any], lines: list[str]) -> None:
@@ -3374,6 +5486,13 @@ async def stream_agent_output(project_path: Path, stream: Any, action: str, usag
         usage_record["output_lines"] = int(usage_record.get("output_lines") or 0) + 1
         usage_record["output_chars"] = int(usage_record.get("output_chars") or 0) + len(text)
         update_usage_metrics(usage_record, text)
+        if key in active_agent_runs:
+            active_agent_runs[key]["output_lines"] = int(usage_record.get("output_lines") or 0)
+            active_agent_runs[key]["output_chars"] = int(usage_record.get("output_chars") or 0)
+            active_agent_runs[key]["input_tokens"] = usage_record.get("input_tokens")
+            active_agent_runs[key]["output_tokens"] = usage_record.get("output_tokens")
+            active_agent_runs[key]["total_tokens"] = usage_record.get("total_tokens")
+            active_agent_runs[key]["cost_usd"] = usage_record.get("cost_usd")
         entry = record_event(output_action(action, text), f"{relative_path(project_path)} :: {text[:240]}")
         progress = runner_progress_message(text)
         if progress:
@@ -3383,7 +5502,7 @@ async def stream_agent_output(project_path: Path, stream: Any, action: str, usag
             await broadcast("agent_event", entry)
 
 
-async def run_agent_process(project_name: str, agent: str, runner: str, model: str, reasoning: str, run_prompt: str, project_path: Path, partner: str = "", attachment_paths: list[str] | None = None) -> None:
+async def run_agent_process(project_name: str, agent: str, runner: str, model: str, reasoning: str, run_prompt: str, project_path: Path, partner: str = "", attachment_paths: list[str] | None = None) -> dict[str, Any]:
     config = RUNNER_COMMANDS[runner]
     key = agent_run_key(project_name, agent)
     prompt = agent_prompt(agent, run_prompt, project_path, partner, attachment_paths)
@@ -3445,6 +5564,13 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             "started_at": usage_record["started_at"],
             "last_output_at": usage_record["started_at"],
             "usage_id": usage_record["id"],
+            "prompt_chars": usage_record["prompt_chars"],
+            "output_lines": 0,
+            "output_chars": 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+            "cost_usd": None,
         }
         log.info("▶ %s/%s started  runner=%s model=%s reasoning=%s pid=%s",
                  project_name, agent, runner_label, model_label, reasoning, process.pid)
@@ -3473,7 +5599,7 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             error = ""
         else:
             error = friendly_failure_excerpt(stderr_lines, stdout_lines, f"exited {code}")
-        finish_result_record(usage_record, status, content, error, checkpoint)
+        result_record = finish_result_record(usage_record, status, content, error, checkpoint)
         # Short-term memory: persist the Ask answer to CHAT_HISTORY.md (Ask runs read-only,
         # so the backend owns the transcript write).
         if agent == "ask" and status == "ok" and content.strip():
@@ -3495,24 +5621,28 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             log.error("✗ %s/%s error  exit_code=%s  %s", project_name, agent, code, error)
         exit_entry = record_event(action, f"{relative_path(project_path)} :: {exit_message}")
         await broadcast("agent_event", exit_entry)
+        return result_record
     except FileNotFoundError:
         finish_usage_record(usage_record, "error", None)
-        finish_result_record(usage_record, "error", "", f"command not found: {command}")
+        result_record = finish_result_record(usage_record, "error", "", f"command not found: {command}")
         log.error("command not found: %s  project=%s agent=%s", command, project_name, agent)
         error_entry = record_event(str(config["error_action"]), f"{relative_path(project_path)} :: command not found: {command}")
         await broadcast("agent_event", error_entry)
+        return result_record
     except PermissionError as exc:
         finish_usage_record(usage_record, "error", None)
-        finish_result_record(usage_record, "error", "", f"permission denied launching {command}: {exc}")
+        result_record = finish_result_record(usage_record, "error", "", f"permission denied launching {command}: {exc}")
         log.error("permission denied: %s  project=%s agent=%s  %s", command, project_name, agent, exc)
         error_entry = record_event(str(config["error_action"]), f"{relative_path(project_path)} :: permission denied launching {command}: {exc}")
         await broadcast("agent_event", error_entry)
+        return result_record
     except Exception as exc:
         finish_usage_record(usage_record, "error", None)
-        finish_result_record(usage_record, "error", "", f"{type(exc).__name__}: {exc}")
+        result_record = finish_result_record(usage_record, "error", "", f"{type(exc).__name__}: {exc}")
         log.exception("unexpected error  project=%s agent=%s  %s", project_name, agent, exc)
         error_entry = record_event(str(config["error_action"]), f"{relative_path(project_path)} :: {type(exc).__name__}: {exc}")
         await broadcast("agent_event", error_entry)
+        return result_record
     finally:
         active_agent_runs.pop(key, None)
         await broadcast("agent_event")
@@ -3552,20 +5682,21 @@ async def set_pipeline_state(project_name: str, project_path: Path, message_type
     await broadcast(message_type, entry)
 
 
-async def run_pipeline_step(project_name: str, agent: str, runner_pref: str, model: str, reasoning: str, project_path: Path) -> None:
+async def run_pipeline_step(project_name: str, agent: str, runner_pref: str, model: str, reasoning: str, project_path: Path) -> dict[str, Any]:
     """Run a single builder/auditor step to completion, honoring auto runner routing."""
     runner = runner_pref
     if runner == "auto":
         runner, _ = auto_runner_for_agent(agent)
     if runner not in RUNNER_COMMANDS:
         runner = "codex"
-    resolved_model = clean_model(model) or DEFAULT_RUNNER_MODELS[runner]
-    await run_agent_process(project_name, agent, runner, resolved_model, clean_reasoning(reasoning), "", project_path)
+    resolved_model = resolve_runner_model(runner, model)
+    return await run_agent_process(project_name, agent, runner, resolved_model, clean_reasoning(reasoning), "", project_path)
 
 
-async def run_pipeline(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_iterations: int, attachment_paths: list[str] | None = None) -> None:
+async def run_pipeline(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_iterations: int, attachment_paths: list[str] | None = None, task_id: str | None = None) -> None:
     pipeline_resume_events[project_name] = asyncio.Event()
-    active_pipelines[project_name] = {"status": "running", "step": "starting", "iteration": 0}
+    active_pipelines[project_name] = {"status": "running", "step": "starting", "iteration": 0, "task_id": task_id or ""}
+    set_task_status(task_id, "active", "lead", "Pipeline started.")
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
 
     # Seed the builder's first run with the user's kickoff prompt via PLAN.md note.
@@ -3582,6 +5713,7 @@ async def run_pipeline(project_name: str, project_path: Path, runner_pref: str, 
 
             # HITL gate: freeze before each step if a question is awaiting an answer.
             if parse_human_input(project_path)["blocked"]:
+                set_task_status(task_id, "blocked", "lead", "Pipeline is waiting for a user decision.")
                 await set_pipeline_state(project_name, project_path, "pipeline_blocked", status="blocked", iteration=iteration)
                 pipeline_resume_events[project_name].clear()
                 await pipeline_resume_events[project_name].wait()
@@ -3589,11 +5721,15 @@ async def run_pipeline(project_name: str, project_path: Path, runner_pref: str, 
                     await set_pipeline_state(project_name, project_path, "pipeline_event", status="stopped")
                     return
                 clear_human_input(project_path)
+                set_task_status(task_id, "active", "lead", "User answered; pipeline resumed.")
                 await set_pipeline_state(project_name, project_path, "pipeline_event", status="running")
 
             # Builder step.
+            set_task_phase(task_id, "lead", "running", runner_pref, f"Pipeline iteration {iteration}")
             await set_pipeline_state(project_name, project_path, "pipeline_event", status="running", step="builder", iteration=iteration)
             await run_pipeline_step(project_name, "builder", runner_pref, model, reasoning, project_path)
+            update_task_ownership_from_git(task_id, project_path, "Builder")
+            set_task_phase(task_id, "lead", "done", runner_pref, f"Pipeline iteration {iteration}")
 
             # Builder may have HALTed by writing a question — loop back to the gate.
             if parse_human_input(project_path)["blocked"]:
@@ -3604,8 +5740,10 @@ async def run_pipeline(project_name: str, project_path: Path, runner_pref: str, 
                 return
 
             # Auditor step.
+            set_task_phase(task_id, "reviewer", "running", runner_pref, f"Pipeline iteration {iteration}")
             await set_pipeline_state(project_name, project_path, "pipeline_event", status="running", step="auditor", iteration=iteration)
             await run_pipeline_step(project_name, "auditor", runner_pref, model, reasoning, project_path)
+            set_task_phase(task_id, "reviewer", "done", runner_pref, f"Pipeline iteration {iteration}")
 
             if parse_human_input(project_path)["blocked"]:
                 continue
@@ -3619,9 +5757,11 @@ async def run_pipeline(project_name: str, project_path: Path, runner_pref: str, 
     except Exception as exc:  # noqa: BLE001 — surface failures to the UI rather than crash the loop.
         await set_pipeline_state(project_name, project_path, "pipeline_event", status="error", step=f"{type(exc).__name__}: {exc}")
     finally:
+        final_state = active_pipelines.get(project_name)
         active_pipelines.pop(project_name, None)
         pipeline_resume_events.pop(project_name, None)
         await broadcast("pipeline_event")
+        await finish_task_and_start_next(project_name, project_path, task_id, final_state, "audit-passed")
 
 
 def team_snapshot(project_name: str) -> dict[str, Any] | None:
@@ -3636,6 +5776,7 @@ def team_snapshot(project_name: str) -> dict[str, Any] | None:
         "teammate": state.get("teammate", ""),
         "lead_model": state.get("lead_model", ""),
         "teammate_model": state.get("teammate_model", ""),
+        "runner_mode": state.get("runner_mode", ""),
     }
 
 
@@ -3649,41 +5790,228 @@ async def set_team_state(project_name: str, project_path: Path, message_type: st
     await broadcast(message_type, entry)
 
 
-async def run_team_step(project_name: str, role: str, runner: str, assigned_runner: str, model: str, reasoning: str, project_path: Path, partner: str) -> None:
+def agent_result_failed(result: dict[str, Any] | None) -> bool:
+    return not result or str(result.get("status", "")) == "error"
+
+
+def agent_result_error(result: dict[str, Any] | None) -> str:
+    if not result:
+        return "runner did not return a result"
+    return str(result.get("error") or result.get("summary") or "runner failed").strip()
+
+
+async def stop_team_after_failed_step(
+    project_name: str,
+    project_path: Path,
+    role: str,
+    runner: str,
+    result: dict[str, Any] | None,
+    round_no: int,
+) -> None:
+    role_label = str(RUN_MODES.get(role, {}).get("label", role.title()))
+    runner_label = str(RUNNER_COMMANDS.get(runner, {}).get("label", runner))
+    error = agent_result_error(result)
+    append_chat_history(
+        project_path,
+        f"### Circuit Breaker - {utc_now()}\n\n"
+        f"Run stopped because {role_label} via {runner_label} failed.\n\n"
+        f"{error}\n\n"
+    )
+    await broadcast("chat_event", record_event("TEAM_STEP_FAILED", f"{relative_path(project_path)} :: {role_label} via {runner_label} failed: {error[:180]}"))
+    await set_team_state(project_name, project_path, "team_event", status="error", step=f"{role}-error", round=round_no)
+
+
+async def run_team_step(project_name: str, role: str, runner: str, assigned_runner: str, model: str, reasoning: str, project_path: Path, partner: str, override_prompt: str = "") -> dict[str, Any]:
     """Run one lead or teammate turn with an explicit runner (role decoupled from runner)."""
     if runner not in RUNNER_COMMANDS:
         runner = "codex"
     resolved_model = resolve_team_step_model(role, assigned_runner, runner, model)
-    await run_agent_process(project_name, role, runner, resolved_model, clean_reasoning(reasoning), "", project_path, partner)
+    return await run_agent_process(project_name, role, runner, resolved_model, clean_reasoning(reasoning), override_prompt, project_path, partner)
 
 
-async def run_plan_then_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None) -> None:
+def latest_review_section(project_path: Path, reviewer: str) -> str:
+    label = SPECIALIST_REVIEWER_LABELS.get(reviewer, reviewer.replace("_", " ").title())
+    content = f"{read_agent_chat(project_path)}\n{read_limited_text(feedback_path(project_path))}"
+    marker = f"### {label}".upper()
+    upper = content.upper()
+    index = upper.rfind(marker)
+    return content[index:] if index != -1 else content[-4000:]
+
+
+def specialist_review_verdict(project_path: Path, reviewer: str) -> tuple[str, str]:
+    verdict = SPECIALIST_REVIEWER_VERDICTS[reviewer]
+    section = latest_review_section(project_path, reviewer)
+    upper = section.upper()
+    if f"{verdict}: CHANGES REQUESTED" in upper:
+        return "changes_requested", firstMeaningful_backend_line(section) or "Changes requested."
+    if f"{verdict}: APPROVED" in upper:
+        if review_observation_count(section) < 2:
+            return "changes_requested", "Approval needs at least two concrete review observations."
+        return "approved", firstMeaningful_backend_line(section) or "Approved."
+    return "changes_requested", "Reviewer did not provide the required approval verdict."
+
+
+def firstMeaningful_backend_line(text: str) -> str:
+    for line in text.splitlines():
+        cleaned = line.strip().strip("-*# ")
+        if cleaned and not cleaned.upper().endswith(("APPROVED", "CHANGES REQUESTED")):
+            return cleaned[:240]
+    return ""
+
+
+async def run_specialist_reviewers(
+    project_name: str,
+    project_path: Path,
+    runner_pref: str,
+    model: str,
+    reasoning: str,
+    task_id: str | None,
+    round_no: int,
+) -> tuple[str, str, str]:
+    def mark_remaining_skipped(after_index: int, reason: str) -> None:
+        # When the chain stops early, the reviewers we never reached must not be
+        # left at "pending" — the UI would render them as NOT CAPTURED. Mark them
+        # "skipped" so the team room shows an honest "skipped this round".
+        for skipped in SPECIALIST_REVIEWERS[after_index + 1:]:
+            set_task_specialist_review(task_id, skipped, "skipped", "", reason)
+
+    for index, reviewer in enumerate(SPECIALIST_REVIEWERS):
+        label = SPECIALIST_REVIEWER_LABELS[reviewer]
+        reviewer_runner = role_runner_for_pref(runner_pref, reviewer)
+        reviewer_model = resolve_runner_model(reviewer_runner, model)
+        set_task_phase(task_id, "reviewer", "running", reviewer_runner, f"{label} round {round_no}")
+        set_task_specialist_review(task_id, reviewer, "running", reviewer_runner, f"Round {round_no}")
+        await set_team_state(project_name, project_path, "team_event", status="running", step=reviewer.replace("_", "-"), round=round_no)
+
+        chat_start = agent_chat_size(project_path)
+        result = await run_agent_process(project_name, reviewer, reviewer_runner, reviewer_model, clean_reasoning(reasoning), "", project_path)
+        if agent_result_failed(result):
+            error = agent_result_error(result)
+            append_agent_chat_section_if_missing(project_path, label, chat_start, f"{error}\n\n{SPECIALIST_REVIEWER_VERDICTS[reviewer]}: CHANGES REQUESTED")
+            set_task_specialist_review(task_id, reviewer, "failed", reviewer_runner, error)
+            set_task_phase(task_id, "reviewer", "failed", reviewer_runner, error)
+            mark_remaining_skipped(index, "Chain halted: earlier reviewer failed.")
+            return "failed", reviewer, error
+
+        verdict, summary = specialist_review_verdict(project_path, reviewer)
+        verdict_line = "APPROVED" if verdict == "approved" else "CHANGES REQUESTED"
+        append_agent_chat_section_if_missing(project_path, label, chat_start, f"{summary or 'Review completed.'}\n\n{SPECIALIST_REVIEWER_VERDICTS[reviewer]}: {verdict_line}")
+        set_task_specialist_review(task_id, reviewer, verdict, reviewer_runner, summary)
+        if verdict != "approved":
+            set_task_phase(task_id, "reviewer", "changes_requested", reviewer_runner, f"{label}: {summary}")
+            mark_remaining_skipped(index, "Skipped: returning to Lead for changes.")
+            return "changes_requested", reviewer, summary
+
+    set_task_phase(task_id, "reviewer", "specialists_approved", "", "Specialist review chain approved.")
+    return "approved", "", "Specialist review chain approved."
+
+
+def append_project_memory_fallback(project_path: Path, task: dict[str, Any] | None, status: str, detail: str) -> None:
+    path = project_memory_doc_path(project_path)
+    title = str(task.get("title", "Untitled task")) if task else "Untitled task"
+    workflow = str(task.get("workflow_id", "")) if task else ""
+    section = (
+        f"## Task Memory - {utc_now()}\n\n"
+        f"- Task: {title}\n"
+        f"- Workflow: {workflow or 'unknown'}\n"
+        f"- Outcome: {status}\n"
+        f"- Detail: {detail or 'No detail recorded.'}\n\n"
+    )
+    existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else "# Project Memory\n\n"
+    separator = "" if existing.endswith("\n") else "\n"
+    path.write_text(f"{existing}{separator}{section}", encoding="utf-8")
+
+
+async def summarize_project_memory(project_name: str, project_path: Path, task_id: str | None, status: str, detail: str) -> None:
+    if not task_id:
+        return
+    await ensure_dualith_files(project_path, "", overwrite_spec=False)
+    task = task_by_id(task_id)
+    before = read_limited_text(project_memory_doc_path(project_path), limit=60_000)
+    runner_pref = str(task.get("runner", "auto")) if task else "auto"
+    summarizer_runner = role_runner_for_pref(runner_pref, "summarizer")
+    summarizer_model = resolve_runner_model(summarizer_runner, str(task.get("model", "")) if task else "")
+    set_task_phase(task_id, "reviewer", "summarizing", summarizer_runner, "Updating PROJECT_MEMORY.md")
+    append_task_event(task_id, "system", "Summarizer started", "Updating PROJECT_MEMORY.md", "summarizer", "running")
+    try:
+        summarizer_reasoning = clean_reasoning(str(task.get("reasoning", "medium")) if task else "medium")
+        result = await run_agent_process(project_name, "summarizer", summarizer_runner, summarizer_model, summarizer_reasoning, "", project_path)
+        after = read_limited_text(project_memory_doc_path(project_path), limit=60_000)
+        if agent_result_failed(result) or after == before:
+            append_project_memory_fallback(project_path, task, status, detail)
+            append_agent_chat(project_path, f"### Summarizer - {utc_now()}\n\nPROJECT_MEMORY.md was updated with a deterministic fallback entry.\n\n")
+        append_task_event(task_id, "system", "Project memory updated", "PROJECT_MEMORY.md refreshed for the next task.", "summarizer", "done")
+    except Exception as exc:  # noqa: BLE001 - memory should not block the queue.
+        append_project_memory_fallback(project_path, task, status, f"{detail} (summarizer fallback after {type(exc).__name__}: {exc})")
+        append_agent_chat(project_path, f"### Summarizer - {utc_now()}\n\nPROJECT_MEMORY.md was updated with a deterministic fallback entry after the summarizer failed.\n\n")
+        append_task_event(task_id, "system", "Project memory fallback", str(exc), "summarizer", "fallback")
+
+
+async def run_plan_then_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None, task_id: str | None = None) -> None:
     """Plan-first workflow: planner writes PLAN.md, user approves, then team builds."""
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
 
-    # 1. Run planner (read-only, always Claude for quality)
-    planner_model = clean_model(model) or DEFAULT_RUNNER_MODELS["claude"]
-    await run_agent_process(project_name, "planner", "claude", planner_model, clean_reasoning(reasoning), run_prompt, project_path, attachment_paths=attachment_paths)
+    # 1. Run architect. Manual runner choices are literal; auto keeps Claude as architect.
+    architect_runner = role_runner_for_pref(runner_pref, "architect")
+    architect_model = resolve_runner_model(architect_runner, model)
+    set_task_phase(task_id, "architect", "running", architect_runner, "Writing ARCHITECTURE.md and DECISIONS.md")
+    architect_result = await run_agent_process(project_name, "architect", architect_runner, architect_model, clean_reasoning(reasoning), run_prompt, project_path, attachment_paths=attachment_paths)
+    if agent_result_failed(architect_result):
+        set_task_phase(task_id, "architect", "failed", architect_runner, agent_result_error(architect_result))
+        set_task_status(task_id, "failed", "architect", agent_result_error(architect_result))
+        await start_next_queued_task(project_name)
+        append_chat_history(
+            project_path,
+            f"### Circuit Breaker - {utc_now()}\n\n"
+            f"Plan stopped because Architect via {RUNNER_COMMANDS[architect_runner]['label']} failed.\n\n"
+            f"{agent_result_error(architect_result)}\n\n"
+        )
+        await broadcast("chat_event", record_event("ARCHITECT_FAILED", f"{relative_path(project_path)} :: architect failed"))
+        return
+    set_task_phase(task_id, "architect", "done", architect_runner, "Architecture handoff written.")
 
-    # 2. Read plan from PLAN.md and broadcast as a plan message in chat history
+    # 2. Run planner. Manual runner choices are literal; auto keeps Claude as planner.
+    planner_runner = role_runner_for_pref(runner_pref, "planner")
+    planner_model = resolve_runner_model(planner_runner, model)
+    set_task_phase(task_id, "planner", "running", planner_runner, "Writing PLAN.md")
+    planner_result = await run_agent_process(project_name, "planner", planner_runner, planner_model, clean_reasoning(reasoning), run_prompt, project_path, attachment_paths=attachment_paths)
+    if agent_result_failed(planner_result):
+        set_task_phase(task_id, "planner", "failed", planner_runner, agent_result_error(planner_result))
+        set_task_status(task_id, "failed", "planner", agent_result_error(planner_result))
+        await start_next_queued_task(project_name)
+        append_chat_history(
+            project_path,
+            f"### Circuit Breaker - {utc_now()}\n\n"
+            f"Plan stopped because Planner via {RUNNER_COMMANDS[planner_runner]['label']} failed.\n\n"
+            f"{agent_result_error(planner_result)}\n\n"
+        )
+        await broadcast("chat_event", record_event("PLAN_FAILED", f"{relative_path(project_path)} :: planner failed"))
+        return
+    set_task_phase(task_id, "planner", "done", planner_runner, "Plan ready for approval.")
+
+    # 3. Read plan from PLAN.md and broadcast as a plan message in chat history
     plan_path = project_path / "PLAN.md"
     plan_content = plan_path.read_text(encoding="utf-8", errors="ignore").strip() if plan_path.exists() else "(Planner did not write a plan.)"
     append_chat_history(project_path, f"### Plan - {utc_now()}\n\n{plan_content}\n\n")
     await broadcast("chat_event", record_event("PLAN_READY", f"{relative_path(project_path)} :: plan written, awaiting approval"))
 
-    # 3. Wait for user approval (up to 10 minutes)
+    # 4. Wait for user approval (up to 10 minutes)
     ev = asyncio.Event()
     plan_approval_events[project_name] = ev
+    set_task_status(task_id, "blocked", "planner", "Waiting for plan approval.")
     try:
         await asyncio.wait_for(ev.wait(), timeout=600)
     except asyncio.TimeoutError:
         plan_approval_events.pop(project_name, None)
         plan_approval_results.pop(project_name, None)
+        set_task_status(task_id, "failed", "planner", "Plan approval timed out.")
+        await start_next_queued_task(project_name)
         log.info("plan approval timed out for %s", project_name)
         return
 
     result = plan_approval_results.pop(project_name, {})
     plan_approval_events.pop(project_name, None)
+    set_task_status(task_id, "active", "planner", "Plan approval received.")
 
     if not result.get("approved", False):
         # User rejected — append feedback and re-run planner once
@@ -3691,7 +6019,21 @@ async def run_plan_then_team(project_name: str, project_path: Path, runner_pref:
         if comment:
             append_chat_history(project_path, f"### Plan Feedback - {utc_now()}\n\n{comment}\n\n")
         # One re-plan cycle
-        await run_agent_process(project_name, "planner", "claude", planner_model, clean_reasoning(reasoning), comment, project_path)
+        set_task_phase(task_id, "planner", "running", planner_runner, "Revising PLAN.md")
+        planner_result2 = await run_agent_process(project_name, "planner", planner_runner, planner_model, clean_reasoning(reasoning), comment, project_path)
+        if agent_result_failed(planner_result2):
+            set_task_phase(task_id, "planner", "failed", planner_runner, agent_result_error(planner_result2))
+            set_task_status(task_id, "failed", "planner", agent_result_error(planner_result2))
+            await start_next_queued_task(project_name)
+            append_chat_history(
+                project_path,
+                f"### Circuit Breaker - {utc_now()}\n\n"
+                f"Plan revision stopped because Planner via {RUNNER_COMMANDS[planner_runner]['label']} failed.\n\n"
+                f"{agent_result_error(planner_result2)}\n\n"
+            )
+            await broadcast("chat_event", record_event("PLAN_FAILED", f"{relative_path(project_path)} :: planner revision failed"))
+            return
+        set_task_phase(task_id, "planner", "done", planner_runner, "Revised plan ready for approval.")
         plan_path2 = project_path / "PLAN.md"
         plan_content2 = plan_path2.read_text(encoding="utf-8", errors="ignore").strip() if plan_path2.exists() else "(Planner did not revise the plan.)"
         append_chat_history(project_path, f"### Plan - {utc_now()}\n\n{plan_content2}\n\n")
@@ -3699,33 +6041,55 @@ async def run_plan_then_team(project_name: str, project_path: Path, runner_pref:
         ev2 = asyncio.Event()
         plan_approval_events[project_name] = ev2
         await broadcast("chat_event", record_event("PLAN_READY", f"{relative_path(project_path)} :: plan revised, awaiting approval"))
+        set_task_status(task_id, "blocked", "planner", "Waiting for revised plan approval.")
         try:
             await asyncio.wait_for(ev2.wait(), timeout=600)
         except asyncio.TimeoutError:
             plan_approval_events.pop(project_name, None)
             plan_approval_results.pop(project_name, None)
+            set_task_status(task_id, "failed", "planner", "Revised plan approval timed out.")
+            await start_next_queued_task(project_name)
             return
         result2 = plan_approval_results.pop(project_name, {})
         plan_approval_events.pop(project_name, None)
+        set_task_status(task_id, "active", "planner", "Revised plan approval received.")
         if not result2.get("approved", False):
+            set_task_status(task_id, "failed", "planner", "Plan rejected twice.")
+            await start_next_queued_task(project_name)
             log.info("plan rejected twice for %s — aborting build", project_name)
             return
 
-    # 4. Plan approved — run the team
-    await run_team(project_name, project_path, runner_pref, model, reasoning, run_prompt, max_rounds, attachment_paths=attachment_paths)
+    # 5. Plan approved — run the team
+    await run_team(project_name, project_path, runner_pref, model, reasoning, run_prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id)
 
 
-async def run_pm_then_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None) -> None:
+async def run_pm_then_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None, task_id: str | None = None) -> None:
     """PM-clarify workflow: PM checks if request is clear, then team builds."""
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
 
-    # 1. Run PM (read-only, always Claude)
-    pm_model = clean_model(model) or DEFAULT_RUNNER_MODELS["claude"]
-    await run_agent_process(project_name, "pm", "claude", pm_model, clean_reasoning(reasoning), run_prompt, project_path, attachment_paths=attachment_paths)
+    # 1. Run PM. Manual runner choices are literal; auto keeps Claude as PM.
+    pm_runner = role_runner_for_pref(runner_pref, "pm")
+    pm_model = resolve_runner_model(pm_runner, model)
+    set_task_phase(task_id, "pm", "running", pm_runner, "Clarifying task scope.")
+    pm_result = await run_agent_process(project_name, "pm", pm_runner, pm_model, clean_reasoning(reasoning), run_prompt, project_path, attachment_paths=attachment_paths)
+    if agent_result_failed(pm_result):
+        set_task_phase(task_id, "pm", "failed", pm_runner, agent_result_error(pm_result))
+        set_task_status(task_id, "failed", "pm", agent_result_error(pm_result))
+        await start_next_queued_task(project_name)
+        append_chat_history(
+            project_path,
+            f"### Circuit Breaker - {utc_now()}\n\n"
+            f"Clarification stopped because PM via {RUNNER_COMMANDS[pm_runner]['label']} failed.\n\n"
+            f"{agent_result_error(pm_result)}\n\n"
+        )
+        await broadcast("chat_event", record_event("PM_FAILED", f"{relative_path(project_path)} :: PM failed"))
+        return
+    set_task_phase(task_id, "pm", "done", pm_runner, "Scope is clear enough to build.")
 
     # 2. Check if PM triggered HITL (asked a question)
     hi = parse_human_input(project_path)
     if hi["blocked"]:
+        set_task_status(task_id, "blocked", "pm", hi.get("question", "Waiting for user input."))
         # HITL gate: wait for the user to answer via the normal human-answer endpoint
         # The team will start after the answer is submitted and PM unblocks
         # For now: just wait for the HITL event to clear, then start team
@@ -3737,15 +6101,19 @@ async def run_pm_then_team(project_name: str, project_path: Path, runner_pref: s
             if not hi["blocked"]:
                 break
         else:
+            set_task_status(task_id, "failed", "pm", "PM human-input gate timed out.")
+            await start_next_queued_task(project_name)
             log.info("PM HITL timed out for %s — aborting", project_name)
             return
+        set_task_status(task_id, "active", "pm", "User answered PM question.")
 
     # 3. PM is done (wrote spec or answered question) — start team
-    await run_team(project_name, project_path, runner_pref, model, reasoning, run_prompt, max_rounds, attachment_paths=attachment_paths)
+    await run_team(project_name, project_path, runner_pref, model, reasoning, run_prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id)
 
 
-async def run_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None) -> None:
+async def run_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None, task_id: str | None = None) -> None:
     lead, teammate, reason = team_runners(runner_pref)
+    runner_mode = team_runner_mode(runner_pref, lead, teammate)
     team_resume_events[project_name] = asyncio.Event()
     active_teams[project_name] = {
         "status": "running",
@@ -3755,17 +6123,24 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
         "teammate": teammate,
         "lead_model": runner_default_model(lead),
         "teammate_model": runner_default_model(teammate),
+        "runner_mode": runner_mode,
+        "task_id": task_id or "",
     }
+    set_task_status(task_id, "active", "lead", "Team loop started.")
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
-    log.info("⚙ team routed  project=%s lead=%s teammate=%s reason=%s",
-             project_name, RUNNER_COMMANDS[lead]['label'], RUNNER_COMMANDS[teammate]['label'], reason)
-    record_event("TEAM_ROUTED", f"{relative_path(project_path)} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason}")
+    log.info("team routed  project=%s mode=%s lead=%s teammate=%s reason=%s",
+             project_name, runner_mode, RUNNER_COMMANDS[lead]['label'], RUNNER_COMMANDS[teammate]['label'], reason)
+    record_event("TEAM_ROUTED", f"{relative_path(project_path)} :: {runner_mode} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason}")
 
     if run_prompt.strip():
         attach_names = [Path(p).name for p in (attachment_paths or []) if p and p.strip()]
         attach_line = f"\n\n_Attached: {', '.join(attach_names)}_" if attach_names else ""
         append_chat_history(project_path, f"### Team Kickoff - {utc_now()}\n\n{run_prompt.strip()}{attach_line}\n\n")
-        append_agent_chat(project_path, f"### Task - {utc_now()}\n\nLead: {RUNNER_COMMANDS[lead]['label']} · Teammate: {RUNNER_COMMANDS[teammate]['label']}\n\n{run_prompt.strip()}\n\n")
+        if lead == teammate and is_manual_runner_pref(runner_pref):
+            routing_line = f"Mode: {runner_mode}"
+        else:
+            routing_line = f"Lead: {RUNNER_COMMANDS[lead]['label']} · Teammate: {RUNNER_COMMANDS[teammate]['label']}"
+        append_agent_chat(project_path, f"### Task - {utc_now()}\n\n{routing_line}\n\n{run_prompt.strip()}\n\n")
 
     def stopping() -> bool:
         return bool(active_teams.get(project_name, {}).get("stopping"))
@@ -3774,12 +6149,15 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
         """Freeze on a pending human question. Returns True if the team was stopped while frozen."""
         if not parse_human_input(project_path)["blocked"]:
             return False
+        hi = parse_human_input(project_path)
+        set_task_status(task_id, "blocked", "lead", hi.get("question", "Waiting for user input."))
         await set_team_state(project_name, project_path, "team_blocked", status="blocked", round=round_no)
         team_resume_events[project_name].clear()
         await team_resume_events[project_name].wait()
         if stopping():
             return True
         clear_human_input(project_path)
+        set_task_status(task_id, "active", "lead", "User answered; team resumed.")
         await set_team_state(project_name, project_path, "team_event", status="running")
         return False
 
@@ -3795,14 +6173,123 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 await set_team_state(project_name, project_path, "team_event", status="stopped")
                 return
 
-            # Lead turn (implements; workspace-write). The partner covers if the lead's
-            # runner is over its reserve this round.
+            # ── Decomposer step (round 1 only) ─────────────────────────────────
+            # A cheap read-only agent reads SPEC.md/PLAN.md and writes DECOMPOSE.json
+            # declaring whether the task splits into parallel lanes. On failure or
+            # single-domain output we fall through to the normal sequential Lead.
+            lanes: list[dict[str, Any]] = []
+            if round_no == 1:
+                try:
+                    decomposer_runner, _ = resolve_round_runner(teammate, lead)
+                    decomposer_model = resolve_runner_model(decomposer_runner, model)
+                    # Clean up any stale DECOMPOSE.json from a previous attempt.
+                    decompose_file = project_path / "DECOMPOSE.json"
+                    if decompose_file.exists():
+                        decompose_file.unlink()
+                    await set_team_state(project_name, project_path, "team_event", status="running", step="decomposer", round=round_no)
+                    decomposer_result = await run_agent_process(project_name, "decomposer", decomposer_runner, decomposer_model, "low", "", project_path)
+                    if not agent_result_failed(decomposer_result):
+                        lanes = parse_decomposer_file(project_path)
+                        if len(lanes) >= 2:
+                            set_task_lead_lanes(task_id, lanes)
+                            lane_labels = " · ".join(l["lane"] for l in lanes)
+                            append_agent_chat(project_path, f"### Decomposer - {utc_now()}\n\n{len(lanes)} parallel lanes: {lane_labels}\n\n")
+                            record_event("DECOMPOSER_SPLIT", f"{relative_path(project_path)} :: {len(lanes)} lanes: {lane_labels}")
+                        else:
+                            lanes = []
+                except Exception:  # noqa: BLE001 — decomposer failure is non-fatal; fall through to sequential Lead
+                    lanes = []
+
+            # ── Lead turn (implements; workspace-write) ─────────────────────────
+            # If the decomposer produced 2-3 lanes, run them concurrently via
+            # asyncio.gather, then a sequential merge pass. Otherwise run normally.
             lead_runner, lead_covered = resolve_round_runner(lead, teammate)
             if lead_covered:
                 record_event("TEAM_TAKEOVER", f"{relative_path(project_path)} :: {RUNNER_COMMANDS[lead_runner]['label']} covers LEAD (over reserve: {RUNNER_COMMANDS[lead]['label']})")
             lead_model = resolve_team_step_model("lead", lead, lead_runner, model)
+            set_task_phase(task_id, "lead", "running", lead_runner, f"Round {round_no}")
             await set_team_state(project_name, project_path, "team_event", status="running", step="lead", round=round_no, lead_model=lead_model)
-            await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate)
+
+            if len(lanes) >= 2:
+                # ── Parallel lane execution ─────────────────────────────────────
+                # Each lane gets its own Lead sub-agent run scoped to its domain files.
+                # We cap at 3 lanes (enforced by parse_decomposer_file).
+
+                async def run_lane(lane_info: dict[str, Any]) -> dict[str, Any]:
+                    label = lane_info["lane"]
+                    file_list = ", ".join(lane_info["files"]) if lane_info["files"] else "(no specific files)"
+                    scope_note = lane_info.get("scope", "")
+                    lane_prompt = (
+                        f"You are implementing the '{label}' lane of a parallel build.\n\n"
+                        f"Scope: {scope_note}\n"
+                        f"Primary files for this lane: {file_list}\n\n"
+                        f"Only modify files in your lane's scope. Other lanes are being built concurrently — do not touch their files.\n"
+                        f"When you write to AGENT_CHAT.md, prefix your section title with 'Lead:{label}'.\n"
+                    )
+                    update_task_lane_progress(task_id, label, "running", 0)
+                    # Use agent="lead" so agent_prompt resolves the lead template correctly;
+                    # the lane context is injected via run_prompt (appended after the base prompt).
+                    result = await run_agent_process(project_name, "lead", lead_runner, lead_model, reasoning, lane_prompt, project_path, teammate)
+                    pct = 0 if agent_result_failed(result) else 100
+                    update_task_lane_progress(task_id, label, "failed" if agent_result_failed(result) else "done", pct)
+                    return result
+
+                lane_results = await asyncio.gather(*[run_lane(l) for l in lanes], return_exceptions=True)
+
+                # Check for lane failures.
+                lane_failed = False
+                for lane_info, lane_result in zip(lanes, lane_results):
+                    if isinstance(lane_result, Exception):
+                        lane_failed = True
+                        append_agent_chat(project_path, f"### Lead:{lane_info['lane']} - {utc_now()}\n\nLane raised an exception: {lane_result}\n\n")
+                    elif agent_result_failed(lane_result):
+                        lane_failed = True
+
+                if lane_failed:
+                    record_event("LANE_SERIALIZED", f"{relative_path(project_path)} :: lane failure — falling back to sequential Lead")
+                    append_agent_chat(project_path, f"### Note - {utc_now()}\n\nOne or more parallel lanes failed; falling back to sequential Lead to ensure the build stays clean.\n\n")
+                    # Clear lanes so the UI stops showing them as active.
+                    for l in lanes:
+                        update_task_lane_progress(task_id, l["lane"], "skipped", 0)
+                    # Run a sequential Lead merge/repair pass.
+                    lead_result = await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate)
+                    if agent_result_failed(lead_result):
+                        set_task_phase(task_id, "lead", "failed", lead_runner, agent_result_error(lead_result))
+                        await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, lead_result, round_no)
+                        return
+                else:
+                    # All lanes succeeded — run a short Lead merge/reconcile pass.
+                    merge_prompt = (
+                        "All parallel lanes have completed. Run a quick merge pass:\n"
+                        "1. Read AGENT_CHAT.md to see what each lane built.\n"
+                        "2. Resolve any overlapping edits or import conflicts.\n"
+                        "3. Verify the project builds cleanly (run any available lint/test commands).\n"
+                        "4. Write your summary to AGENT_CHAT.md under a '### Lead' section.\n"
+                        "Do NOT rewrite what the lanes already built unless there is an actual conflict.\n"
+                    )
+                    merge_result = await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate, override_prompt=merge_prompt)
+                    if agent_result_failed(merge_result):
+                        set_task_phase(task_id, "lead", "failed", lead_runner, agent_result_error(merge_result))
+                        await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, merge_result, round_no)
+                        return
+            else:
+                # Sequential Lead (single domain or decomposer skipped).
+                lead_result = await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate)
+                if agent_result_failed(lead_result):
+                    set_task_phase(task_id, "lead", "failed", lead_runner, agent_result_error(lead_result))
+                    await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, lead_result, round_no)
+                    return
+
+            # Clean up the temp decomposer file now that lanes have run.
+            decompose_cleanup = project_path / "DECOMPOSE.json"
+            if decompose_cleanup.exists():
+                try:
+                    decompose_cleanup.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            update_task_ownership_from_git(task_id, project_path, "Lead")
+            set_task_phase(task_id, "lead", "done", lead_runner, f"Round {round_no}")
 
             # Lead may have HALTed by writing a question — loop back to the gate.
             if parse_human_input(project_path)["blocked"]:
@@ -3817,13 +6304,23 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
             should_test = any((project_path / f).exists() for f in tester_run_files)
             tester_passed = True
             if should_test:
+                tester_runner = role_runner_for_pref(runner_pref, "tester")
+                set_task_phase(task_id, "tester", "running", tester_runner, f"Round {round_no}")
                 await set_team_state(project_name, project_path, "team_event", status="running", step="tester", round=round_no)
-                tester_model = clean_model(model) or DEFAULT_RUNNER_MODELS["claude"]
-                await run_agent_process(project_name, "tester", "claude", tester_model, clean_reasoning(reasoning), "", project_path)
+                tester_model = resolve_runner_model(tester_runner, model)
+                tester_chat_start = agent_chat_size(project_path)
+                tester_result = await run_agent_process(project_name, "tester", tester_runner, tester_model, clean_reasoning(reasoning), "", project_path)
+                if agent_result_failed(tester_result):
+                    append_agent_chat_section_if_missing(project_path, "Tester", tester_chat_start, f"{agent_result_error(tester_result)}\n\nTESTER: FAILED")
+                    set_task_phase(task_id, "tester", "failed", tester_runner, agent_result_error(tester_result))
+                    await stop_team_after_failed_step(project_name, project_path, "tester", tester_runner, tester_result, round_no)
+                    return
                 # Read FEEDBACK.md to check result
                 feedback_path = project_path / "FEEDBACK.md"
                 feedback_content = feedback_path.read_text(encoding="utf-8", errors="ignore") if feedback_path.exists() else ""
                 tester_passed = "TESTER: PASSED" in feedback_content
+                tester_summary = firstMeaningful_backend_line(feedback_content) or ("All checks passed." if tester_passed else "Tester reported a failing check.")
+                append_agent_chat_section_if_missing(project_path, "Tester", tester_chat_start, f"{tester_summary}\n\nTESTER: {'PASSED' if tester_passed else 'FAILED'}")
                 if not tester_passed:
                     consecutive_test_failures += 1
                     # Extract last error for circuit breaker message
@@ -3838,22 +6335,58 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                             f"Here's the last error:\n\n{last_test_error}\n\n"
                             "Fix the underlying issue and try again.\n\n"
                         )
+                        lessons_existing = lessons_path(project_path).read_text(encoding="utf-8", errors="replace") if lessons_path(project_path).exists() else ""
+                        lessons_path(project_path).write_text(
+                            f"{lessons_existing}{'' if lessons_existing.endswith(chr(10)) or not lessons_existing else chr(10)}"
+                            f"## Circuit Breaker - {utc_now()}\n\n"
+                            f"- Failure class: repeated tester failure\n"
+                            f"- Last verification output: {last_test_error[:1000] or 'No tester output captured.'}\n"
+                            f"- Next step: fix the failing check, then rerun the same tester command.\n\n",
+                            encoding="utf-8",
+                        )
                         await broadcast("chat_event", record_event("CIRCUIT_BREAKER", f"{relative_path(project_path)} :: {consecutive_test_failures} consecutive test failures"))
                         await set_team_state(project_name, project_path, "team_event", status="done", step="circuit-breaker", round=round_no)
+                        set_task_phase(task_id, "tester", "failed", tester_runner, "Circuit breaker after consecutive test failures.")
                         return
                     # Lead gets another round with test feedback visible
+                    set_task_phase(task_id, "tester", "failed", tester_runner, "Tests failed; returning to Lead.")
                     continue
                 else:
                     consecutive_test_failures = 0
+                    set_task_phase(task_id, "tester", "done", tester_runner, f"Round {round_no}")
+            else:
+                set_task_phase(task_id, "tester", "skipped", "", "No package/build/test indicator files found.")
+                append_agent_chat_section_if_missing(project_path, "Tester", agent_chat_size(project_path), "No package/build/test indicator files were found, so verification was skipped.\n\nTESTER: PASSED")
 
             if stopping():
                 await set_team_state(project_name, project_path, "team_event", status="stopped")
                 return
 
+            specialist_status, specialist_reviewer, specialist_summary = await run_specialist_reviewers(
+                project_name,
+                project_path,
+                runner_pref,
+                model,
+                reasoning,
+                task_id,
+                round_no,
+            )
+            if specialist_status == "failed":
+                await stop_team_after_failed_step(project_name, project_path, specialist_reviewer, role_runner_for_pref(runner_pref, specialist_reviewer), {"error": specialist_summary, "status": "error"}, round_no)
+                return
+            if specialist_status == "changes_requested":
+                append_agent_chat(
+                    project_path,
+                    f"### Review Gate - {utc_now()}\n\n"
+                    f"{SPECIALIST_REVIEWER_LABELS.get(specialist_reviewer, specialist_reviewer)} requested changes: {specialist_summary}\n\n",
+                )
+                continue
+
             # Teammate turn (reviews; read-only). The partner covers if the teammate's
             # runner is over its reserve this round.
             teammate_runner, teammate_covered = resolve_round_runner(teammate, lead)
-            self_review = teammate_runner == lead_runner
+            manual_same_runner = lead == teammate and is_manual_runner_pref(runner_pref)
+            self_review = teammate_runner == lead_runner and not manual_same_runner
             if teammate_covered:
                 record_event("TEAM_TAKEOVER", f"{relative_path(project_path)} :: {RUNNER_COMMANDS[teammate_runner]['label']} covers REVIEW (over reserve: {RUNNER_COMMANDS[teammate]['label']})")
             if self_review:
@@ -3861,12 +6394,22 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 over_runner = lead if lead_covered else teammate
                 append_agent_chat(project_path, f"### Note - {utc_now()}\n\n{RUNNER_COMMANDS[teammate_runner]['label']} is performing a self-review this round because {RUNNER_COMMANDS[over_runner]['label']} is over quota reserve. Independence is reduced.\n\n")
             teammate_model = resolve_team_step_model("teammate", teammate, teammate_runner, model)
+            set_task_phase(task_id, "reviewer", "running", teammate_runner, f"Round {round_no}")
             await set_team_state(project_name, project_path, "team_event", status="running", step="teammate", round=round_no, teammate_model=teammate_model)
-            await run_team_step(project_name, "teammate", teammate_runner, teammate, model, reasoning, project_path, lead_runner)
+            teammate_result = await run_team_step(project_name, "teammate", teammate_runner, teammate, model, reasoning, project_path, lead_runner)
+            if agent_result_failed(teammate_result):
+                set_task_phase(task_id, "reviewer", "failed", teammate_runner, agent_result_error(teammate_result))
+                await stop_team_after_failed_step(project_name, project_path, "teammate", teammate_runner, teammate_result, round_no)
+                return
+            set_task_phase(task_id, "reviewer", "done", teammate_runner, f"Round {round_no}")
 
             if parse_human_input(project_path)["blocked"]:
                 continue
             if parse_team_signoff(project_path):
+                # Emit an explicit final-reviewer event so the roster's Final Reviewer
+                # card reads "approved" rather than the last specialist's status (both
+                # share the "reviewer" role in the task event log).
+                append_task_event(task_id, "review", "Final Reviewer approved", "Team signed off.", "reviewer", "approved")
                 await set_team_state(project_name, project_path, "team_event", status="done", step="approved", round=round_no)
                 return
 
@@ -3883,9 +6426,11 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
     except Exception as exc:  # noqa: BLE001 — surface failures to the UI rather than crash the loop.
         await set_team_state(project_name, project_path, "team_event", status="error", step=f"{type(exc).__name__}: {exc}")
     finally:
+        final_state = active_teams.get(project_name)
         active_teams.pop(project_name, None)
         team_resume_events.pop(project_name, None)
         await broadcast("team_event")
+        await finish_task_and_start_next(project_name, project_path, task_id, final_state, "approved")
 
 
 def _purge_orphaned_runs() -> None:
@@ -3926,6 +6471,7 @@ async def startup() -> None:
 
     ensure_dualith_store()
     _purge_orphaned_runs()
+    recover_interrupted_tasks()
     await ensure_registered_project_files()
     event_loop = asyncio.get_running_loop()
     observer = Observer()
@@ -3956,7 +6502,7 @@ async def health() -> dict[str, Any]:
     return {
         "app": "dualith",
         "version": "0.2.0",
-        "features": ["status-refresh", "quota-status", "project-preview", "lan-mode", "unified-chat", "dynamic-orchestration"],
+        "features": APP_FEATURES,
         **app_status_snapshot(),
     }
 
@@ -3983,10 +6529,20 @@ async def update_quota(request: QuotaSettingsRequest) -> dict[str, Any]:
 
 
 @app.post("/api/status/refresh")
-async def refresh_status() -> dict[str, Any]:
-    await refresh_status_cache()
-    entry = record_event("STATUS_REFRESHED", "Codex /status + Claude /status")
-    schedule_broadcast("agent_event", entry)
+async def refresh_status(response: Response, force: bool = False) -> dict[str, Any]:
+    try:
+        _, refresh_state = await refresh_status_cache(emit_events=True, wait=force, force=force)
+    except Exception:
+        response.headers["X-Dualith-Status-Refresh"] = "error"
+        return await collect_snapshot()
+
+    response.headers["X-Dualith-Status-Refresh"] = refresh_state
+    if refresh_state == "fresh":
+        entry = record_event("STATUS_REFRESH_SKIPPED", "Runner usage cached")
+        schedule_broadcast("agent_event", entry)
+    elif refresh_state == "running":
+        entry = record_event("STATUS_REFRESH_SKIPPED", "Runner usage refresh already running")
+        schedule_broadcast("agent_event", entry)
     return await collect_snapshot()
 
 
@@ -4297,7 +6853,7 @@ async def stop_agent(name: str, agent: str) -> dict[str, Any]:
         if not state:
             raise HTTPException(status_code=404, detail="Team is not running.")
         state["stopping"] = True
-        for role in ("lead", "teammate"):
+        for role in ("lead", "tester", *SPECIALIST_REVIEWERS, "teammate", "summarizer"):
             if agent_run_key(name, role) in active_agent_runs:
                 await stop_agent_process(name, role)
         event = team_resume_events.get(name)
@@ -4460,6 +7016,38 @@ def _build_project_context(project_path: Path) -> str:
     return f"Project context: {', '.join(parts) or 'new project'}."
 
 
+GIT_MESSAGE_PHRASES = (
+    "commit message",
+    "github push commit message",
+    "push commit message",
+    "write a commit message",
+    "draft a commit message",
+    "create a commit message",
+)
+
+GIT_DIRECT_PATTERNS = (
+    r"\b(git\s+)?commit\b.*\b(changes?|diff|staged|unstaged|working tree|workspace|all|this|these)\b",
+    r"\b(commit|save)\s+(the\s+)?(changes?|diff|staged|unstaged|working tree|workspace|all|this|these)\b",
+    r"\b(git\s+)?push\b(?!\s+commit\s+message)\b",
+    r"\b(git\s+)?stash\b",
+    r"\b(git\s+)?tag\b",
+    r"\b(create|make)\s+(a\s+)?tag\b",
+    r"\btag\s+(the\s+)?release\b",
+)
+
+
+def is_direct_git_intent(prompt: str) -> bool:
+    """True for operative Git requests, false for commit-message discussion."""
+    text = re.sub(r"\s+", " ", prompt.strip().lower())
+    if not text:
+        return False
+    if any(phrase in text for phrase in GIT_MESSAGE_PHRASES):
+        return False
+    if re.search(r"\b(commit|push|stash|tag|release)\b", text) and re.search(r"\b(message|summary|description|explain|review|check)\b", text):
+        return False
+    return any(re.search(pattern, text) for pattern in GIT_DIRECT_PATTERNS)
+
+
 async def classify_orchestration_intent_async(prompt: str, project_path: Path, runner: str = "auto") -> tuple[str, str]:
     """Async version: LLM classifier with keyword fallback."""
     project_context = _build_project_context(project_path)
@@ -4572,6 +7160,8 @@ def workflow_for_agent(agent: str) -> str:
         return "lead-only"
     if agent == "teammate":
         return "teammate-only"
+    if agent == "git":
+        return "git-direct"
     if agent == "builder":
         return "build-only"
     if agent == "auditor":
@@ -4602,6 +7192,7 @@ async def start_orchestration(
     reasoning: str,
     prompt: str,
     attachment_paths: list[str] | None = None,
+    task_id: str | None = None,
 ) -> None:
     workflow = ORCHESTRATION_WORKFLOWS.get(workflow_id)
     if not workflow:
@@ -4612,32 +7203,35 @@ async def start_orchestration(
         if project_name in active_teams:
             raise HTTPException(status_code=409, detail="Team is already running.")
         max_rounds = int(workflow.get("max_rounds", TEAM_MAX_ROUNDS) or TEAM_MAX_ROUNDS)
-        asyncio.create_task(run_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths))
+        asyncio.create_task(run_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id))
         return
 
     if kind == "plan-team":
         if project_name in active_teams:
             raise HTTPException(status_code=409, detail="Team is already running.")
         max_rounds = int(workflow.get("max_rounds", TEAM_MAX_ROUNDS) or TEAM_MAX_ROUNDS)
-        asyncio.create_task(run_plan_then_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths))
+        asyncio.create_task(run_plan_then_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id))
         return
 
     if kind == "pm-team":
         if project_name in active_teams:
             raise HTTPException(status_code=409, detail="Team is already running.")
         max_rounds = int(workflow.get("max_rounds", TEAM_MAX_ROUNDS) or TEAM_MAX_ROUNDS)
-        asyncio.create_task(run_pm_then_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths))
+        asyncio.create_task(run_pm_then_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id))
         return
 
     if kind == "pipeline":
         if project_name in active_pipelines:
             raise HTTPException(status_code=409, detail="Pipeline is already running.")
         max_iterations = int(workflow.get("max_iterations", PIPELINE_MAX_ITERATIONS) or PIPELINE_MAX_ITERATIONS)
-        asyncio.create_task(run_pipeline(project_name, project_path, runner_pref, model, reasoning, prompt, max_iterations, attachment_paths=attachment_paths))
+        asyncio.create_task(run_pipeline(project_name, project_path, runner_pref, model, reasoning, prompt, max_iterations, attachment_paths=attachment_paths, task_id=task_id))
         return
 
     if kind == "single":
         agent = str(workflow.get("agent", "ask"))
+        if agent == "git":
+            asyncio.create_task(run_backend_git_operation(project_name, project_path, runner_pref, model, reasoning, prompt))
+            return
         key = agent_run_key(project_name, agent)
         if key in active_agent_runs:
             raise HTTPException(status_code=409, detail="Agent is already running.")
@@ -4648,7 +7242,7 @@ async def start_orchestration(
             record_event("AUTO_ROUTED", f"{relative_path(project_path)} :: {RUN_MODES[agent]['label']} -> {RUNNER_COMMANDS[runner]['label']} :: {route_reason}")
         if runner not in RUNNER_COMMANDS:
             raise HTTPException(status_code=404, detail="Unknown runner.")
-        resolved_model = clean_model(model) or DEFAULT_RUNNER_MODELS[runner]
+        resolved_model = resolve_runner_model(runner, model)
         asyncio.create_task(run_agent_process(project_name, agent, runner, resolved_model, reasoning, prompt, project_path, attachment_paths=attachment_paths))
         return
 
@@ -4662,8 +7256,12 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
     runner = request.runner
     intent, route_reason = await classify_orchestration_intent_async(request.prompt, project_path, runner)
 
+    # Direct Git requests are single-runner operations, not build/test/review loops.
+    if intent == "build" and is_direct_git_intent(request.prompt):
+        workflow_id = "git-direct"
+        route_reason = "direct git operation"
     # Plan-first mode: if user toggled Plan ON and intent is build, use the plan-first workflow
-    if request.plan_mode and intent == "build":
+    elif request.plan_mode and intent == "build":
         workflow_id = "plan-first"
     # Autonomous mode: if intent is "ask" but message looks like a change request (not a question),
     # route through PM for a single clarification step before building
@@ -4680,12 +7278,20 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
     else:
         workflow_id = workflow_for_intent(intent)
     workflow = ORCHESTRATION_WORKFLOWS[workflow_id]
-    if project_has_active_orchestration(name):
-        raise HTTPException(status_code=409, detail="An agent is already running.")
 
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
     model = clean_model(request.model)
     reasoning = clean_reasoning(request.reasoning)
+
+    is_taskable = taskable_workflow(workflow_id)
+    if project_has_active_orchestration(name) or active_task_for_project(name):
+        if is_taskable:
+            task = create_task(name, workflow_id, runner, model, reasoning, request.prompt, route_reason, request.attachment_paths, status="pending")
+            append_task_event(str(task.get("id", "")), "queue_event", "Queued behind active task", "This request will start automatically when the active task finishes.", "queue", "pending")
+            entry = record_event("TASK_QUEUED", f"{relative_path(project_path)} :: {task.get('title', 'Task queued')}")
+            schedule_broadcast("team_event", entry)
+            return await collect_snapshot()
+        raise HTTPException(status_code=409, detail="An agent is already running.")
 
     log.info("→ chat routed  project=%s prompt=%r workflow=%s runner=%s reason=%s",
              name, request.prompt[:60], workflow_id, runner, route_reason)
@@ -4693,7 +7299,12 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
         "CHAT_ROUTED",
         f"{relative_path(project_path)} :: {request.prompt[:60]!r} -> {workflow.get('label', workflow_id)} via {runner} ({route_reason})",
     )
-    await start_orchestration(name, project_path, workflow_id, runner, model, reasoning, request.prompt, request.attachment_paths)
+    task_id = None
+    if is_taskable:
+        task = create_task(name, workflow_id, runner, model, reasoning, request.prompt, route_reason, request.attachment_paths, status="active")
+        task_id = str(task.get("id", ""))
+        record_event("TASK_STARTED", f"{relative_path(project_path)} :: {task.get('title', 'Task started')}")
+    await start_orchestration(name, project_path, workflow_id, runner, model, reasoning, request.prompt, request.attachment_paths, task_id=task_id)
 
     return await collect_snapshot()
 
@@ -4729,7 +7340,7 @@ async def stop_unified_chat(name: str) -> dict[str, Any]:
         state = active_teams.get(name)
         if state:
             state["stopping"] = True
-            for role in ("lead", "teammate"):
+            for role in ("lead", "tester", *SPECIALIST_REVIEWERS, "teammate", "summarizer"):
                 if agent_run_key(name, role) in active_agent_runs:
                     await stop_agent_process(name, role)
             ev = team_resume_events.get(name)
@@ -4779,23 +7390,34 @@ async def approve_plan(name: str, request: PlanApprovalRequest) -> dict[str, Any
     if not ev:
         raise HTTPException(status_code=404, detail="No pending plan for this project.")
     plan_approval_results[name] = {"approved": request.approved, "comment": request.comment}
+    task = active_task_for_project(name)
+    if task:
+        append_task_decision(
+            str(task.get("id", "")),
+            "Plan approval",
+            "Plan approved" if request.approved else "Plan revision requested",
+            request.comment.strip() or ("User approved the planner route." if request.approved else "User requested planner changes."),
+            "plan",
+            "approved" if request.approved else "revision_requested",
+        )
     ev.set()
     return await collect_snapshot()
 
 
 @app.post("/api/projects/{name}/chat/clear")
 async def clear_chat(name: str) -> dict[str, Any]:
-    """Clear CHAT_HISTORY.md and AGENT_CHAT.md atomically in one request.
+    """Clear CHAT_HISTORY.md, AGENT_CHAT.md, and saved project results atomically.
 
     Clearing them in two separate requests causes a race: the WS broadcast from
     the first clear arrives at the frontend after the second clear's applySnapshot,
     restoring the old agent_chat content and leaving a stale teammate bubble.
-    One endpoint, one snapshot, no race.
+    Saved results also render in the central thread, so clear those too.
     """
     project_path = tracked_project_path(name)
     clear_chat_history(project_path)
     clear_agent_chat(project_path)
-    entry = record_event("CHAT_CLEARED", f"{relative_path(project_path)} :: chat + agent-chat cleared")
+    clear_project_results(name)
+    entry = record_event("CHAT_CLEARED", f"{relative_path(project_path)} :: chat + agent-chat + results cleared")
     schedule_broadcast("chat_event", entry)
     return await collect_snapshot()
 
@@ -4843,10 +7465,11 @@ async def start_team(name: str, request: TeamStartRequest = TeamStartRequest()) 
 
     max_rounds = request.max_rounds or TEAM_MAX_ROUNDS
     lead, teammate, reason = team_runners(request.runner)
+    runner_mode = team_runner_mode(request.runner, lead, teammate)
     asyncio.create_task(
         run_team(name, project_path, request.runner, request.model, request.reasoning, request.prompt, max_rounds)
     )
-    entry = record_event("TEAM_STARTED", f"{relative_path(project_path)} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason} :: max {max_rounds} rounds")
+    entry = record_event("TEAM_STARTED", f"{relative_path(project_path)} :: {runner_mode} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason} :: max {max_rounds} rounds")
     schedule_broadcast("team_event", entry)
     return await collect_snapshot()
 
@@ -4859,7 +7482,7 @@ async def stop_team(name: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Team is not running.")
 
     state["stopping"] = True
-    for role in ("lead", "teammate"):
+    for role in ("lead", "tester", *SPECIALIST_REVIEWERS, "teammate", "summarizer"):
         if agent_run_key(name, role) in active_agent_runs:
             await stop_agent_process(name, role)
     event = team_resume_events.get(name)
@@ -4882,7 +7505,12 @@ async def clear_agent_chat_endpoint(name: str) -> dict[str, Any]:
 @app.post("/api/projects/{name}/human-input")
 async def submit_human_input(name: str, request: HumanInputRequest) -> dict[str, Any]:
     project_path = tracked_project_path(name)
+    human_input = parse_human_input(project_path)
+    task = active_task_for_project(name)
+    label, selected, reason = decision_from_human_answer(request.answer, human_input)
     write_human_answer(project_path, request.answer)
+    if task:
+        append_task_decision(str(task.get("id", "")), label, selected, reason, "human_input", "selected")
     # Release whichever orchestrator is frozen on this project's HITL gate.
     for event in (pipeline_resume_events.get(name), team_resume_events.get(name)):
         if event:

@@ -9,7 +9,25 @@ type AgentMode = "chat" | "build";
 type RunnerId = "auto" | "codex" | "claude";
 type RunnerPolicyId = "auto" | "codex-heavy" | "claude-heavy" | "balanced";
 type RefineRunnerId = Exclude<RunnerId, "auto">;
-type RunRole = AgentMode | "ask" | "builder" | "auditor" | "team" | "lead" | "teammate" | "planner" | "pm" | "tester";
+type StatusRefreshState = "refreshed" | "fresh" | "running" | "refreshing" | "error";
+type RunRole =
+  | AgentMode
+  | "ask"
+  | "builder"
+  | "auditor"
+  | "team"
+  | "lead"
+  | "teammate"
+  | "architect"
+  | "planner"
+  | "pm"
+  | "tester"
+  | "architecture_reviewer"
+  | "security_reviewer"
+  | "performance_reviewer"
+  | "maintainability_reviewer"
+  | "summarizer"
+  | "git";
 type ActiveRun = {
   mode: RunRole;
   runner: RunnerId;
@@ -34,6 +52,118 @@ type HumanInput = {
   blocked: boolean;
   question: string;
   answer: string;
+  options?: HumanInputOption[];
+  default_option?: string;
+};
+type HumanInputOption = { id: string; label: string; description?: string; recommended?: boolean };
+type AgenticChoiceDraft = {
+  prompt: string;
+  question: string;
+  default_option: string;
+  options: HumanInputOption[];
+};
+
+type TaskStatus = "pending" | "active" | "blocked" | "completed" | "failed";
+type TaskEventType = "conversation" | "agent_activity" | "decision" | "system" | "review" | "queue_event";
+type TaskPhaseName = "pm" | "architect" | "planner" | "lead" | "tester" | "reviewer";
+type LaneInfo = {
+  lane: string;
+  scope?: string;
+  files?: string[];
+  status?: string;
+  pct?: number;
+};
+type TaskPhase = {
+  status: string;
+  runner?: RunnerId | "";
+  updated_at?: string;
+  lanes?: LaneInfo[];
+};
+type TaskEvent = {
+  id: string;
+  type: TaskEventType;
+  title: string;
+  body?: string;
+  role?: string;
+  status?: string;
+  timestamp: string;
+};
+type TaskDecision = {
+  id: string;
+  label: string;
+  selected: string;
+  reason: string;
+  source: string;
+  timestamp: string;
+  status?: string;
+};
+type TaskOwnership = {
+  mode: string;
+  claimed_paths?: { path: string; owner: string; phase?: string; claimed_at?: string }[];
+};
+type TaskSubagent = {
+  id: string;
+  label: string;
+  status: string;
+  scope: string;
+  files?: string[];
+  pct?: number;
+  updated_at?: string;
+};
+type SpecialistReview = {
+  id: string;
+  label: string;
+  status: string;
+  runner?: RunnerId | "";
+  summary?: string;
+  updated_at?: string;
+};
+type DualithTask = {
+  id: string;
+  project: string;
+  title: string;
+  prompt: string;
+  workflow_id: string;
+  runner: RunnerId;
+  model: string;
+  reasoning: ReasoningLevel;
+  route_reason: string;
+  status: TaskStatus;
+  active_phase?: TaskPhaseName | "";
+  created_at: string;
+  updated_at: string;
+  started_at?: string;
+  completed_at?: string;
+  phases?: Partial<Record<TaskPhaseName, TaskPhase>>;
+  specialist_reviews?: SpecialistReview[];
+  decisions?: TaskDecision[];
+  events?: TaskEvent[];
+  ownership?: TaskOwnership;
+  subagents?: TaskSubagent[];
+};
+type TaskCounts = Record<TaskStatus, number>;
+type ArtifactSnapshot = {
+  architecture: string;
+  decisions: string;
+  lessons: string;
+  project_memory?: string;
+  plan: string;
+  feedback: string;
+};
+type AttentionStatus = "none" | "attention" | "stale" | "clean";
+type AttentionItem = {
+  priority: "p0" | "p1" | "p2" | "p3" | "other" | string;
+  title: string;
+  text: string;
+  suggested_command?: string;
+};
+type ProjectAttention = {
+  status: AttentionStatus;
+  source: string;
+  summary: string;
+  items: AttentionItem[];
+  priority_counts: Record<"p0" | "p1" | "p2" | "p3" | "other", number>;
+  updated_at: string;
 };
 
 type PipelineState = {
@@ -50,6 +180,7 @@ type TeamState = {
   teammate: RunnerId;
   lead_model?: string;
   teammate_model?: string;
+  runner_mode?: string;
 };
 
 type DevServerState = {
@@ -73,6 +204,7 @@ type ProjectRecord = {
   last_event_at: string | null;
   agent_state: AgentState;
   audit_state: AuditState;
+  attention?: ProjectAttention;
   claude_todos: string[];
   commits: string[];
   active_agents?: string[];
@@ -85,6 +217,10 @@ type ProjectRecord = {
   agent_chat?: string;
   memory?: Record<string, unknown>;
   plan_pending?: boolean;
+  tasks?: DualithTask[];
+  active_task?: DualithTask | null;
+  task_counts?: TaskCounts;
+  artifacts?: ArtifactSnapshot;
 };
 
 type ConsoleEntry = {
@@ -92,6 +228,7 @@ type ConsoleEntry = {
   action: string;
   path: string;
 };
+type TypedConsoleEntry = ConsoleEntry & { type: TaskEventType };
 
 type UsageTotals = {
   runs: number;
@@ -100,6 +237,14 @@ type UsageTotals = {
   output_tokens: number;
   total_tokens: number;
   cost_usd: number;
+  token_runs: number;
+  unknown_token_runs: number;
+  prompt_chars: number;
+  output_lines: number;
+  output_chars: number;
+  ok_runs: number;
+  error_runs: number;
+  stopped_runs: number;
 };
 
 type UsageModelTotal = UsageTotals & {
@@ -107,6 +252,8 @@ type UsageModelTotal = UsageTotals & {
   runner: RunnerId;
   model: string;
   reasoning: ReasoningLevel;
+  last_started_at?: string;
+  last_status?: "running" | "ok" | "error" | "stopped" | "";
 };
 
 type UsageRun = {
@@ -118,9 +265,13 @@ type UsageRun = {
   reasoning: ReasoningLevel;
   started_at: string;
   ended_at: string;
+  last_output_at?: string;
   duration_ms: number;
   status: "running" | "ok" | "error" | "stopped";
   exit_code: number | null;
+  prompt_chars?: number;
+  output_lines?: number;
+  output_chars?: number;
   input_tokens: number | null;
   output_tokens: number | null;
   total_tokens: number | null;
@@ -168,6 +319,13 @@ type QuotaPeriod = {
   usable_remaining: number;
   available: boolean;
   source: "status" | "manual";
+  limit_source?: "status" | "statusline" | "rate_limit" | "manual" | "";
+  limit_known?: boolean;
+  usage_known?: boolean;
+  percent_used?: number | null;
+  percent_usable?: number | null;
+  state?: "limit_unknown" | "ok" | "watch" | "near_limit" | "over_reserve";
+  resets?: string;
   checked_at: string;
 };
 
@@ -177,7 +335,16 @@ type RunnerStatusEntry = {
   raw: string;
   error: string;
   exit_code: number | null;
-  parsed: Record<string, { used: number; limit: number; resets?: string } | null>;
+  parsed: Record<string, {
+    used: number;
+    limit: number;
+    resets?: string;
+    limit_source?: QuotaPeriod["limit_source"];
+    used_percentage?: number | null;
+    window_minutes?: number | null;
+    plan_type?: string;
+    rate_limit_reached_type?: string;
+  } | null>;
 };
 
 type QuotaSnapshot = {
@@ -233,6 +400,7 @@ type OrchestrationManifest = {
 type SnapshotPayload = {
   projects: ProjectRecord[];
   console: ConsoleEntry[];
+  events?: TypedConsoleEntry[];
   commits: string[];
   usage?: UsageSnapshot;
   quota?: QuotaSnapshot;
@@ -257,8 +425,8 @@ type EventPayload =
     };
 
 type SetupMode = "new" | "import";
-type MobilePanel = "projects" | "system" | null;
-type MobileView = "chat" | "preview" | "projects" | "system";
+type MobilePanel = "projects" | null;
+type MobileView = "team" | "direct" | "projects" | "details";
 type ImportFile = File & { webkitRelativePath?: string };
 type DirectoryInputProps = InputHTMLAttributes<HTMLInputElement> & {
   directory?: string;
@@ -266,6 +434,9 @@ type DirectoryInputProps = InputHTMLAttributes<HTMLInputElement> & {
 };
 
 const defaultDualithReservedPorts = [3200, 4200];
+const emptyTaskCounts: TaskCounts = { pending: 0, active: 0, blocked: 0, completed: 0, failed: 0 };
+const addressNotesPrompt =
+  "Address the current FEEDBACK.md AI Notes in priority order. Start with P0/P1 issues, then P2 issues. Update FEEDBACK.md with the current review result, update LESSONS.md and PROJECT_MEMORY.md if useful, and run the available tests/builds. Do not commit.";
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4200";
 const wsBase = apiBase.replace(/^http/, "ws");
 const directoryInputProps: DirectoryInputProps = { directory: "", webkitdirectory: "" };
@@ -276,9 +447,9 @@ const agentModes: { id: AgentMode; label: string }[] = [
   { id: "build", label: "Build" },
 ];
 const runners: { id: RunnerId; label: string }[] = [
-  { id: "auto", label: "Auto" },
-  { id: "codex", label: "Codex" },
-  { id: "claude", label: "Claude" },
+  { id: "auto", label: "Auto team" },
+  { id: "codex", label: "Codex only" },
+  { id: "claude", label: "Claude only" },
 ];
 const runnerPolicies: { id: RunnerPolicyId; label: string; description: string }[] = [
   { id: "codex-heavy", label: "Codex-heavy", description: "Codex leads implementation; Claude reviews when available." },
@@ -297,18 +468,55 @@ const modeLabels: Record<RunRole, string> = {
   team: "Team",
   lead: "Lead",
   teammate: "Teammate",
+  architect: "Architect",
   planner: "Planner",
   pm: "PM",
   tester: "Tester",
+  architecture_reviewer: "Architecture Reviewer",
+  security_reviewer: "Security Reviewer",
+  performance_reviewer: "Performance Reviewer",
+  maintainability_reviewer: "Maintainability Reviewer",
+  summarizer: "Summarizer",
+  git: "Git",
 };
 const modePromptPlaceholders: Record<AgentMode, string> = {
-  chat: "Ask about this project...",
-  build: "Describe what you want to build...",
+  chat: "Create a task, ask a question, or direct the team...",
+  build: "Describe the task outcome...",
+};
+const taskPhaseOrder: { id: TaskPhaseName; label: string; short: string }[] = [
+  { id: "pm", label: "PM", short: "PM" },
+  { id: "architect", label: "Architect", short: "Arch" },
+  { id: "planner", label: "Planner", short: "Plan" },
+  { id: "lead", label: "Lead", short: "Lead" },
+  { id: "tester", label: "Tester", short: "Test" },
+  { id: "reviewer", label: "Reviewer", short: "Review" },
+];
+const taskWorkflowLabels: Record<string, string> = {
+  "auto-team": "Auto Team",
+  "plan-first": "Plan First",
+  "pm-clarify": "PM Clarify",
+  "build-review-loop": "Build Review Loop",
+};
+const taskWorkflowPhases: Record<string, TaskPhaseName[]> = {
+  "auto-team": ["lead", "tester", "reviewer"],
+  "plan-first": ["architect", "planner", "lead", "tester", "reviewer"],
+  "pm-clarify": ["pm", "lead", "tester", "reviewer"],
+  "build-review-loop": ["lead", "reviewer"],
 };
 const runnerLabels: Record<RunnerId, string> = {
   auto: "Auto",
   codex: "Codex",
   claude: "Claude",
+};
+const runnerChoiceLabels: Record<RunnerId, string> = {
+  auto: "Auto team",
+  codex: "Codex only",
+  claude: "Claude only",
+};
+const runnerChoiceTitles: Record<RunnerId, string> = {
+  auto: "Auto team: Codex and Claude can work together based on policy and quota.",
+  codex: "Codex only: every role uses Codex.",
+  claude: "Claude only: every role uses Claude.",
 };
 const modelChoices: Record<RunnerId, { value: string; label: string }[]> = {
   auto: [
@@ -370,6 +578,14 @@ const emptyUsageTotals: UsageTotals = {
   output_tokens: 0,
   total_tokens: 0,
   cost_usd: 0,
+  token_runs: 0,
+  unknown_token_runs: 0,
+  prompt_chars: 0,
+  output_lines: 0,
+  output_chars: 0,
+  ok_runs: 0,
+  error_runs: 0,
+  stopped_runs: 0,
 };
 const emptyUsage: UsageSnapshot = {
   totals: emptyUsageTotals,
@@ -393,6 +609,13 @@ const emptyQuotaPeriod: QuotaPeriod = {
   usable_remaining: 0,
   available: true,
   source: "manual",
+  limit_source: "",
+  limit_known: false,
+  usage_known: false,
+  percent_used: null,
+  percent_usable: null,
+  state: "limit_unknown",
+  resets: "",
   checked_at: "",
 };
 const emptyStatusEntry: RunnerStatusEntry = {
@@ -529,7 +752,10 @@ function humanVerb(action: string): string {
     CHAT_ROUTED: "Chat routed",
     TEAM_ROUTED: "Team routed",
     TEAM_TAKEOVER: "Team takeover",
-    STATUS_REFRESHED: "Status refreshed",
+    STATUS_REFRESH_STARTED: "Status refresh",
+    STATUS_REFRESH_SKIPPED: "Status cached",
+    STATUS_REFRESHED: "Runner usage refreshed",
+    STATUS_REFRESH_ERROR: "Status error",
     DEV_SERVER_STARTED: "Preview starting",
     DEV_SERVER_READY: "Preview ready",
     DEV_SERVER_LOG: "Preview",
@@ -548,7 +774,8 @@ function humanVerb(action: string): string {
 function verbToneClass(verb: string) {
   if (verb.startsWith("CODEX")) return verb.includes("ERR") ? "text-danger" : "text-accent";
   if (verb.startsWith("CLAUDE")) return verb.includes("ERR") ? "text-danger" : "text-ok";
-  if (verb === "AUTO_ROUTED" || verb === "STATUS_REFRESHED") return "text-accent";
+  if (verb === "STATUS_REFRESH_SKIPPED") return "text-zinc-600";
+  if (verb === "AUTO_ROUTED" || verb === "STATUS_REFRESHED" || verb === "STATUS_REFRESH_STARTED") return "text-accent";
   if (verb === "GIT_LOG" || verb.startsWith("GIT") || verb.startsWith("git")) return "text-warn";
   if (verb.toLowerCase().includes("error") || verb.toLowerCase().includes("err")) return "text-danger";
   if (verb.includes("CREATED") || verb.includes("IMPORTED") || verb === "GIT_OK" || verb === "SYSTEM_READY") return "text-ok";
@@ -565,11 +792,33 @@ function eventBelongsToProject(entryPath: string, project: ProjectRecord) {
   return entryPath === project.path || entryPath.startsWith(`${project.path}/`) || entryPath.startsWith(`${project.path} ::`);
 }
 
+function attentionState(project: ProjectRecord | null): ProjectAttention {
+  return project?.attention ?? {
+    status: project?.audit_state === "CLEAN" ? "clean" : project?.audit_state === "ATTENTION" ? "attention" : "none",
+    source: "",
+    summary: project?.audit_state === "ATTENTION" ? "AI notes need work." : project?.audit_state === "CLEAN" ? "AI notes are clean." : "No AI notes yet.",
+    items: [],
+    priority_counts: { p0: 0, p1: 0, p2: 0, p3: 0, other: 0 },
+    updated_at: "",
+  };
+}
+
+function attentionBadge(attention: ProjectAttention): { label: string; tone: "green" | "amber" | "cyan" | "muted" } {
+  if (attention.status === "attention") return { label: "Needs attention", tone: "amber" };
+  if (attention.status === "stale") return { label: "Notes stale", tone: "amber" };
+  if (attention.status === "clean") return { label: "Clean", tone: "green" };
+  return { label: "Idle", tone: "muted" };
+}
+
+function taskCountTotal(counts: TaskCounts) {
+  return counts.pending + counts.active + counts.blocked + counts.completed + counts.failed;
+}
+
 function projectStatus(project: ProjectRecord) {
   const active = (project.active_agents ?? []).length > 0 || project.agent_state === "BUILDER_ACTIVE";
   if (active) return { label: "Working", tone: "cyan" as const };
-  if (project.audit_state === "ATTENTION") return { label: "Needs review", tone: "amber" as const };
-  if (project.audit_state === "CLEAN") return { label: "Clean", tone: "green" as const };
+  const attention = attentionBadge(attentionState(project));
+  if (attention.label !== "Idle") return attention;
   if (isRecent(project.last_event_at)) return { label: "Updated", tone: "cyan" as const };
   return { label: "Idle", tone: "muted" as const };
 }
@@ -686,7 +935,7 @@ function SectionHeader({ title, meta, children }: { title: string; meta?: string
   );
 }
 
-function Badge({ label, tone }: { label: string; tone: "green" | "amber" | "red" | "cyan" | "muted" }) {
+function Badge({ label, tone, className = "" }: { label: string; tone: "green" | "amber" | "red" | "cyan" | "muted"; className?: string }) {
   const cls =
     tone === "green"
       ? "bg-emerald-950 text-ok border-emerald-800"
@@ -697,11 +946,72 @@ function Badge({ label, tone }: { label: string; tone: "green" | "amber" | "red"
           : tone === "cyan"
             ? "bg-cyan-950 text-accent border-cyan-800"
             : "bg-zinc-900 text-zinc-500 border-zinc-700";
-  return <span className={`border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider ${cls}`}>{label}</span>;
+  return <span className={`border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider ${cls} ${className}`}>{label}</span>;
 }
 
 function EmptyState({ message }: { message: string }) {
   return <div className="px-3 py-4 text-xs text-zinc-700">{message}</div>;
+}
+
+function taskStatusTone(status: string): "green" | "amber" | "red" | "cyan" | "muted" {
+  if (["completed", "done", "approved"].includes(status)) return "green";
+  if (["blocked", "pending", "changes_requested", "fallback"].includes(status)) return "amber";
+  if (["failed", "error"].includes(status)) return "red";
+  if (["active", "running", "summarizing", "specialists_approved"].includes(status)) return "cyan";
+  return "muted";
+}
+
+function phaseToneClass(status = "") {
+  if (status === "done" || status === "completed" || status === "approved") return "border-ok/60 bg-emerald-950/30 text-ok";
+  if (status === "running" || status === "active") return "border-accent/70 bg-cyan-950/30 text-accent";
+  if (status === "blocked" || status === "pending" || status === "changes_requested" || status === "fallback") return "border-warn/60 bg-amber-950/20 text-warn";
+  if (status === "failed" || status === "error") return "border-danger/60 bg-red-950/20 text-danger";
+  if (status === "skipped" || status === "not_captured") return "border-line-hard bg-bg text-muted";
+  return "border-line-hard bg-surface text-text-faint";
+}
+
+function taskPhaseSet(task: DualithTask | null) {
+  if (!task) return new Set<TaskPhaseName>();
+  return new Set(taskWorkflowPhases[task.workflow_id] ?? taskPhaseOrder.map((phase) => phase.id));
+}
+
+function taskPhaseStatus(task: DualithTask | null, phase: TaskPhaseName) {
+  if (!task) return "waiting";
+  const state = task.phases?.[phase];
+  const phaseIsUsed = taskPhaseSet(task).has(phase);
+  const status = state?.status || (task.active_phase === phase ? "running" : "waiting");
+  if (!phaseIsUsed && ["", "pending", "waiting"].includes(status)) return "skipped";
+  return status;
+}
+
+function phaseStatusLabel(status = "") {
+  const labels: Record<string, string> = {
+    skipped: "not used",
+    specialists_approved: "specialists ok",
+    changes_requested: "changes",
+  };
+  return labels[status] ?? status;
+}
+
+function eventTypeLabel(type: TaskEventType) {
+  const labels: Record<TaskEventType, string> = {
+    conversation: "Conversation",
+    agent_activity: "Activity",
+    decision: "Decision",
+    system: "System",
+    review: "Review",
+    queue_event: "Queue",
+  };
+  return labels[type] ?? "Event";
+}
+
+function projectTaskCounts(project: ProjectRecord | null): TaskCounts {
+  return project?.task_counts ?? emptyTaskCounts;
+}
+
+function selectedTask(project: ProjectRecord | null): DualithTask | null {
+  if (!project) return null;
+  return project.active_task ?? project.tasks?.find((task) => ["active", "blocked", "pending"].includes(task.status)) ?? project.tasks?.[0] ?? null;
 }
 
 function RunnerMascot({ runner, size = 18 }: { runner: RunnerId; size?: number }) {
@@ -1317,6 +1627,19 @@ function RegistryColumn({
             const active = selectedName === project.name;
             const live = isRecent(project.last_event_at);
             const status = projectStatus(project);
+            const counts = projectTaskCounts(project);
+            const taskLabel = counts.active
+              ? `${counts.active} active`
+              : counts.blocked
+                ? `${counts.blocked} blocked`
+                : counts.pending
+                  ? `${counts.pending} queued`
+                  : counts.failed
+                    ? `${counts.failed} failed`
+                    : counts.completed
+                      ? `${counts.completed} done`
+                      : "";
+            const taskTone = counts.blocked ? "text-warn" : counts.failed ? "text-danger" : counts.active ? "text-accent" : counts.pending ? "text-warn" : "text-zinc-700";
 
             return (
               <div key={project.name} className={`group relative border-b border-line-hard ${active ? "bg-zinc-900" : "hover:bg-zinc-950"}`}>
@@ -1337,14 +1660,17 @@ function RegistryColumn({
                       live ? "bg-accent" : "border border-zinc-700"
                     }`}
                   />
-                  <span className="min-w-0">
-                    <span className="block truncate">{project.name}</span>
-                    <span className="mt-0.5 flex items-center gap-2 text-[10px]">
-                      <span className={projectStatusTone(status.tone)}>{status.label}</span>
-                      <span className="truncate text-zinc-700">{project.last_event_at ? timestampLabel(project.last_event_at) : "no activity"}</span>
+                    <span className="min-w-0">
+                      <span className="block truncate">{project.name}</span>
+                      <span className="mt-0.5 flex items-center gap-2 text-[10px]">
+                        <span className={projectStatusTone(status.tone)}>{status.label}</span>
+                        <span className="truncate text-zinc-700">{project.last_event_at ? timestampLabel(project.last_event_at) : "no activity"}</span>
+                      </span>
+                      {taskLabel && (
+                        <span className={`mt-0.5 block truncate text-[10px] ${taskTone}`}>{taskLabel}</span>
+                      )}
                     </span>
-                  </span>
-                </button>
+                  </button>
                 <button
                   type="button"
                   aria-label={`Remove ${project.name} from Dualith`}
@@ -1516,6 +1842,1034 @@ function RunStatusBubble({ project, latest }: { project: ProjectRecord | null; l
       <div className="mb-2 font-medium text-text-strong">{friendlyResultIntro(latest)}</div>
       <div className="text-muted">{body}</div>
     </AgentBubble>
+  );
+}
+
+function firstMeaningfulLine(content = "") {
+  return content.split("\n").map((line) => line.trim()).find(Boolean) ?? "";
+}
+
+// ─── Direction E: CrewStrip ───────────────────────────────────────────────────
+// Replaces the old TaskPhaseRail + TeamRoster pair.
+// Shows every in-scope agent as a column: name · runner · status.
+// The active agent gets a run-green top-rule + subtle tint.
+
+const CREW_AGENT_DEFS: { id: "pm" | "architect" | "lead" | "tester" | "reviewer"; label: string; phase?: TaskPhaseName; reviewer?: string; eventRole?: string }[] = [
+  { id: "pm", label: "PM", phase: "pm" },
+  { id: "architect", label: "Architect", phase: "architect" },
+  { id: "lead", label: "Lead", phase: "lead" },
+  { id: "tester", label: "Tester", phase: "tester" },
+  { id: "reviewer", label: "Reviewer", phase: "reviewer", eventRole: "reviewer" },
+];
+const SPECIALIST_REVIEW_IDS = ["architecture_reviewer", "security_reviewer", "performance_reviewer", "maintainability_reviewer"];
+const SPECIALIST_REVIEW_LABELS: Record<string, string> = {
+  architecture_reviewer: "Architecture",
+  security_reviewer: "Security",
+  performance_reviewer: "Performance",
+  maintainability_reviewer: "Maintainability",
+};
+
+function crewAgentsForTask(task: DualithTask | null) {
+  if (!task) return [];
+  return CREW_AGENT_DEFS;
+}
+
+function crewAgentStatus(task: DualithTask, def: typeof CREW_AGENT_DEFS[0]): string {
+  if (def.id === "reviewer") return reviewerCrewStatus(task);
+  const phaseSet = taskPhaseSet(task);
+  if (def.phase && phaseSet.has(def.phase)) return taskPhaseStatus(task, def.phase);
+  if (def.eventRole) {
+    const ev = [...(task.events ?? [])].reverse().find((e) => e.role === def.eventRole);
+    if (ev?.status) return ev.status;
+    if (task.status === "completed" || task.status === "failed") return "done";
+    return "waiting";
+  }
+  if (def.id === "pm" || def.id === "architect") {
+    if (task.status === "completed" || task.status === "failed") return "done";
+    if (task.active_phase === "lead" || task.active_phase === "tester" || task.active_phase === "reviewer") return "done";
+    return "ready";
+  }
+  return task.status === "completed" ? "done" : "waiting";
+}
+
+function crewAgentRunner(task: DualithTask, def: typeof CREW_AGENT_DEFS[0]): string {
+  if (def.id === "reviewer") return task.phases?.reviewer?.runner || firstSpecialistRunner(task);
+  if (def.phase) return task.phases?.[def.phase]?.runner || "";
+  return "";
+}
+
+function crewMemberClass(status: string): string {
+  if (status === "done" || status === "completed" || status === "approved" || status === "specialists_approved") return "is-done";
+  if (status === "running" || status === "active" || status === "summarizing") return "is-active";
+  if (status === "blocked" || status === "changes_requested" || status === "fallback") return "is-warn";
+  if (status === "failed" || status === "error") return "is-err";
+  if (status === "skipped" || status === "not_captured") return "is-na";
+  return "";
+}
+
+function crewStatusLabel(status: string): string {
+  const map: Record<string, string> = {
+    waiting: "standing by",
+    ready: "ready",
+    skipped: "standby",
+    not_captured: "not run",
+    specialists_approved: "approved",
+    changes_requested: "changes",
+    summarizing: "saving",
+    fallback: "fallback",
+  };
+  return map[status] ?? status;
+}
+
+function reviewIsCleanStatus(status = "") {
+  return ["approved", "done", "completed", "clean", "specialists_approved"].includes(status);
+}
+
+function reviewHasConcern(review: SpecialistReview | undefined) {
+  const status = review?.status ?? "";
+  return ["changes_requested", "failed", "error", "blocked"].includes(status);
+}
+
+function specialistReviewItems(task: DualithTask | null): SpecialistReview[] {
+  const byId = new Map((task?.specialist_reviews ?? []).map((review) => [review.id, review]));
+  return SPECIALIST_REVIEW_IDS.map((id) => byId.get(id) ?? {
+    id,
+    label: SPECIALIST_REVIEW_LABELS[id] ?? id,
+    status: "pending",
+    runner: "",
+    summary: "",
+    updated_at: "",
+  });
+}
+
+function specialistReviewDisplay(review: SpecialistReview, task: DualithTask | null) {
+  const status = review.status || "pending";
+  const completed = task?.status === "completed" || task?.status === "failed";
+  const label = SPECIALIST_REVIEW_LABELS[review.id] ?? review.label ?? review.id;
+  if (reviewHasConcern(review)) {
+    return { label, statusLabel: "Concern", tone: "amber" as const, summary: review.summary || "Review concern detected." };
+  }
+  if (reviewIsCleanStatus(status) || (completed && !review.summary)) {
+    return { label, statusLabel: "No findings", tone: "green" as const, summary: review.summary || "No findings." };
+  }
+  if (status === "running" || status === "active") {
+    return { label, statusLabel: "Reviewing", tone: "cyan" as const, summary: review.summary || "Review in progress." };
+  }
+  if (status === "skipped" || status === "not_captured") {
+    return { label, statusLabel: "Skipped", tone: "muted" as const, summary: review.summary || "Skipped for this run." };
+  }
+  return { label, statusLabel: "Queued", tone: "muted" as const, summary: review.summary || "Waiting for tester handoff." };
+}
+
+function firstSpecialistRunner(task: DualithTask) {
+  return task.specialist_reviews?.find((review) => review.runner)?.runner || "";
+}
+
+function reviewerCrewStatus(task: DualithTask) {
+  const reviews = specialistReviewItems(task);
+  if (reviews.some(reviewHasConcern)) return "changes_requested";
+  const eventStatus = latestTaskEventStatus(task, "reviewer");
+  if (eventStatus) return eventStatus;
+  if (task.active_phase === "reviewer") return "running";
+  if (task.status === "completed") return "approved";
+  if (task.status === "failed") return "changes_requested";
+  if (taskPhaseStatus(task, "tester") === "done" || taskPhaseStatus(task, "tester") === "completed") return "pending";
+  return "waiting";
+}
+
+function taskFocusLabel(task: DualithTask) {
+  const source = `${task.title} ${task.prompt}`.toLowerCase();
+  if (source.includes("dashboard")) return "dashboard improvements";
+  if (source.includes("budget")) return "budget tracker improvements";
+  if (source.includes("onboard")) return "onboarding improvements";
+  if (source.includes("responsive")) return "responsive layout";
+  return "the current task";
+}
+
+function crewAgentActivity(task: DualithTask, def: typeof CREW_AGENT_DEFS[0], status: string) {
+  if (def.id === "pm") {
+    if (status === "running" || status === "active") return "Clarifying the user goal";
+    if (status === "done" || status === "completed") return "Goal and success path set";
+    return "Ready to frame choices";
+  }
+  if (def.id === "architect") {
+    if (status === "running" || status === "active") return "Reviewing approach boundaries";
+    if (status === "done" || status === "completed") return "Approach boundary set";
+    return "Ready to shape the approach";
+  }
+  if (def.id === "lead") {
+    if (status === "running" || status === "active") return `Implementing ${taskFocusLabel(task)}`;
+    if (status === "done" || status === "completed") return "Implementation handed to Tester";
+    return "Waiting for the chosen route";
+  }
+  if (def.id === "tester") {
+    if (status === "running" || status === "active") return "Running validation suite";
+    if (status === "done" || status === "completed" || status === "approved") return "Build passed";
+    if (status === "failed" || status === "error") return "Validation failure found";
+    return "Waiting for Lead handoff";
+  }
+  if (status === "changes_requested") return "Quality concern detected";
+  if (status === "running" || status === "active" || status === "pending") return "Reviewing quality gates";
+  if (status === "approved" || status === "done" || status === "completed") return "No findings";
+  return "Waiting for test results";
+}
+
+function reviewerSummaryLabel(task: DualithTask) {
+  const reviews = specialistReviewItems(task);
+  const concern = reviews.find(reviewHasConcern);
+  if (concern) return `${SPECIALIST_REVIEW_LABELS[concern.id] ?? concern.label} concern detected`;
+  if (task.status === "completed" || reviews.some((review) => reviewIsCleanStatus(review.status))) return "No findings";
+  return "Specialist details";
+}
+
+function ReviewerSpecialistDetails({ task }: { task: DualithTask }) {
+  const reviews = specialistReviewItems(task);
+  const shouldOpen = reviews.some(reviewHasConcern) || reviews.some((review) => ["running", "active"].includes(review.status));
+  return (
+    <details className="crew-review-details" open={shouldOpen || undefined}>
+      <summary>{reviewerSummaryLabel(task)}</summary>
+      <div className="crew-review-details__list">
+        {reviews.map((review) => {
+          const display = specialistReviewDisplay(review, task);
+          return (
+            <div key={review.id} className={`crew-review-detail is-${display.tone}`}>
+              <span>{display.label}</span>
+              <strong>{display.statusLabel}</strong>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
+function CrewStrip({ task }: { task: DualithTask | null }) {
+  if (!task) return null;
+  const agents = crewAgentsForTask(task);
+  return (
+    <div
+      className="crew-strip"
+      style={{ "--crew-cols": agents.length } as React.CSSProperties}
+      aria-label="Team pipeline"
+    >
+      {agents.map((def) => {
+        const status = crewAgentStatus(task, def);
+        const runner = crewAgentRunner(task, def);
+        const mod = crewMemberClass(status);
+        return (
+          <div key={def.id} className={`crew-member ${mod}`} title={`${def.label} - ${status}`}>
+            <span className="crew-member__name">{def.label}</span>
+            {runner && <span className="crew-member__runner">{runner}</span>}
+            <span className="crew-member__activity">{crewAgentActivity(task, def, status)}</span>
+            <span className="crew-member__status">{crewStatusLabel(status)}</span>
+            {def.id === "reviewer" && <ReviewerSpecialistDetails task={task} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Direction E: prose rendering helpers ────────────────────────────────────
+// Parse @role mentions and leading re: <role> · <ref> quote lines from agent prose.
+
+function renderMentions(text: string): React.ReactNode[] {
+  const parts = text.split(/(@\w+)/g);
+  return parts.map((part, i) =>
+    /^@\w+$/.test(part)
+      ? <span key={i} className="team-mention">{part}</span>
+      : <span key={i}>{part}</span>
+  );
+}
+
+function extractQuoteRef(body: string): { quoteRole: string; quoteRef: string; rest: string } | null {
+  // Matches a leading line like: re: Security Reviewer · /api/budget
+  const match = body.match(/^re:\s*([^·\n]+?)(?:\s*·\s*([^\n]+))?\n([\s\S]*)$/i);
+  if (!match) return null;
+  return {
+    quoteRole: match[1]?.trim() ?? "",
+    quoteRef: match[2]?.trim() ?? "",
+    rest: match[3]?.trim() ?? "",
+  };
+}
+
+function AgentProse({ body }: { body: string }) {
+  const quote = extractQuoteRef(body);
+  const text = quote ? quote.rest : body;
+  const paragraphs = text.split(/\n{2,}/).filter(Boolean);
+  return (
+    <div className="team-turn__prose">
+      {quote && (
+        <div className="team-quote">
+          <div className="team-quote__head">re: {quote.quoteRole}{quote.quoteRef ? ` · ${quote.quoteRef}` : ""}</div>
+          <div className="team-quote__body">{quote.quoteRef || quote.quoteRole}</div>
+        </div>
+      )}
+      {paragraphs.map((para, i) => (
+        <p key={i} style={{ margin: "0 0 0.4em" }}>{renderMentions(para)}</p>
+      ))}
+    </div>
+  );
+}
+
+// ─── Direction E: TeamRoom ────────────────────────────────────────────────────
+// Replaces TeamConversationPanel + LiveWorkingBubble for the team stream.
+
+const ROLE_GLYPHS: Partial<Record<TeamMessageRole, string>> = {
+  pm: "PM",
+  architect: "A",
+  planner: "P",
+  lead: "L",
+  tester: "T",
+  architecture_reviewer: "AR",
+  security_reviewer: "S",
+  performance_reviewer: "PR",
+  maintainability_reviewer: "M",
+  teammate: "R",
+  summarizer: "SM",
+  plan: "P",
+  task: "T",
+  note: "N",
+  agent: "?",
+};
+
+function teamTurnGlyph(role: TeamMessageRole): string {
+  return ROLE_GLYPHS[role] ?? "?";
+}
+
+function teamTurnIsActive(role: TeamMessageRole): boolean {
+  return role === "lead";
+}
+
+function LaneMatrix({ lanes }: { lanes: LaneInfo[] }) {
+  if (!lanes || lanes.length < 2) return null;
+  return (
+    <div className="lane-matrix" role="table" aria-label="Parallel build lanes">
+      <div className="lane-matrix__head" role="row">
+        <span role="columnheader" aria-label="Status" />
+        <span role="columnheader">lane</span>
+        <span role="columnheader">files</span>
+        <span role="columnheader">progress</span>
+      </div>
+      {lanes.map((l) => {
+        const isDone = l.status === "done";
+        const isRunning = l.status === "running";
+        const isFailed = l.status === "failed";
+        const isSkipped = l.status === "skipped";
+        const statusClass = isDone ? "is-ok" : isRunning ? "is-run" : isFailed ? "is-err" : isSkipped ? "is-na" : "is-queued";
+        const pctLabel = isDone ? "done" : l.pct != null ? `${l.pct}%` : "--";
+        return (
+          <div key={l.lane} className={`lane-matrix__row ${statusClass}`} role="row">
+            <span className="lane-matrix__glyph" role="cell" aria-hidden="true" />
+            <span className="lane-matrix__name" role="cell">{l.lane}</span>
+            <span className="lane-matrix__files" role="cell" title={l.files?.join(", ")}>
+              {l.files && l.files.length > 0
+                ? l.files.slice(0, 2).map((f) => <code key={f}>{f.split("/").pop()}</code>)
+                : <span>--</span>}
+              {l.files && l.files.length > 2 && <span className="lane-matrix__more">+{l.files.length - 2}</span>}
+            </span>
+            <span className="lane-matrix__pct" role="cell">{pctLabel}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function isSpecialistRole(role: TeamMessageRole) {
+  return role === "architecture_reviewer" ||
+    role === "security_reviewer" ||
+    role === "performance_reviewer" ||
+    role === "maintainability_reviewer";
+}
+
+function specialistRoleLabel(role: TeamMessageRole) {
+  const id = role.toString();
+  return SPECIALIST_REVIEW_LABELS[id] ?? "Review";
+}
+
+function ensureSentence(value: string) {
+  const clean = value.trim().replace(/\s+/g, " ");
+  if (!clean) return "";
+  return /[.!?]$/.test(clean) ? clean : `${clean}.`;
+}
+
+function firstReadableLine(body: string) {
+  return body
+    .split(/\n+/)
+    .map((line) => line.trim().replace(/^[-*]\s*/, ""))
+    .find((line) => {
+      if (!line) return false;
+      if (/^(```|#{1,6}\s|commands?:|runner:|status:)/i.test(line)) return false;
+      if (/^(TESTER|TEAMMATE|SECURITY REVIEW|PERFORMANCE REVIEW|MAINTAINABILITY REVIEW|ARCHITECTURE REVIEW):/i.test(line)) return false;
+      return true;
+    }) ?? "";
+}
+
+function shortSentence(body: string) {
+  const line = firstReadableLine(body);
+  if (!line) return "";
+  const match = line.match(/^(.{18,180}?[.!?])(?:\s|$)/);
+  return ensureSentence(match?.[1] ?? line.slice(0, 180));
+}
+
+function teamTurnDisplayTitle(message: TeamMessage) {
+  return isSpecialistRole(message.role) ? "Reviewer" : message.title;
+}
+
+function teamTurnSummary(message: TeamMessage, body: string) {
+  const verdict = reviewerVerdict(message);
+  if (message.role === "tester") {
+    if (/TESTER:\s*PASSED/i.test(message.body)) return "Good. Build passed. I'm checking runtime behavior now.";
+    if (/TESTER:\s*FAILED/i.test(message.body)) return "I found a validation failure. Details are below.";
+    return shortSentence(body) || "I'm running the validation suite.";
+  }
+  if (message.role === "lead") {
+    const first = shortSentence(body);
+    if (!first) return "I'm implementing the selected route.";
+    return /^I\b/i.test(first) ? first : `I finished the implementation pass. ${first}`;
+  }
+  if (message.role === "pm") {
+    return shortSentence(body) || "I found multiple useful routes. Pick the one the team should take first.";
+  }
+  if (message.role === "architect") {
+    const first = shortSentence(body);
+    return first ? `I'm checking the approach boundaries. ${first}` : "I'm checking the approach boundaries.";
+  }
+  if (message.role === "planner" || message.role === "plan") {
+    return shortSentence(body) || "I turned the selected route into a build plan.";
+  }
+  if (isSpecialistRole(message.role)) {
+    const label = specialistRoleLabel(message.role);
+    if (verdict.changesRequested) return `${label} concern detected. I'm sending it back with details.`;
+    if (verdict.approved) return `${label}: no findings.`;
+    return shortSentence(body) || `${label} review is in progress.`;
+  }
+  if (message.role === "teammate") {
+    if (verdict.approved) return "Looks good. No blocking review issues.";
+    if (verdict.changesRequested) return "I found review changes. Details are below.";
+    return shortSentence(body) || "I'm reviewing quality gates.";
+  }
+  if (message.role === "summarizer") return "I saved the run summary and project notes.";
+  return shortSentence(body);
+}
+
+function shouldShowTeamMessage(message: TeamMessage) {
+  if (!isSpecialistRole(message.role)) return true;
+  const verdict = reviewerVerdict(message);
+  return verdict.changesRequested || /failed|error|blocked|concern/i.test(verdict.displayBody);
+}
+
+function shouldShowTurnDetails(body: string, summary: string) {
+  if (!body.trim()) return false;
+  if (!summary.trim()) return true;
+  const normalizedBody = body.trim().replace(/\s+/g, " ");
+  const normalizedSummary = summary.trim().replace(/\s+/g, " ");
+  return normalizedBody.length > normalizedSummary.length + 24 || normalizedBody !== normalizedSummary;
+}
+
+function TeamTurn({ message, isLast, lanes, synthetic }: { message: TeamMessage; isLast: boolean; lanes?: LaneInfo[]; synthetic?: boolean }) {
+  const body = teamRoomBody(message);
+  const { approved, changesRequested } = reviewerVerdict(message);
+  const testerPassed = message.role === "tester" && /TESTER:\s*PASSED/i.test(message.body);
+  const testerFailed = message.role === "tester" && /TESTER:\s*FAILED/i.test(message.body);
+  const glyph = teamTurnGlyph(message.role);
+  const active = isLast && teamTurnIsActive(message.role);
+  const summary = teamTurnSummary(message, body);
+  const showDetails = shouldShowTurnDetails(body, summary);
+
+  return (
+    <div className={`team-turn${active ? " is-active" : ""}${synthetic ? " is-synthetic" : ""}`} role="article" aria-label={`${message.title} turn`}>
+      <div className="team-turn__glyph" aria-hidden="true">{glyph}</div>
+      <div className="team-turn__body">
+        <div className="team-turn__head">
+          <span className="team-turn__who">{teamTurnDisplayTitle(message)}</span>
+          <span className="team-turn__runner">{teamRoomRoleKind(message.role)}</span>
+          {message.timestamp && <time className="team-turn__time">{timestampLabel(message.timestamp)}</time>}
+        </div>
+        {summary && <p className="team-turn__summary">{summary}</p>}
+        {showDetails && (
+          <details className="team-turn__details">
+            <summary>Details</summary>
+            <AgentProse body={body} />
+          </details>
+        )}
+        {!summary && body && !showDetails && <AgentProse body={body} />}
+        {message.role === "lead" && lanes && lanes.length >= 2 && <LaneMatrix lanes={lanes} />}
+        {(approved || changesRequested || testerPassed || testerFailed) && (
+          <div className={`team-verdict ${approved || testerPassed ? "is-ok" : changesRequested ? "is-warn" : "is-err"}`}>
+            {approved || testerPassed ? "[ok]" : "[!]"}
+            {" "}
+            {approved ? "approved" : changesRequested ? "changes requested" : testerPassed ? "passed" : "failed"}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorkingLine({ project, projectEvents }: { project: ProjectRecord | null; projectEvents: ConsoleEntry[] }) {
+  const activeRun = newestActiveRun(project);
+  if (!project || !activeRun) return null;
+  const items = activityTimeline(project, projectEvents, null);
+  const latest = items[items.length - 1];
+  const detail = latest?.text ?? "Getting oriented...";
+  const role = activeRun.mode as TeamMessageRole;
+  const glyph = teamTurnGlyph(role) ?? "T";
+  return (
+    <div className="working-line" aria-live="polite" aria-label="Agent working">
+      <div className="working-line__glyph" aria-hidden="true">{glyph}</div>
+      <div className="working-line__text">
+        <span>{detail}</span>
+        <span className="working-line__cursor" aria-hidden="true" />
+      </div>
+    </div>
+  );
+}
+
+function syntheticTurnsFromTask(task: DualithTask): TeamMessage[] {
+  const turns: TeamMessage[] = [];
+  const seen = new Set<string>();
+  const agents = crewAgentsForTask(task);
+  for (const def of agents) {
+    const status = crewAgentStatus(task, def);
+    if (status === "waiting" || status === "skipped" || status === "not_captured" || status === "n/a") continue;
+    const key = def.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const role = (def.id === "reviewer" ? "teammate" : def.id) as TeamMessageRole;
+    const statusLabel = crewAgentActivity(task, def, status);
+    const runner = crewAgentRunner(task, def);
+    const runnerLine = runner ? `I'm running this turn through ${runner.toUpperCase()}. ` : "";
+    const body = `${runnerLine}${ensureSentence(statusLabel)}`;
+    const ev = [...(task.events ?? [])].reverse().find((e) => e.role === (def.eventRole ?? def.phase ?? def.id));
+    turns.push({
+      role,
+      title: def.label,
+      timestamp: ev?.timestamp ?? task.created_at ?? "",
+      body,
+    });
+  }
+  return turns;
+}
+
+function TeamRoom({
+  task,
+  messages,
+  project,
+  projectEvents,
+}: {
+  task: DualithTask | null;
+  messages: TeamMessage[];
+  project: ProjectRecord | null;
+  projectEvents: ConsoleEntry[];
+}) {
+  if (!task) return null;
+  const visible = messages.filter((m) => m.body.trim() && m.role !== "task" && shouldShowTeamMessage(m));
+  const activeRun = newestActiveRun(project);
+  const fallbackTurns = visible.length === 0 && !activeRun ? syntheticTurnsFromTask(task) : [];
+
+  return (
+    <section aria-label="Team room">
+      <div className="team-room">
+        {visible.length > 0 ? visible.map((msg, i) => {
+          const isLeadMsg = msg.role === "lead";
+          const leadLanes = isLeadMsg ? (task?.phases?.lead?.lanes ?? undefined) : undefined;
+          return (
+            <TeamTurn
+              key={`${msg.role}-${msg.timestamp}-${i}`}
+              message={msg}
+              isLast={i === visible.length - 1}
+              lanes={leadLanes}
+            />
+          );
+        }) : fallbackTurns.map((msg, i) => (
+          <TeamTurn
+            key={`synthetic-${msg.role}-${i}`}
+            message={msg}
+            isLast={i === fallbackTurns.length - 1}
+            synthetic
+          />
+        ))}
+        {activeRun && <WorkingLine project={project} projectEvents={projectEvents} />}
+        {visible.length === 0 && fallbackTurns.length === 0 && !activeRun && (
+          <div className="team-room__waiting">
+            <span className="team-room__waiting-glyph">T</span>
+            <span>Team is standing by - send a task to begin.</span>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function TaskPhaseRail({ task }: { task: DualithTask | null }) {
+  return (
+    <div className="dualith-phase-rail" aria-label="Task phases">
+      {taskPhaseOrder.map((phase) => {
+        const status = taskPhaseStatus(task, phase.id);
+        return (
+          <div key={phase.id} className={`dualith-phase ${phaseToneClass(status)}`}>
+            <span className="dualith-phase__short">{phase.short}</span>
+            <span className="dualith-phase__status">{phaseStatusLabel(status)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+type TeamRosterAgent = {
+  id: string;
+  label: string;
+  phase?: TaskPhaseName;
+  reviewer?: string;
+  eventRole?: string;
+};
+
+const specialistRosterAgents: TeamRosterAgent[] = [
+  { id: "architecture_reviewer", label: "Architecture Review", reviewer: "architecture_reviewer" },
+  { id: "security_reviewer", label: "Security Review", reviewer: "security_reviewer" },
+  { id: "performance_reviewer", label: "Performance Review", reviewer: "performance_reviewer" },
+  { id: "maintainability_reviewer", label: "Maintainability Review", reviewer: "maintainability_reviewer" },
+];
+
+const finalReviewAgent: TeamRosterAgent = { id: "final_reviewer", label: "Final Reviewer", phase: "reviewer", eventRole: "reviewer" };
+const summarizerAgent: TeamRosterAgent = { id: "summarizer", label: "Summarizer", eventRole: "summarizer" };
+
+function rosterAgentsForTask(task: DualithTask | null): TeamRosterAgent[] {
+  if (!task) return [];
+  const core = [
+    { id: "lead", label: "Lead", phase: "lead" as TaskPhaseName },
+    { id: "tester", label: "Tester", phase: "tester" as TaskPhaseName },
+    ...specialistRosterAgents,
+    finalReviewAgent,
+    summarizerAgent,
+  ];
+  if (task.workflow_id === "plan-first") {
+    return [
+      { id: "architect", label: "Architect", phase: "architect" },
+      { id: "planner", label: "Planner", phase: "planner" },
+      ...core,
+    ];
+  }
+  if (task.workflow_id === "pm-clarify") {
+    return [
+      { id: "pm", label: "PM", phase: "pm" },
+      ...core,
+    ];
+  }
+  if (task.workflow_id === "build-review-loop") {
+    return [
+      { id: "builder", label: "Builder", phase: "lead" },
+      { id: "auditor", label: "Auditor", phase: "reviewer", eventRole: "reviewer" },
+    ];
+  }
+  return core;
+}
+
+function latestTaskEventStatus(task: DualithTask, role: string) {
+  const event = [...(task.events ?? [])].reverse().find((item) => item.role === role);
+  return event?.status || "";
+}
+
+function rosterAgentStatus(task: DualithTask, agent: TeamRosterAgent) {
+  if (agent.reviewer) {
+    const review = task.specialist_reviews?.find((item) => item.id === agent.reviewer);
+    if (review) return review.status || "pending";
+    return task.status === "completed" || task.status === "failed" ? "not_captured" : "pending";
+  }
+  if (agent.id === "summarizer") {
+    const eventStatus = latestTaskEventStatus(task, "summarizer");
+    if (eventStatus) return eventStatus;
+    return task.status === "completed" || task.status === "failed" ? "not_captured" : "pending";
+  }
+  if (agent.id === "final_reviewer") {
+    const eventStatus = latestTaskEventStatus(task, "reviewer");
+    if (eventStatus) return eventStatus;
+  }
+  return agent.phase ? taskPhaseStatus(task, agent.phase) : "waiting";
+}
+
+function rosterStatusLabel(status: string) {
+  if (status === "not_captured") return "not captured";
+  if (status === "specialists_approved") return "specialists ok";
+  return phaseStatusLabel(status);
+}
+
+function TeamRoster({ task }: { task: DualithTask | null }) {
+  const agents = rosterAgentsForTask(task);
+  if (!task || agents.length === 0) return null;
+  return (
+    <div className="dualith-agent-roster" aria-label="Team roster">
+      {agents.map((agent) => {
+        const status = rosterAgentStatus(task, agent);
+        return (
+          <div key={agent.id} className={`dualith-agent-roster__item ${phaseToneClass(status === "not_captured" ? "skipped" : status)}`}>
+            <span>{agent.label}</span>
+            <strong>{rosterStatusLabel(status)}</strong>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function selectedAgenticChoiceFromPrompt(prompt: string) {
+  const selected = prompt.match(/^Agentic choice selected:\s*(.+)$/im)?.[1]?.trim() ?? "";
+  const reason = prompt.match(/^Reason:\s*(.+)$/im)?.[1]?.trim() ?? "";
+  if (!selected) return null;
+  return { selected, reason };
+}
+
+function decisionEventParts(event: TaskEvent | undefined) {
+  if (!event) return null;
+  const selected = event.body?.match(/selected:\s*(.+)$/im)?.[1]?.trim() || event.title;
+  const reason = event.body?.match(/reason:\s*(.+)$/im)?.[1]?.trim() || event.body || "";
+  return { selected, reason };
+}
+
+function latestTaskDecision(task: DualithTask | null) {
+  const decisions = task?.decisions?.filter((decision) => decision.selected?.trim()) ?? [];
+  return decisions.length ? decisions[decisions.length - 1] : null;
+}
+
+function decisionHighlight(project: ProjectRecord, task: DualithTask | null) {
+  const blocked = project.human_input?.blocked;
+  const options = project.human_input?.options ?? [];
+  if (blocked) {
+    return {
+      label: options.length ? "Choice gate" : "Decision needed",
+      selected: options.length ? "Choose one route" : "Waiting for your answer",
+      reason: project.human_input?.question || "The team needs a decision before continuing.",
+      source: "human_input",
+      timestamp: "",
+      status: "blocked",
+    };
+  }
+  if (project.plan_pending) {
+    return {
+      label: "Plan approval",
+      selected: "Approve or revise the plan",
+      reason: "The team is waiting before implementation continues.",
+      source: "plan",
+      timestamp: "",
+      status: "blocked",
+    };
+  }
+  const latestDecision = latestTaskDecision(task);
+  if (latestDecision) return latestDecision;
+  const promptChoice = selectedAgenticChoiceFromPrompt(task?.prompt ?? "");
+  if (promptChoice) {
+    return {
+      label: "Decision",
+      selected: promptChoice.selected,
+      reason: promptChoice.reason || "Selected from the agentic choice menu.",
+      source: "prompt",
+      timestamp: "",
+      status: "",
+    };
+  }
+  const decisionEvent = task?.events?.filter((event) => event.type === "decision").slice(-1)[0];
+  const eventParts = decisionEventParts(decisionEvent);
+  if (eventParts) {
+    return {
+      label: "Decision",
+      selected: eventParts.selected,
+      reason: eventParts.reason || "Recorded by the team during this run.",
+      source: decisionEvent?.role ?? "event",
+      timestamp: decisionEvent?.timestamp ?? "",
+      status: decisionEvent?.status ?? "",
+    };
+  }
+  return null;
+}
+
+function DecisionPanel({ project, task, onSubmit }: { project: ProjectRecord; task: DualithTask | null; onSubmit?: (projectName: string, answer: string) => Promise<void> }) {
+  const blocked = project.human_input?.blocked;
+  const options = project.human_input?.options ?? [];
+  const highlight = decisionHighlight(project, task);
+  const priorDecisions = (task?.decisions ?? []).filter((decision) => decision.selected?.trim()).slice(0, -1).reverse();
+  if (!highlight) return null;
+
+  return (
+    <section className={`dualith-workspace-band dualith-decision-card ${blocked || project.plan_pending ? "is-decision" : ""}`}>
+      <div className="dualith-decision-card__head">
+        <div>
+          <div className="dualith-workspace-band__label">{highlight.label}</div>
+          {highlight.timestamp && <time>{timestampLabel(highlight.timestamp)}</time>}
+        </div>
+        {highlight.status && <span>{highlight.status.replace(/_/g, " ")}</span>}
+      </div>
+      <div className="dualith-decision-card__grid">
+        <span>Selected</span>
+        <strong>{highlight.selected}</strong>
+        <span>Reason</span>
+        <p>{highlight.reason}</p>
+      </div>
+      {blocked && options.length > 0 && onSubmit && (
+        <div className="dualith-decision-options">
+          {options.map((option) => {
+            const answer = `[${option.id}] ${option.label}${option.description ? ` - ${option.description}` : ""}`;
+            return (
+              <button key={option.id} type="button" onClick={() => void onSubmit(project.name, answer)} className={option.recommended ? "is-recommended" : ""}>
+                <span>[{option.id}] {option.label}{option.recommended ? " / recommended" : ""}</span>
+                {option.description && <em>{option.description}</em>}
+                <strong>Choose route</strong>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {priorDecisions.length > 0 && (
+        <details className="dualith-decision-history">
+          <summary>{priorDecisions.length} previous decision{priorDecisions.length === 1 ? "" : "s"}</summary>
+          <div className="dualith-decision-history__list">
+            {priorDecisions.map((decision) => (
+              <div key={decision.id} className="dualith-decision-history__item">
+                <span>{decision.label || "Decision"}</span>
+                <strong>{decision.selected}</strong>
+                {decision.timestamp && <time>{timestampLabel(decision.timestamp)}</time>}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </section>
+  );
+}
+
+function priorityLabel(priority: string) {
+  return priority && priority !== "other" ? priority.toUpperCase() : "Note";
+}
+
+function priorityTone(priority: string): "green" | "amber" | "red" | "cyan" | "muted" {
+  if (priority === "p0" || priority === "p1") return "red";
+  if (priority === "p2" || priority === "p3") return "amber";
+  return "muted";
+}
+
+function attentionCountLabel(attention: ProjectAttention) {
+  const counts = attention.priority_counts ?? { p0: 0, p1: 0, p2: 0, p3: 0, other: 0 };
+  const parts = [
+    counts.p0 ? `${counts.p0} P0` : "",
+    counts.p1 ? `${counts.p1} P1` : "",
+    counts.p2 ? `${counts.p2} P2` : "",
+    counts.p3 ? `${counts.p3} P3` : "",
+    counts.other ? `${counts.other} other` : "",
+  ].filter(Boolean);
+  return parts.join(" / ") || `${attention.items.length} notes`;
+}
+
+function AttentionPanel({ project, onAddressNotes }: { project: ProjectRecord; onAddressNotes?: (projectName: string) => Promise<void> }) {
+  const attention = attentionState(project);
+  const [pending, setPending] = useState(false);
+  const [errorText, setErrorText] = useState<string | null>(null);
+  if (attention.status !== "attention" && attention.status !== "stale") return null;
+  const topItems = attention.items.slice(0, 4);
+
+  const address = async () => {
+    if (!onAddressNotes) return;
+    setPending(true);
+    setErrorText(null);
+    try {
+      await onAddressNotes(project.name);
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : "unknown");
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <section className={`dualith-attention-panel ${attention.status === "stale" ? "is-stale" : ""}`}>
+      <div className="dualith-attention-panel__header">
+        <div className="min-w-0">
+          <div className="dualith-workspace-band__label">{attention.status === "stale" ? "Review notes may be stale" : "AI notes need work"}</div>
+          <div className="dualith-workspace-band__body">{attention.summary || "AI notes need work."}</div>
+          <div className="dualith-workspace-band__meta">
+            {attention.source || "AI notes"}{attention.updated_at ? ` / ${timestampLabel(attention.updated_at)}` : ""} / {attentionCountLabel(attention)}
+          </div>
+        </div>
+        <button type="button" disabled={!onAddressNotes || pending} onClick={() => void address()}>
+          {pending ? "Starting..." : "Address notes"}
+        </button>
+      </div>
+      {topItems.length > 0 && (
+        <div className="dualith-attention-list">
+          {topItems.map((item, index) => (
+            <div key={`${item.priority}-${item.title}-${index}`} className="dualith-attention-item">
+              <Badge label={priorityLabel(item.priority)} tone={priorityTone(item.priority)} />
+              <span>{item.title || item.text}</span>
+              {item.suggested_command && <em>{item.suggested_command}</em>}
+            </div>
+          ))}
+        </div>
+      )}
+      {errorText && <div className="dualith-attention-error">Error: {errorText}</div>}
+    </section>
+  );
+}
+
+function ArtifactStrip({ artifacts }: { artifacts?: ArtifactSnapshot }) {
+  const entries = [
+    ["Architecture", artifacts?.architecture],
+    ["Decisions", artifacts?.decisions],
+    ["Memory", artifacts?.project_memory],
+    ["Plan", artifacts?.plan],
+    ["Feedback", artifacts?.feedback],
+    ["Lessons", artifacts?.lessons],
+  ] as const;
+  return (
+    <div className="dualith-artifact-strip">
+      {entries.map(([label, content]) => {
+        const summary = firstMeaningfulLine(content ?? "");
+        return (
+          <div key={label} className={`dualith-artifact ${summary ? "is-ready" : ""}`}>
+            <span>{label}</span>
+            <strong>{summary || "empty"}</strong>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TaskActivityList({ task, projectEvents }: { task: DualithTask | null; projectEvents: ConsoleEntry[] }) {
+  const taskEvents = task?.events?.slice(-18) ?? [];
+  const fallbackEvents: TaskEvent[] = projectEvents.slice(-5).map((entry, index) => ({
+    id: `${entry.timestamp}-${entry.action}-${index}`,
+    type: "system",
+    title: humanVerb(entry.action),
+    body: entry.path,
+    timestamp: entry.timestamp,
+  }));
+  const events = taskEvents.length ? taskEvents : fallbackEvents;
+  return (
+    <div className="dualith-task-events">
+      {events.map((event) => (
+        <div key={event.id} className="dualith-task-event">
+          <span className={`dualith-task-event__type is-${event.type}`}>{eventTypeLabel(event.type)}</span>
+          <span className="dualith-task-event__title">{event.title}</span>
+          {event.timestamp && <span className="dualith-task-event__time">{timestampLabel(event.timestamp)}</span>}
+          {event.body && <span className="dualith-task-event__body">{event.body}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SpecialistReviewLane({ task }: { task: DualithTask | null }) {
+  const reviews = specialistReviewItems(task);
+  if (!reviews.length) {
+    const expectsSpecialists = Boolean(task && ["auto-team", "plan-first", "pm-clarify"].includes(task.workflow_id));
+    const completedTask = task?.status === "completed" || task?.status === "failed";
+    return (
+      <div className="dualith-muted-line">
+        {expectsSpecialists && completedTask ? "No specialist review record was captured for this task." : "Specialist reviewers appear after Tester passes."}
+      </div>
+    );
+  }
+  return (
+    <div className="dualith-review-lane">
+      {reviews.map((review) => {
+        const display = specialistReviewDisplay(review, task);
+        return (
+          <div key={review.id} className="dualith-review-lane__item">
+            <span>{display.label}</span>
+            <Badge label={display.statusLabel} tone={display.tone} />
+            <em>{display.summary}</em>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function OwnershipLane({ task }: { task: DualithTask | null }) {
+  const claimed = task?.ownership?.claimed_paths ?? [];
+  return (
+    <div className="dualith-ownership">
+      <div className="dualith-minihead">Sequential ownership</div>
+      {claimed.length ? (
+        <div className="dualith-ownership__paths">
+          {claimed.slice(-6).map((item) => (
+            <span key={`${item.owner}-${item.path}`} title={item.path}>{item.owner}: {item.path}</span>
+          ))}
+        </div>
+      ) : (
+        <div className="dualith-muted-line">Lead claims changed files after each write phase.</div>
+      )}
+    </div>
+  );
+}
+
+function SubagentLanes({ task }: { task: DualithTask | null }) {
+  const lanes = task?.subagents ?? [];
+  return (
+    <div className="dualith-subagent-lanes">
+      {lanes.map((lane) => (
+        <div key={lane.id} className="dualith-subagent-lane">
+          <span>{lane.label}</span>
+          <strong>{lane.status}</strong>
+          <em>{lane.scope}</em>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TaskWorkspace({
+  project,
+  projectEvents,
+  onHumanAnswer,
+  onAddressNotes,
+  teamMessages = [],
+}: {
+  project: ProjectRecord | null;
+  projectEvents: ConsoleEntry[];
+  onHumanAnswer?: (projectName: string, answer: string) => Promise<void>;
+  onAddressNotes?: (projectName: string) => Promise<void>;
+  teamMessages?: TeamMessage[];
+}) {
+  if (!project) return null;
+  const task = selectedTask(project);
+  const counts = projectTaskCounts(project);
+  const title = task?.title || "No active task";
+  const status = task?.status || "idle";
+  const hasTaskCounts = taskCountTotal(counts) > 0;
+  const workflowLabel = task ? (taskWorkflowLabels[task.workflow_id] ?? task.workflow_id) : "";
+  return (
+    <section className="dualith-workspace-shell">
+      <div className="dualith-workspace-shell__header">
+        <div className="min-w-0">
+          <div className="dualith-workspace-kicker">Engineering workspace</div>
+          <h2>{title}</h2>
+          <p>{task?.prompt || "Create a task from the composer. The team queue, phases, decisions, and artifacts will appear here."}</p>
+          {task && (
+            <div className="dualith-workspace-meta">
+              <span>{workflowLabel}</span>
+              <span>{task.runner === "auto" ? "policy routed" : runnerChoiceLabels[task.runner]}</span>
+            </div>
+          )}
+        </div>
+        <div className="dualith-workspace-metrics">
+          <Badge label={status} tone={taskStatusTone(status)} />
+          {hasTaskCounts && (
+            <>
+              <span>{counts.pending} queued</span>
+              <span>{counts.completed} done</span>
+              {counts.failed > 0 && <span className="text-danger">{counts.failed} failed</span>}
+            </>
+          )}
+        </div>
+      </div>
+
+      <CrewStrip task={task} />
+      <DecisionPanel project={project} task={task} onSubmit={onHumanAnswer} />
+      <AttentionPanel project={project} onAddressNotes={onAddressNotes} />
+      <TeamRoom task={task} messages={teamMessages} project={project} projectEvents={projectEvents} />
+    </section>
   );
 }
 
@@ -1781,14 +3135,56 @@ type ChatMessage = {
   kind: "ask" | "kickoff" | "answer" | "plan" | "circuit-breaker";
 };
 
+type TeamMessageRole =
+  | "task"
+  | "pm"
+  | "architect"
+  | "planner"
+  | "lead"
+  | "tester"
+  | "architecture_reviewer"
+  | "security_reviewer"
+  | "performance_reviewer"
+  | "maintainability_reviewer"
+  | "teammate"
+  | "summarizer"
+  | "plan"
+  | "note"
+  | "agent";
+
 type TeamMessage = {
-  role: "task" | "lead" | "teammate" | "tester" | "plan" | "note";
+  role: TeamMessageRole;
   title: string;
   timestamp: string;
   body: string;
 };
 
-// Parse AGENT_CHAT.md (### Lead / ### Teammate / ### Task / ### Note) into the inter-agent dialogue.
+function splitAgentHeader(header: string) {
+  const [title = "", timestamp = ""] = header.split(/\s+-\s+/);
+  return { title: title.trim(), timestamp };
+}
+
+function agentRoleFromHeader(header: string): { role: TeamMessageRole; title: string } {
+  const { title } = splitAgentHeader(header);
+  const lower = title.toLowerCase();
+  if (lower.startsWith("architecture reviewer")) return { role: "architecture_reviewer", title: "Architecture Reviewer" };
+  if (lower.startsWith("security reviewer")) return { role: "security_reviewer", title: "Security Reviewer" };
+  if (lower.startsWith("performance reviewer")) return { role: "performance_reviewer", title: "Performance Reviewer" };
+  if (lower.startsWith("maintainability reviewer")) return { role: "maintainability_reviewer", title: "Maintainability Reviewer" };
+  if (lower.startsWith("pm") || lower.startsWith("product manager")) return { role: "pm", title: "PM" };
+  if (lower.startsWith("architect")) return { role: "architect", title: "Architect" };
+  if (lower.startsWith("planner")) return { role: "planner", title: "Planner" };
+  if (lower.startsWith("lead")) return { role: "lead", title: title || "Lead" };
+  if (lower.startsWith("tester")) return { role: "tester", title: "Tester" };
+  if (lower.startsWith("teammate") || lower.startsWith("reviewer")) return { role: "teammate", title: "Final Reviewer" };
+  if (lower.startsWith("summarizer")) return { role: "summarizer", title: "Summarizer" };
+  if (lower.startsWith("plan")) return { role: "plan", title: "Plan" };
+  if (lower.startsWith("task")) return { role: "task", title: "Team task" };
+  if (lower.startsWith("note")) return { role: "note", title: "Note" };
+  return { role: "agent", title: title || "Agent" };
+}
+
+// Parse AGENT_CHAT.md into the visible inter-agent dialogue.
 function parseAgentChat(raw: string): TeamMessage[] {
   const text = raw.replace(/^﻿/, "").trim();
   if (!text) return [];
@@ -1798,17 +3194,146 @@ function parseAgentChat(raw: string): TeamMessage[] {
     const newline = section.indexOf("\n");
     const header = (newline === -1 ? section : section.slice(0, newline)).trim();
     const body = (newline === -1 ? "" : section.slice(newline + 1)).trim();
-    const lower = header.toLowerCase();
-    const [, timestamp = ""] = header.split(/\s+-\s+/);
-    if (lower.startsWith("lead")) messages.push({ role: "lead", title: header.split(/\s+-\s+/)[0], timestamp, body });
-    else if (lower.startsWith("teammate")) messages.push({ role: "teammate", title: header.split(/\s+-\s+/)[0], timestamp, body });
-    else if (lower.startsWith("tester")) messages.push({ role: "tester", title: "Tester", timestamp, body });
-    else if (lower.startsWith("plan")) messages.push({ role: "plan", title: "Plan", timestamp, body });
-    else if (lower.startsWith("task")) messages.push({ role: "task", title: "Team task", timestamp, body });
-    else if (lower.startsWith("note")) messages.push({ role: "note", title: "Note", timestamp, body });
-    else messages.push({ role: "lead", title: header.split(/\s+-\s+/)[0] || "Agent", timestamp, body });
+    const { timestamp } = splitAgentHeader(header);
+    const role = agentRoleFromHeader(header);
+    messages.push({ ...role, timestamp, body });
   }
   return messages;
+}
+
+function stripVerdictLine(body: string, pattern: RegExp) {
+  return body.replace(pattern, "").trim();
+}
+
+function reviewerVerdict(message: TeamMessage) {
+  const verdicts: Partial<Record<TeamMessageRole, { approved: RegExp; changes: RegExp; strip: RegExp }>> = {
+    teammate: {
+      approved: /TEAMMATE:\s*APPROVED/i,
+      changes: /TEAMMATE:\s*CHANGES REQUESTED/i,
+      strip: /\nTEAMMATE:\s*(APPROVED|CHANGES REQUESTED)\s*$/i,
+    },
+    architecture_reviewer: {
+      approved: /ARCHITECTURE REVIEW:\s*APPROVED/i,
+      changes: /ARCHITECTURE REVIEW:\s*CHANGES REQUESTED/i,
+      strip: /\nARCHITECTURE REVIEW:\s*(APPROVED|CHANGES REQUESTED)\s*$/i,
+    },
+    security_reviewer: {
+      approved: /SECURITY REVIEW:\s*APPROVED/i,
+      changes: /SECURITY REVIEW:\s*CHANGES REQUESTED/i,
+      strip: /\nSECURITY REVIEW:\s*(APPROVED|CHANGES REQUESTED)\s*$/i,
+    },
+    performance_reviewer: {
+      approved: /PERFORMANCE REVIEW:\s*APPROVED/i,
+      changes: /PERFORMANCE REVIEW:\s*CHANGES REQUESTED/i,
+      strip: /\nPERFORMANCE REVIEW:\s*(APPROVED|CHANGES REQUESTED)\s*$/i,
+    },
+    maintainability_reviewer: {
+      approved: /MAINTAINABILITY REVIEW:\s*APPROVED/i,
+      changes: /MAINTAINABILITY REVIEW:\s*CHANGES REQUESTED/i,
+      strip: /\nMAINTAINABILITY REVIEW:\s*(APPROVED|CHANGES REQUESTED)\s*$/i,
+    },
+  };
+  const rules = verdicts[message.role];
+  if (!rules) return { approved: false, changesRequested: false, displayBody: message.body };
+  return {
+    approved: rules.approved.test(message.body),
+    changesRequested: rules.changes.test(message.body),
+    displayBody: stripVerdictLine(message.body, rules.strip),
+  };
+}
+
+function teamRoomRoleKind(role: TeamMessageRole) {
+  const labels: Record<TeamMessageRole, string> = {
+    task: "brief",
+    pm: "scope",
+    architect: "architecture",
+    planner: "plan",
+    lead: "build",
+    tester: "verify",
+    architecture_reviewer: "review",
+    security_reviewer: "review",
+    performance_reviewer: "review",
+    maintainability_reviewer: "review",
+    teammate: "final review",
+    summarizer: "memory",
+    plan: "plan",
+    note: "note",
+    agent: "agent",
+  };
+  return labels[role] ?? "agent";
+}
+
+function teamRoomBody(message: TeamMessage) {
+  if (message.role === "tester") {
+    return message.body.replace(/\nTESTER:\s*(PASSED|FAILED)\s*$/i, "").trim();
+  }
+  if (
+    message.role === "teammate" ||
+    message.role === "architecture_reviewer" ||
+    message.role === "security_reviewer" ||
+    message.role === "performance_reviewer" ||
+    message.role === "maintainability_reviewer"
+  ) {
+    return reviewerVerdict(message).displayBody;
+  }
+  return message.body.trim();
+}
+
+function teamRoomStatus(message: TeamMessage) {
+  if (message.role === "tester") {
+    if (/TESTER:\s*PASSED/i.test(message.body)) return { label: "passed", tone: "green" as const };
+    if (/TESTER:\s*FAILED/i.test(message.body)) return { label: "failed", tone: "red" as const };
+  }
+  const verdict = reviewerVerdict(message);
+  if (verdict.approved) return { label: "approved", tone: "green" as const };
+  if (verdict.changesRequested) return { label: "changes", tone: "amber" as const };
+  if (message.role === "lead") return { label: "handoff", tone: "cyan" as const };
+  if (message.role === "task") return { label: "kickoff", tone: "muted" as const };
+  if (message.role === "summarizer") return { label: "saved", tone: "muted" as const };
+  return null;
+}
+
+function TeamConversationPanel({ task, messages }: { task: DualithTask | null; messages: TeamMessage[] }) {
+  if (!task) return null;
+  const visible = messages.filter((message) => message.body.trim());
+  return (
+    <section className="dualith-team-room">
+      <div className="dualith-team-room__header">
+        <div>
+          <div className="dualith-minihead">Team conversation</div>
+          <p>Agent handoffs, reviews, objections, and memory updates from AGENT_CHAT.md.</p>
+        </div>
+        <Badge label={visible.length ? `${visible.length} turns` : "waiting"} tone={visible.length ? "cyan" : "muted"} />
+      </div>
+      {visible.length ? (
+        <div className="dualith-team-room__stream">
+          {visible.map((message, index) => {
+            const status = teamRoomStatus(message);
+            const body = teamRoomBody(message);
+            return (
+              <article key={`${message.role}-${message.timestamp}-${index}`} className={`dualith-team-turn is-${message.role}`}>
+                <div className="dualith-team-turn__speaker">
+                  <span>{message.title}</span>
+                  <strong>{teamRoomRoleKind(message.role)}</strong>
+                  {message.timestamp && <em>{timestampLabel(message.timestamp)}</em>}
+                </div>
+                <div className="dualith-team-turn__body">
+                  <div className="dualith-team-turn__meta">
+                    {status && <Badge label={status.label} tone={status.tone} />}
+                  </div>
+                  <FormattedAgentOutput content={body || message.body} />
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="dualith-team-room__empty">
+          The team has not written visible handoffs yet. New V2 runs will record PM, Tester, specialist review, and memory turns here.
+        </div>
+      )}
+    </section>
+  );
 }
 
 function TeamBubble({ message, lead, teammate }: { message: TeamMessage; lead?: RunnerId; teammate?: RunnerId }) {
@@ -1848,7 +3373,7 @@ function TeamBubble({ message, lead, teammate }: { message: TeamMessage; lead?: 
     );
   }
 
-  if (message.role === "plan") {
+  if (message.role === "plan" || message.role === "planner") {
     return (
       <div className="dualith-msg dualith-msg--agent">
         <span className="dualith-msg__role text-accent">Plan · {message.timestamp && timestampLabel(message.timestamp)}</span>
@@ -1859,12 +3384,46 @@ function TeamBubble({ message, lead, teammate }: { message: TeamMessage; lead?: 
     );
   }
 
+  if (message.role === "pm" || message.role === "architect" || message.role === "summarizer" || message.role === "agent") {
+    const accent = message.role === "summarizer" ? "border-line-hard" : "border-accent/35";
+    return (
+      <div className="dualith-msg dualith-msg--agent">
+        <span className="dualith-msg__role">
+          {message.title}{message.timestamp && ` Â· ${timestampLabel(message.timestamp)}`}
+        </span>
+        <div className={`dualith-msg__bubble border-l-2 ${accent}`}>
+          <FormattedAgentOutput content={message.body} />
+        </div>
+      </div>
+    );
+  }
+
+  const isSpecialist =
+    message.role === "architecture_reviewer" ||
+    message.role === "security_reviewer" ||
+    message.role === "performance_reviewer" ||
+    message.role === "maintainability_reviewer";
+  if (isSpecialist) {
+    const { approved, changesRequested, displayBody } = reviewerVerdict(message);
+    const accent = approved ? "border-ok/40" : changesRequested ? "border-warn/40" : "border-line";
+    return (
+      <div className="dualith-msg dualith-msg--agent">
+        <span className="dualith-msg__role">
+          {message.title}{message.timestamp && ` Â· ${timestampLabel(message.timestamp)}`}
+          {approved && <span className="ml-2 text-ok">approved</span>}
+          {changesRequested && <span className="ml-2 text-warn">changes needed</span>}
+        </span>
+        <div className={`dualith-msg__bubble border-l-2 ${accent}`}>
+          <FormattedAgentOutput content={displayBody} />
+        </div>
+      </div>
+    );
+  }
+
   const isLead = message.role === "lead";
   const runner = isLead ? lead : teammate;
-  const approved = /TEAMMATE:\s*APPROVED/i.test(message.body);
-  const changesRequested = /TEAMMATE:\s*CHANGES REQUESTED/i.test(message.body);
+  const { approved, changesRequested, displayBody } = reviewerVerdict(message);
   // Strip the verdict line from display — it's a machine signal, not prose
-  const displayBody = message.body.replace(/\nTEAMMATE:\s*(APPROVED|CHANGES REQUESTED)\s*$/i, "").trim();
 
   // Lead (builder) rounds — show as a full readable bubble (softer than Teammate)
   if (isLead) {
@@ -1987,7 +3546,148 @@ function AgentBubble({ runner, label, timestamp, children }: { runner?: RunnerId
   );
 }
 
-function ConversationThread({ project, projectEvents, results, onApprovePlan }: { project: ProjectRecord | null; projectEvents: ConsoleEntry[]; results: AgentResult[]; onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void> }) {
+function DirectConversation({
+  project,
+  results,
+  onApprovePlan,
+}: {
+  project: ProjectRecord | null;
+  results: AgentResult[];
+  onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const messages = useMemo(() => parseChatHistory(project?.chat_history ?? ""), [project?.chat_history]);
+  const latest = useMemo(() => latestResultForProject(project, results), [project, results]);
+  const latestRunMessage = latest && latest.mode !== "ask" && latest.status !== "stopped" ? latest : null;
+  const statusBubbleVisible = Boolean(latest?.status === "stopped" || (latest?.status === "error" && latest.mode === "ask"));
+  const isEmpty = messages.length === 0 && !latestRunMessage && !statusBubbleVisible;
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length, latest?.id, latest?.status, project?.name]);
+
+  return (
+    <div ref={scrollRef} className="dualith-direct-thread">
+      {isEmpty ? (
+        <div className="dualith-direct-empty">
+          {project ? "Directives and user-facing answers appear here. The team room stays in the center." : "Pick a project to start directing the team."}
+        </div>
+      ) : (
+        <div className="dualith-thread dualith-thread--direct">
+          {messages.map((message, index) => {
+            if (message.role === "user") {
+              return <UserBubble key={`m-${index}`} message={message} projectName={project?.name ?? ""} />;
+            }
+            if (message.role === "plan") {
+              const isPending = project?.plan_pending && index === messages.length - 1;
+              return (
+                <div key={`m-${index}`} className="dualith-msg dualith-msg--agent">
+                  <span className="dualith-msg__role text-accent">
+                    Plan{message.timestamp && ` Â· ${timestampLabel(message.timestamp)}`}
+                  </span>
+                  <div className="dualith-msg__bubble border border-accent/20 bg-accent/5">
+                    <FormattedAgentOutput content={message.body} />
+                  </div>
+                  {isPending && onApprovePlan && project && (
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void onApprovePlan(project.name, true)}
+                        className="rounded-full bg-accent/90 px-4 py-1.5 text-[12px] font-medium text-bg hover:bg-accent"
+                      >
+                        Build
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const comment = prompt("What should be changed in the plan?");
+                          if (comment !== null && project) void onApprovePlan(project.name, false, comment);
+                        }}
+                        className="rounded-full border border-line px-4 py-1.5 text-[12px] font-medium text-muted hover:border-line-hard hover:text-text"
+                      >
+                        Revise
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            }
+            if (message.role === "circuit-breaker") {
+              return (
+                <div key={`m-${index}`} className="dualith-msg dualith-msg--agent">
+                  <span className="dualith-msg__role text-danger">Circuit Breaker</span>
+                  <div className="dualith-msg__bubble border-l-2 border-danger/40 text-sm">
+                    <FormattedAgentOutput content={message.body} />
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <AgentBubble key={`m-${index}`} runner={latest?.runner} label={message.title} timestamp={message.timestamp}>
+                <FormattedAgentOutput content={message.body} />
+              </AgentBubble>
+            );
+          })}
+          {latestRunMessage && (
+            <AgentBubble runner={latestRunMessage.runner} label={`${modeLabels[latestRunMessage.mode]} Â· ${runnerLabels[latestRunMessage.runner]}`} timestamp={latestRunMessage.ended_at}>
+              <div className="mb-2 font-medium text-text-strong">{friendlyResultIntro(latestRunMessage)}</div>
+              {safeResultBody(latestRunMessage) ? (
+                <FormattedAgentOutput content={safeResultBody(latestRunMessage)} />
+              ) : (
+                <div className="text-muted">{latestRunMessage.status === "stopped" ? "No final answer was captured, and I kept the raw output in the Log panel." : "No final answer was captured for this run."}</div>
+              )}
+            </AgentBubble>
+          )}
+          <RunStatusBubble project={project} latest={latest} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DirectChatPanel({
+  project,
+  results,
+  onSendChat,
+  onStopChat,
+  onHumanAnswer,
+  onApprovePlan,
+  runnerHealth,
+}: {
+  project: ProjectRecord | null;
+  results: AgentResult[];
+  onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean }) => Promise<void>;
+  onStopChat: (projectName: string) => Promise<void>;
+  onHumanAnswer: (projectName: string, answer: string) => Promise<void>;
+  onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
+  runnerHealth: RunnerHealth;
+}) {
+  const blocked = Boolean(project?.human_input?.blocked);
+  return (
+    <div className="dualith-direct-panel">
+      <DirectConversation project={project} results={results} onApprovePlan={onApprovePlan} />
+      {blocked && project && <HumanInputPane project={project} onSubmit={onHumanAnswer} />}
+      <ChatComposer project={project} onSendChat={onSendChat} onStopChat={onStopChat} runnerHealth={runnerHealth} />
+    </div>
+  );
+}
+
+function ConversationThread({
+  project,
+  projectEvents,
+  results,
+  onApprovePlan,
+  onHumanAnswer,
+  onAddressNotes,
+}: {
+  project: ProjectRecord | null;
+  projectEvents: ConsoleEntry[];
+  results: AgentResult[];
+  onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
+  onHumanAnswer?: (projectName: string, answer: string) => Promise<void>;
+  onAddressNotes?: (projectName: string) => Promise<void>;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const messages = useMemo(() => parseChatHistory(project?.chat_history ?? ""), [project?.chat_history]);
   const teamMessages = useMemo(() => parseAgentChat(project?.agent_chat ?? ""), [project?.agent_chat]);
@@ -1997,15 +3697,14 @@ function ConversationThread({ project, projectEvents, results, onApprovePlan }: 
   // short status bubble so they do not look like a fresh answer.
   const latestRunMessage = latest && latest.mode !== "ask" && latest.status !== "stopped" ? latest : null;
   const statusBubbleVisible = Boolean(latest?.status === "stopped" || (latest?.status === "error" && latest.mode === "ask"));
-  const lead = project?.team?.lead;
-  const teammate = project?.team?.teammate;
+  const hasWorkspace = Boolean(project);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, teamMessages.length, latest?.id, latest?.status, activeRun?.usage_id, activeRun?.last_output_at, project?.name]);
 
-  const isEmpty = messages.length === 0 && teamMessages.length === 0 && !latestRunMessage && !activeRun && !statusBubbleVisible;
+  const isEmpty = !hasWorkspace && messages.length === 0 && teamMessages.length === 0 && !latestRunMessage && !activeRun && !statusBubbleVisible;
 
   return (
     <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
@@ -2021,7 +3720,9 @@ function ConversationThread({ project, projectEvents, results, onApprovePlan }: 
           </div>
         </div>
       ) : (
-        <div className="dualith-thread">
+        <div className="dualith-workspace-scroll">
+          <TaskWorkspace project={project} projectEvents={projectEvents} onHumanAnswer={onHumanAnswer} onAddressNotes={onAddressNotes} teamMessages={teamMessages} />
+          <div className="dualith-thread">
           {messages.map((message, index) => {
             if (message.role === "user") {
               return <UserBubble key={`m-${index}`} message={message} projectName={project?.name ?? ""} />;
@@ -2076,16 +3777,6 @@ function ConversationThread({ project, projectEvents, results, onApprovePlan }: 
               </AgentBubble>
             );
           })}
-          {teamMessages.length > 0 && (
-            <div className="mx-auto w-full flex items-center gap-2 py-2" style={{ maxWidth: "var(--dualith-chat-max)" }}>
-              <div className="h-px flex-1 bg-line" />
-              <span className="text-[10px] text-muted tracking-wide">agents working</span>
-              <div className="h-px flex-1 bg-line" />
-            </div>
-          )}
-          {teamMessages.map((message, index) => (
-            <TeamBubble key={`t-${index}`} message={message} lead={lead} teammate={teammate} />
-          ))}
           {/* Team run completion / stopped / error marker — only when run is no longer active */}
           {teamMessages.length > 0 && !activeRun && project?.team && (
             <div className="mx-auto w-full py-1" style={{ maxWidth: "var(--dualith-chat-max)" }}>
@@ -2121,6 +3812,7 @@ function ConversationThread({ project, projectEvents, results, onApprovePlan }: 
             </AgentBubble>
           )}
           <RunStatusBubble project={project} latest={latest} />
+          </div>
         </div>
       )}
     </div>
@@ -2128,42 +3820,41 @@ function ConversationThread({ project, projectEvents, results, onApprovePlan }: 
 }
 
 function ReviewPane({ project }: { project: ProjectRecord | null }) {
-  const clean = project?.audit_state === "CLEAN";
-  const attention = project?.audit_state === "ATTENTION";
-  const todos = project?.claude_todos ?? [];
-
-  const parsed = todos.map(parseTodoItem);
-  const checkedCount = parsed.filter((t) => t.checked).length;
-  const total = parsed.length;
+  const attention = attentionState(project);
+  const clean = attention.status === "clean";
+  const needsAttention = attention.status === "attention" || attention.status === "stale";
+  const total = attention.items.length;
+  const badge = attentionBadge(attention);
 
   return (
-    <details className={`group border-t transition-colors duration-150 ${clean ? "border-emerald-900" : attention ? "border-amber-900" : "border-line"}`} open={attention || total > 0}>
+    <details className={`group border-t transition-colors duration-150 ${clean ? "border-emerald-900" : needsAttention ? "border-amber-900" : "border-line"}`} open={needsAttention || total > 0}>
       <summary className="flex h-9 cursor-pointer list-none items-center justify-between px-4 text-xs outline-none hover:bg-zinc-950 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60">
         <span className="font-medium uppercase tracking-widest text-zinc-400">AI Notes</span>
         <div className="flex items-center gap-2">
           {total > 0 && (
-            <span className="text-[10px] tabular-nums text-zinc-600">{checkedCount}/{total}</span>
+            <span className="text-[10px] tabular-nums text-zinc-600">{attentionCountLabel(attention)}</span>
           )}
-          <Badge
-            label={clean ? "Clean" : attention ? "Needs attention" : "Pending"}
-            tone={clean ? "green" : attention ? "amber" : "muted"}
-          />
+          <Badge label={badge.label} tone={badge.tone} />
         </div>
       </summary>
       <div className="max-h-44 overflow-auto border-t border-line-hard">
-        {parsed.length ? (
-          parsed.map((item, i) => (
-            <div key={i} className={`flex gap-3 border-b border-line-hard px-3 py-2 text-xs leading-relaxed ${item.checked ? "opacity-50" : ""}`}>
-              <span className={`mt-0.5 shrink-0 text-sm leading-none ${item.checked ? "text-ok" : "text-zinc-700"}`}>
-                {item.checked ? "x" : "-"}
-              </span>
-              <span className={item.checked ? "text-zinc-600 line-through" : "text-zinc-300"}>
-                {item.text}
-              </span>
+        {attention.items.length ? (
+          <>
+            <div className="border-b border-line-hard px-3 py-2 text-[11px] text-zinc-600">
+              {attention.source || "AI notes"}{attention.updated_at ? ` / ${timestampLabel(attention.updated_at)}` : ""}
             </div>
-          ))
+            {attention.items.map((item, i) => (
+              <div key={`${item.priority}-${item.title}-${i}`} className="grid grid-cols-[auto_1fr] gap-2 border-b border-line-hard px-3 py-2 text-xs leading-relaxed">
+                <Badge label={priorityLabel(item.priority)} tone={priorityTone(item.priority)} />
+                <div className="min-w-0">
+                  <div className="truncate text-zinc-300" title={item.text}>{item.title || item.text}</div>
+                  {item.suggested_command && <div className="mt-1 truncate text-[11px] text-zinc-600">{item.suggested_command}</div>}
+                </div>
+              </div>
+            ))}
+          </>
         ) : (
-          <EmptyState message={project ? "No notes yet. Run the auditor to generate them." : "Select a project to see AI notes."} />
+          <EmptyState message={project ? clean ? "AI notes are clean." : "No notes yet. Run the auditor to generate them." : "Select a project to see AI notes."} />
         )}
       </div>
     </details>
@@ -2196,6 +3887,58 @@ function CommitPane({ commits }: { commits: string[] }) {
   );
 }
 
+function broadPromptLooksAmbiguous(prompt: string) {
+  const clean = prompt.trim();
+  if (!clean) return false;
+  const lower = clean.toLowerCase();
+  if (/please implement this plan|run build|build error|compile error|fix (this|the)|responsive|merge conflict|commit|review\b/.test(lower)) return false;
+  return /\b(improve|make .*better|make .*feel|polish|enhance|upgrade|rework|redesign|modernize)\b/.test(lower);
+}
+
+function agenticChoicesForPrompt(prompt: string): AgenticChoiceDraft | null {
+  const clean = prompt.trim();
+  if (!broadPromptLooksAmbiguous(clean)) return null;
+  const lower = clean.toLowerCase();
+  const budgetOptions: HumanInputOption[] = [
+    { id: "A", label: "Add spending insights", description: "Recommended: highest personal-budget value without broad backend changes.", recommended: true },
+    { id: "B", label: "Add budgeting goals", description: "Give users monthly targets and progress feedback." },
+    { id: "C", label: "Add habit tracking", description: "Surface repeated behavior and spending patterns." },
+    { id: "D", label: "Polish transaction entry", description: "Make day-to-day input faster and less error-prone." },
+  ];
+  const dashboardOptions: HumanInputOption[] = [
+    { id: "A", label: "Improve dashboard clarity", description: "Recommended: make the main screen more useful first.", recommended: true },
+    { id: "B", label: "Improve interaction flow", description: "Reduce steps and make common actions easier." },
+    { id: "C", label: "Improve visual hierarchy", description: "Make status, next actions, and key data easier to scan." },
+  ];
+  const genericOptions: HumanInputOption[] = [
+    { id: "A", label: "Improve the main workflow", description: "Recommended: highest visible user impact first.", recommended: true },
+    { id: "B", label: "Improve insights and feedback", description: "Make the product feel smarter with clearer state and guidance." },
+    { id: "C", label: "Improve polish and usability", description: "Tighten layout, copy, empty states, and interaction details." },
+  ];
+  const options = /budget|spend|expense|transaction|finance/.test(lower)
+    ? budgetOptions
+    : /dashboard|screen|ui|interface|layout|page/.test(lower)
+      ? dashboardOptions
+      : genericOptions;
+  return {
+    prompt: clean,
+    question: "I found multiple useful routes. Choose where the team should focus first.",
+    default_option: options.find((option) => option.recommended)?.id ?? options[0]?.id ?? "",
+    options,
+  };
+}
+
+function promptWithAgenticChoice(choice: AgenticChoiceDraft, option: HumanInputOption) {
+  return [
+    choice.prompt,
+    "",
+    "Agentic choice selected: " + option.label,
+    "Reason: " + (option.description?.replace(/^Recommended:\s*/i, "") || "Selected by the user before implementation."),
+    "",
+    "Implement this selected route first. If repo evidence makes it unsafe, explain the constraint and choose the closest compatible route.",
+  ].join("\n");
+}
+
 function ChatComposer({
   project, onSendChat, onStopChat, runnerHealth,
 }: {
@@ -2212,6 +3955,7 @@ function ChatComposer({
   const [errorText, setErrorText] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [planMode, setPlanMode] = useState(false);
+  const [agenticChoice, setAgenticChoice] = useState<AgenticChoiceDraft | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -2227,6 +3971,10 @@ function ChatComposer({
   useEffect(() => {
     setErrorText(null);
   }, [runner, modelChoice, reasoning, runPrompt, project?.name]);
+
+  useEffect(() => {
+    setAgenticChoice(null);
+  }, [project?.name]);
 
   const addFiles = useCallback((files: FileList | File[]) => {
     const images = Array.from(files).filter((f) => f.type.startsWith("image/"));
@@ -2279,20 +4027,38 @@ function ChatComposer({
     });
   };
 
-  const send = async () => {
-    if (!project || (!runPrompt.trim() && attachments.length === 0)) return;
+  const sendPrompt = async (promptToSend: string) => {
+    if (!project || (!promptToSend.trim() && attachments.length === 0)) return;
     setPendingAction("start");
     setErrorText(null);
     try {
       const attachmentPaths = await uploadAttachments(project.name);
-      await onSendChat(project.name, { runner, model: modelChoice, reasoning, prompt: runPrompt, attachmentPaths, planMode });
+      await onSendChat(project.name, { runner, model: modelChoice, reasoning, prompt: promptToSend, attachmentPaths, planMode });
       setRunPrompt("");
+      setAgenticChoice(null);
       clearAttachments();
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : "unknown");
     } finally {
       setPendingAction(null);
     }
+  };
+
+  const send = async () => {
+    if (!project || (!runPrompt.trim() && attachments.length === 0)) return;
+    if (!agenticChoice && attachments.length === 0 && !planMode) {
+      const choice = agenticChoicesForPrompt(runPrompt);
+      if (choice) {
+        setAgenticChoice(choice);
+        return;
+      }
+    }
+    await sendPrompt(runPrompt);
+  };
+
+  const sendChoice = async (option: HumanInputOption) => {
+    if (!agenticChoice) return;
+    await sendPrompt(promptWithAgenticChoice(agenticChoice, option));
   };
 
   const stop = async () => {
@@ -2323,7 +4089,7 @@ function ChatComposer({
   };
 
   const chip = (active: boolean) =>
-    `rounded-full border px-2.5 py-1 text-[11px] font-medium outline-none transition-all focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${
+    `dualith-composer-chip rounded-full border px-2.5 py-1 text-[11px] font-medium outline-none transition-all focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${
       active
         ? "border-accent bg-accent text-white shadow-sm"
         : "border-line text-muted hover:border-line-hard hover:text-text"
@@ -2369,21 +4135,43 @@ function ChatComposer({
             id="agent-prompt"
             value={runPrompt}
             disabled={pendingAction !== null || isRunning}
-            onChange={(event) => setRunPrompt(event.target.value)}
+            onChange={(event) => { setRunPrompt(event.target.value); setAgenticChoice(null); }}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
-            placeholder={project ? "Describe the outcome..." : "Select a project first"}
+            placeholder={project ? "New task or instruction for the team..." : "Select a project first"}
             rows={1}
             className="block max-h-44 min-h-[2.5rem] w-full resize-none bg-transparent px-2 py-2 leading-6 text-text outline-none placeholder:text-muted"
             spellCheck={false}
           />
-          <div className="flex flex-wrap items-center justify-between gap-2 px-1">
-            <div className="flex flex-wrap items-center gap-1.5">
+          {agenticChoice && (
+            <div className="dualith-agentic-choice">
+              <div className="dualith-agentic-choice__head">
+                <span>Agentic choice</span>
+                <strong>{agenticChoice.question}</strong>
+              </div>
+              <div className="dualith-agentic-choice__options">
+                {agenticChoice.options.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    disabled={pendingAction !== null || isRunning}
+                    onClick={() => void sendChoice(option)}
+                    className={option.recommended ? "is-recommended" : ""}
+                  >
+                    <span>[{option.id}] {option.label}</span>
+                    {option.description && <em>{option.description}</em>}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="dualith-composer-toolbar flex flex-wrap items-center justify-between gap-2 px-1">
+            <div className="dualith-composer-tools flex flex-wrap items-center gap-1.5">
               <button
                 type="button"
                 disabled={pendingAction !== null || isRunning || !project}
                 onClick={() => fileInputRef.current?.click()}
-                className={`${chip(false)} inline-flex items-center gap-1`}
+                className={`${chip(false)} dualith-composer-attach inline-flex items-center gap-1`}
                 title="Attach images (or paste / drag-drop)"
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -2391,15 +4179,15 @@ function ChatComposer({
                 </svg>
                 {attachments.length > 0 && <span>{attachments.length}</span>}
               </button>
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-bg px-2.5 py-1 text-[11px] font-medium text-accent">
+              <span className="dualith-runner-chip inline-flex min-w-0 items-center gap-1.5 rounded-full border border-line bg-bg px-2.5 py-1 text-[11px] font-medium text-accent">
                 <RunnerMascot runner={runner} size={14} />
-                {runner === "auto" ? "Auto" : runnerLabels[runner]}
+                <span className="dualith-runner-chip__label">{runnerChoiceLabels[runner]}</span>
               </span>
               <button
                 type="button"
                 onClick={() => setSettingsOpen((v) => !v)}
-                className={`${chip(settingsOpen)} inline-flex items-center gap-1`}
-                title={`Run settings - ${runner === "auto" ? "auto" : `${runnerLabels[runner]} / ${modelChoice || "default"}`}`}
+                className={`${chip(settingsOpen)} dualith-composer-settings-toggle inline-flex items-center gap-1`}
+                title={`Run settings - ${runnerChoiceLabels[runner]}${runner === "auto" ? "" : ` / ${modelChoice || "default"}`}`}
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <circle cx="12" cy="12" r="3" />
@@ -2410,13 +4198,13 @@ function ChatComposer({
                 type="button"
                 disabled={pendingAction !== null || isRunning}
                 onClick={() => setPlanMode((v) => !v)}
-                className={`${chip(planMode)} inline-flex items-center gap-1`}
+                className={`${chip(planMode)} dualith-composer-plan-toggle inline-flex items-center gap-1`}
                 title={planMode ? "Plan mode: agent writes a plan for you to approve before building" : "Autonomous mode: agent decides whether to ask or build"}
               >
                 {planMode ? "Plan ✓" : "Plan"}
               </button>
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="dualith-composer-submit flex items-center gap-1.5">
               {isRunning ? (
                 <button
                   type="button"
@@ -2429,26 +4217,26 @@ function ChatComposer({
               ) : (
                 <button
                   type="button"
-                  disabled={!project || pendingAction !== null || (!runPrompt.trim() && attachments.length === 0)}
+                  disabled={!project || pendingAction !== null || agenticChoice !== null || (!runPrompt.trim() && attachments.length === 0)}
                   onClick={() => void send()}
                   className="h-8 rounded-full bg-accent/90 px-4 text-[12px] font-medium text-bg outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
                 >
-                  {pendingAction === "start" ? "..." : "Send"}
+                  {pendingAction === "start" ? "..." : agenticChoice ? "Choose" : "Send"}
                 </button>
               )}
             </div>
           </div>
 
           {settingsOpen && (
-            <div className="absolute bottom-full left-2 z-10 mb-2 w-72 rounded-md border border-line bg-surface p-3 shadow-xl shadow-black/20">
+            <div className="dualith-composer-settings absolute bottom-full left-2 z-10 mb-2 w-72 rounded-md border border-line bg-surface p-3 shadow-xl shadow-black/20">
               <div className="mb-2 text-[10px] uppercase tracking-widest text-muted">Run settings</div>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="dualith-composer-settings-grid grid grid-cols-3 gap-2">
                 <select value={runner} disabled={isRunning} onChange={(event) => setRunner(event.target.value as RunnerId)} className={formClass}>
                   {runners.map((option) => {
                     const health = option.id !== "auto" ? runnerHealth[option.id] : null;
                     const suffix = health && !health.ready ? " (off)" : "";
                     return (
-                      <option key={option.id} value={option.id}>{option.label}{suffix}</option>
+                      <option key={option.id} value={option.id} title={runnerChoiceTitles[option.id]}>{option.label}{suffix}</option>
                     );
                   })}
                 </select>
@@ -2466,15 +4254,17 @@ function ChatComposer({
             </div>
           )}
         </div>
-        <div className="mt-1.5 px-2 text-[10px] text-muted">
+        <div className="dualith-composer-hint mt-1.5 px-2 text-[10px] text-muted">
           {errorText ? (
             <span className="text-danger">Error: {errorText}</span>
           ) : isRunning ? (
             <span className="text-warn">Working - hit Stop to cancel.</span>
+          ) : agenticChoice ? (
+            <span className="text-warn">Choose a route above to start the team.</span>
           ) : attachments.length > 0 ? (
-            <span className="text-accent">{attachments.length} image{attachments.length > 1 ? "s" : ""} attached{runner === "codex" ? " - Claude reads images more reliably" : ""} - Enter to send</span>
+            <span className="text-accent">{attachments.length} image{attachments.length > 1 ? "s" : ""} attached - Enter to send</span>
           ) : (
-            <>Enter to send - Shift+Enter for newline - paste or drag an image</>
+            <>Enter creates a task or sends an instruction - Shift+Enter for newline</>
           )}
         </div>
       </div>
@@ -2518,9 +4308,9 @@ function AgentControls({
     if (selectedRun) {
       const runningModel = selectedRun.model || "default";
       const runningReasoning = selectedRun.reasoning ? reasoningLabels[selectedRun.reasoning] : "Medium";
-      return `${modeLabels[selectedRun.mode]} running via ${runnerLabels[selectedRun.runner]} / ${runningModel} / ${runningReasoning}`;
+      return `${modeLabels[selectedRun.mode]} running via ${runnerChoiceLabels[selectedRun.runner] ?? runnerLabels[selectedRun.runner]} / ${runningModel} / ${runningReasoning}`;
     }
-    return `Ready: ${modeLabels[mode]} via ${runnerLabels[runner]} / ${modelLabel} / ${reasoningLabel}`;
+    return `Ready: ${modeLabels[mode]} via ${runnerChoiceLabels[runner]} / ${modelLabel} / ${reasoningLabel}`;
   }, [errorText, mode, modelLabel, pendingAction, project, reasoningLabel, runner, selectedRun]);
 
   const run = async (action: "start" | "stop") => {
@@ -2565,7 +4355,8 @@ function AgentControls({
           {runners.map((option) => {
             const health = option.id !== "auto" ? runnerHealth[option.id] : null;
             const dot = !health ? null : health.ready ? "bg-ok" : "bg-danger";
-            const title = health ? (health.ready ? health.version : health.error || "not found") : undefined;
+            const healthText = health ? (health.ready ? health.version : health.error || "not found") : "";
+            const title = healthText ? `${runnerChoiceTitles[option.id]} ${healthText}` : runnerChoiceTitles[option.id];
             return (
               <button
                 key={option.id}
@@ -2645,13 +4436,15 @@ function HumanInputPane({ project, onSubmit }: { project: ProjectRecord; onSubmi
   const [pending, setPending] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
   const question = project.human_input?.question ?? "";
+  const options = project.human_input?.options ?? [];
+  const hasOptions = options.length > 0;
 
-  const submit = async () => {
-    if (!answer.trim()) return;
+  const submitValue = async (value: string) => {
+    if (!value.trim()) return;
     setPending(true);
     setErrorText(null);
     try {
-      await onSubmit(project.name, answer.trim());
+      await onSubmit(project.name, value.trim());
       setAnswer("");
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : "unknown");
@@ -2659,14 +4452,34 @@ function HumanInputPane({ project, onSubmit }: { project: ProjectRecord; onSubmi
       setPending(false);
     }
   };
+  const submit = async () => submitValue(answer);
 
   return (
     <section className="dualith-hitl shrink-0 border-y border-warn bg-amber-950/20 px-4 py-3 text-xs">
       <div className="mb-2 flex items-center gap-2 text-warn">
         <span className="h-2 w-2 shrink-0 animate-pulse bg-warn" />
-        <span className="font-medium uppercase tracking-widest">Pipeline blocked — human input needed</span>
+        <span className="font-medium uppercase tracking-widest">{hasOptions ? "Agentic choice needed" : "Human input needed"}</span>
       </div>
-      <pre className="mb-2 whitespace-pre-wrap border border-warn/60 bg-bg p-3 leading-5 text-amber-200">🤖 QUESTION: {question}</pre>
+      <pre className="mb-2 whitespace-pre-wrap border border-warn/60 bg-bg p-3 leading-5 text-amber-200">Question: {question}</pre>
+      {hasOptions && (
+        <div className="dualith-decision-options mb-2">
+          {options.map((option) => {
+            const optionAnswer = `[${option.id}] ${option.label}${option.description ? ` - ${option.description}` : ""}`;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                disabled={pending}
+                onClick={() => void submitValue(optionAnswer)}
+                className={option.recommended ? "is-recommended" : ""}
+              >
+                <span>[{option.id}] {option.label}</span>
+                {option.description && <em>{option.description}</em>}
+              </button>
+            );
+          })}
+        </div>
+      )}
       <textarea
         value={answer}
         disabled={pending}
@@ -2677,7 +4490,7 @@ function HumanInputPane({ project, onSubmit }: { project: ProjectRecord; onSubmi
         spellCheck={false}
       />
       <div className="mt-2 flex items-center justify-between gap-2">
-        <span className={`text-[10px] ${errorText ? "text-danger" : "text-amber-200/70"}`}>{errorText ? `Error: ${errorText}` : "Answer is appended as ✍️ ANSWER and the agent resumes."}</span>
+        <span className={`text-[10px] ${errorText ? "text-danger" : "text-amber-200/70"}`}>{errorText ? `Error: ${errorText}` : hasOptions ? "The selected route resumes the team." : "Your answer resumes the team."}</span>
         <button
           type="button"
           disabled={pending || !answer.trim()}
@@ -2868,6 +4681,12 @@ function PipelinePane({ project, onStart, onStop }: {
   );
 }
 
+function teamModeLabel(team: TeamState) {
+  if (team.runner_mode) return team.runner_mode;
+  if (team.lead === team.teammate) return `${runnerLabels[team.lead]}-only`;
+  return `${runnerLabels[team.lead]}+${runnerLabels[team.teammate]}`;
+}
+
 function TeamPane({ project, onStart, onStop }: {
   project: ProjectRecord | null;
   onStart: (projectName: string, options?: AgentStartOptions) => Promise<void>;
@@ -2894,6 +4713,11 @@ function TeamPane({ project, onStart, onStop }: {
   const tone = team?.status === "blocked" ? "amber" : team?.status === "error" ? "red" : running ? "cyan" : "muted";
   const leadModel = team ? team.lead_model || defaultModelByRunner[team.lead] || "default" : "";
   const teammateModel = team ? team.teammate_model || defaultModelByRunner[team.teammate] || "default" : "";
+  const teamDetail = team
+    ? team.lead === team.teammate
+      ? `${teamModeLabel(team)} / ${leadModel}; ${team.step || "running"}${team.round ? `; round ${team.round}` : ""}`
+      : `${runnerLabels[team.lead]} / ${leadModel} leads; ${runnerLabels[team.teammate]} / ${teammateModel} reviews; ${team.step || "running"}${team.round ? `; round ${team.round}` : ""}`
+    : "Auto team pairs lead and reviewer by policy; manual chat runner choices stay single-runner.";
 
   return (
     <div className="border-t border-line">
@@ -2903,9 +4727,7 @@ function TeamPane({ project, onStart, onStop }: {
       </div>
       <div className="border-t border-line-hard px-4 py-3 text-xs">
         <p className="mb-3 leading-relaxed text-zinc-500">
-          {team
-            ? `${runnerLabels[team.lead]} / ${leadModel} leads; ${runnerLabels[team.teammate]} / ${teammateModel} reviews; ${team.step || "running"}${team.round ? `; round ${team.round}` : ""}`
-            : "Two agents collaborate: a lead implements and a teammate reviews each round until sign-off."}
+          {teamDetail}
         </p>
         {errorText && <p className="mb-2 text-[11px] text-danger">Error: {errorText}</p>}
         <button
@@ -2914,7 +4736,7 @@ function TeamPane({ project, onStart, onStop }: {
           onClick={() => void act(running ? "stop" : "start")}
           className={`h-9 w-full rounded-md border outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-text-faint ${running ? "border-amber-800 text-warn hover:bg-amber-950/30" : "border-cyan-800 text-accent hover:bg-cyan-950/30"}`}
         >
-          {pending ? "..." : running ? "Stop team" : "Run team (auto lead)"}
+          {pending ? "..." : running ? "Stop team" : "Run auto team"}
         </button>
       </div>
     </div>
@@ -2946,6 +4768,46 @@ function MemoryPane({ project }: { project: ProjectRecord | null }) {
   );
 }
 
+function ArtifactPane({ project }: { project: ProjectRecord | null }) {
+  const artifacts = project?.artifacts;
+  const entries = [
+    ["Architecture", artifacts?.architecture],
+    ["Decisions", artifacts?.decisions],
+    ["Project Memory", artifacts?.project_memory],
+    ["Plan", artifacts?.plan],
+    ["Feedback", artifacts?.feedback],
+    ["Lessons", artifacts?.lessons],
+  ] as const;
+  const ready = entries.filter(([, content]) => Boolean(content?.trim()));
+  return (
+    <details className="border-t border-line" open={ready.length > 0}>
+      <summary className="flex h-9 cursor-pointer list-none items-center justify-between px-4 text-xs outline-none hover:bg-zinc-950 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60">
+        <span className="font-medium uppercase tracking-widest text-zinc-400">Artifacts</span>
+        <span className="text-[10px] tabular-nums text-zinc-600">{ready.length}</span>
+      </summary>
+      <div className="max-h-72 overflow-auto border-t border-line-hard">
+        {ready.length ? (
+          entries.map(([label, content]) => (
+            <div key={label} className="border-b border-line-hard px-3 py-2 text-xs">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="text-zinc-500">{label}</span>
+                <span className={content?.trim() ? "text-ok" : "text-zinc-700"}>{content?.trim() ? "ready" : "empty"}</span>
+              </div>
+              {content?.trim() ? (
+                <pre className="max-h-28 overflow-auto whitespace-pre-wrap text-[11px] leading-5 text-zinc-300">{content.trim()}</pre>
+              ) : (
+                <div className="text-[11px] text-zinc-700">No artifact yet.</div>
+              )}
+            </div>
+          ))
+        ) : (
+          <EmptyState message="Architecture, decisions, project memory, plan, feedback, and lessons will appear after team runs." />
+        )}
+      </div>
+    </details>
+  );
+}
+
 function DetailsDrawer({ project, appStatus, onClose, onDevServerAction }: {
   project: ProjectRecord | null;
   appStatus: AppStatus;
@@ -2964,6 +4826,7 @@ function DetailsDrawer({ project, appStatus, onClose, onDevServerAction }: {
           <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive />
           <ReviewPane project={project} />
           <CommitPane commits={project?.commits ?? []} />
+          <ArtifactPane project={project} />
           <MemoryPane project={project} />
         </div>
       </aside>
@@ -2971,74 +4834,205 @@ function DetailsDrawer({ project, appStatus, onClose, onDevServerAction }: {
   );
 }
 
+/* ── Option B layout components ─────────────────────────────── */
+
+function FullWidthCrewStrip({ project }: { project: ProjectRecord }) {
+  const task = selectedTask(project);
+  if (!task) return null;
+  return <CrewStrip task={task} />;
+}
+
+function taskCreatedValue(task: DualithTask) {
+  const value = Date.parse(task.created_at || "");
+  return Number.isFinite(value) ? value : 0;
+}
+
+function nextQueuedTask(project: ProjectRecord, currentTask: DualithTask | null) {
+  return (project.tasks ?? [])
+    .filter((task) => task.status === "pending" && task.id !== currentTask?.id)
+    .sort((a, b) => taskCreatedValue(a) - taskCreatedValue(b))[0] ?? null;
+}
+
+function taskStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    active: "active",
+    blocked: "blocked",
+    pending: "pending",
+    completed: "done",
+    failed: "failed",
+  };
+  return (labels[status] ?? status) || "idle";
+}
+
+function QueueStrip({ project, task, counts }: { project: ProjectRecord; task: DualithTask | null; counts: TaskCounts }) {
+  if (!task && taskCountTotal(counts) === 0) return null;
+  const next = nextQueuedTask(project, task);
+  const statusTone = taskStatusTone(task?.status ?? "idle");
+  return (
+    <section className="dualith-queue-strip" aria-label="Task queue">
+      <div className="dualith-queue-strip__cell is-current">
+        <span>Active</span>
+        <strong>{task ? task.title : "No active task"}</strong>
+        {task && <em>#{task.id.slice(-6)} / {taskStatusLabel(task.status)}</em>}
+      </div>
+      <div className="dualith-queue-strip__cell">
+        <span>Next</span>
+        <strong>{next ? next.title : counts.pending > 0 ? "Queued task pending" : "Queue clear"}</strong>
+        <em>{next ? `#${next.id.slice(-6)} / pending` : `${counts.pending} pending`}</em>
+      </div>
+      <div className="dualith-queue-strip__counts">
+        <Badge label={`pending ${counts.pending}`} tone={counts.pending ? "amber" : "muted"} />
+        <Badge label={`done ${counts.completed}`} tone={counts.completed ? "green" : "muted"} />
+        <Badge label={`failed ${counts.failed}`} tone={counts.failed ? "red" : "muted"} />
+        {task && <Badge label={taskStatusLabel(task.status)} tone={statusTone} />}
+      </div>
+    </section>
+  );
+}
+
+function laneStatusClass(status = "") {
+  if (status === "done" || status === "completed") return "is-ok";
+  if (status === "running" || status === "active") return "is-run";
+  if (status === "failed" || status === "error") return "is-err";
+  if (status === "skipped") return "is-na";
+  return "is-queued";
+}
+
+function taskLaneItems(task: DualithTask | null): (LaneInfo & { label: string })[] {
+  const lanes = task?.phases?.lead?.lanes ?? [];
+  if (lanes.length >= 2) return lanes.map((lane) => ({ ...lane, label: lane.lane }));
+  const subagents = task?.subagents ?? [];
+  return subagents.map((agent) => ({
+    lane: agent.id,
+    label: agent.label,
+    scope: agent.scope,
+    files: agent.files,
+    status: agent.status,
+    pct: agent.pct,
+  }));
+}
+
+function SubagentLaneStrip({ task }: { task: DualithTask | null }) {
+  const items = taskLaneItems(task);
+  if (items.length === 0) return null;
+  return (
+    <section className="dualith-lane-strip" aria-label="Subagent lanes">
+      <div className="dualith-lane-strip__head">
+        <span>Lanes</span>
+        <strong>{items.length} active workstream{items.length === 1 ? "" : "s"}</strong>
+      </div>
+      <div className="dualith-lane-strip__grid">
+        {items.map((item) => (
+          <div key={item.lane} className={`dualith-lane-strip__item ${laneStatusClass(item.status)}`}>
+            <div>
+              <span>{item.label || item.lane}</span>
+              <strong>{item.status || "queued"}</strong>
+            </div>
+            {item.scope && <p>{item.scope}</p>}
+            <div className="dualith-lane-strip__meta">
+              <em>{item.pct != null ? `${item.pct}%` : "queued"}</em>
+              {item.files && item.files.length > 0 && <code>{item.files.slice(0, 2).map((file) => file.split("/").pop()).join(", ")}</code>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function TeamRoomFull({
+  project,
+  projectEvents,
+  onHumanAnswer,
+  onAddressNotes,
+}: {
+  project: ProjectRecord;
+  projectEvents: ConsoleEntry[];
+  onHumanAnswer?: (projectName: string, answer: string) => Promise<void>;
+  onAddressNotes?: (projectName: string) => Promise<void>;
+}) {
+  const task = selectedTask(project);
+  const teamMessages = useMemo(() => parseAgentChat(project.agent_chat ?? ""), [project.agent_chat]);
+  const counts = projectTaskCounts(project);
+
+  return (
+    <div className="dualith-room-inner">
+      {task ? (
+        <div className="room-task-header">
+          <div className="room-task-header__left">
+            <span className="room-task-header__id">#{task.id.slice(-6)}</span>
+            <span className="room-task-header__title">{task.title}</span>
+          </div>
+          <div className="room-task-header__right">
+            <span className={`room-task-header__status is-${taskStatusTone(task.status)}`}>{task.status}</span>
+          </div>
+        </div>
+      ) : (
+        <div className="room-no-task">
+          <span className="room-no-task__name">{project.name}</span>
+          <span className="room-no-task__hint">no active task - send one below</span>
+        </div>
+      )}
+      <QueueStrip project={project} task={task} counts={counts} />
+      <DecisionPanel project={project} task={task} onSubmit={onHumanAnswer} />
+      <AttentionPanel project={project} onAddressNotes={onAddressNotes} />
+      <SubagentLaneStrip task={task} />
+      <TeamRoom task={task} messages={teamMessages} project={project} projectEvents={projectEvents} />
+    </div>
+  );
+}
+
+/* ── End Option B components ─────────────────────────────────── */
+
 function WorkspaceColumn({
-  project, projectEvents, results, appStatus, mobileView, onSendChat, onStopChat, onAgentAction, onDevServerAction, onHumanAnswer, onClearChat, onClearAgentChat, onApprovePlan, runnerHealth,
+  project, projectEvents, mobileView, onSendChat, onHumanAnswer, onClearAgentChat,
 }: {
   project: ProjectRecord | null;
   projectEvents: ConsoleEntry[];
-  results: AgentResult[];
-  appStatus: AppStatus;
   mobileView: MobileView;
   onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean }) => Promise<void>;
-  onStopChat: (projectName: string) => Promise<void>;
-  onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
-  onAgentAction: (projectName: string, agent: AgentMode, action: "start" | "stop", options?: AgentStartOptions) => Promise<void>;
-  onDevServerAction: (projectName: string, action: DevServerAction) => Promise<void>;
   onHumanAnswer: (projectName: string, answer: string) => Promise<void>;
-  onClearChat: (projectName: string) => Promise<void>;
   onClearAgentChat: (projectName: string) => Promise<void>;
-  runnerHealth: RunnerHealth;
 }) {
-  const [detailsOpen, setDetailsOpen] = useState(false);
   const blocked = Boolean(project?.human_input?.blocked);
-  const pipeline = project?.pipeline ?? null;
   const team = project?.team ?? null;
-  const hasHistory = Boolean(project?.chat_history?.trim());
   const hasAgentChat = Boolean(project?.agent_chat?.trim());
-  const noteCount = project?.claude_todos?.length ?? 0;
-  const teamBadge = team ? `team ${team.status} / r${team.round} / ${runnerLabels[team.lead]}+${runnerLabels[team.teammate]}` : "";
+  const teamMessages = useMemo(() => parseAgentChat(project?.agent_chat ?? ""), [project?.agent_chat]);
+  const teamBadge = team ? `team ${team.status} / r${team.round} / ${teamModeLabel(team)}` : "";
+  const addressNotes = useCallback(async (projectName: string) => {
+    await onSendChat(projectName, {
+      runner: "auto",
+      model: "",
+      reasoning: "medium",
+      prompt: addressNotesPrompt,
+      attachmentPaths: [],
+      planMode: false,
+    });
+  }, [onSendChat]);
 
   return (
-    <main className={`relative flex min-h-0 flex-col border-r ${blocked ? "dualith-blocked border-warn" : "border-line"}`}>
-      <div className="flex h-9 shrink-0 items-center justify-between gap-3 border-b border-line px-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="shrink-0 text-xs font-medium uppercase tracking-widest text-zinc-400">{project ? project.name : "Conversation"}</span>
-          {team && <Badge label={teamBadge} tone={team.status === "blocked" ? "amber" : team.status === "error" ? "red" : "cyan"} />}
-          {!team && pipeline && <Badge label={`pipeline ${pipeline.status}`} tone={pipeline.status === "blocked" ? "amber" : pipeline.status === "error" ? "red" : "cyan"} />}
+    <main className={`dualith-team-panel relative flex min-h-0 flex-col border-r ${mobileView === "team" ? "is-mobile-active" : ""} ${blocked ? "dualith-blocked border-warn" : "border-line"}`}>
+      <div className="dualith-workspace-header flex h-9 shrink-0 items-center justify-between gap-3 border-b border-line px-3">
+        <div className="dualith-workspace-title flex min-w-0 items-center gap-2">
+          <span className="dualith-workspace-name shrink-0 text-xs font-medium uppercase tracking-widest text-zinc-400">{project ? project.name : "Team room"}</span>
+          {team && <Badge className="dualith-workspace-badge" label={teamBadge} tone={team.status === "blocked" ? "amber" : team.status === "error" ? "red" : "cyan"} />}
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          {(hasHistory || hasAgentChat) && project && (
+        <div className="dualith-workspace-actions flex shrink-0 items-center gap-1.5">
+          {hasAgentChat && project && (
             <button
               type="button"
-              onClick={() => { void onClearChat(project.name); }}
-              className="border border-line-hard px-2 py-1 text-[10px] text-zinc-500 outline-none transition-colors hover:text-warn focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+              onClick={() => { void onClearAgentChat(project.name); }}
+              className="dualith-workspace-action border border-line-hard px-2 py-1 text-[10px] text-zinc-500 outline-none transition-colors hover:text-warn focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
             >
-              Clear chat
+              Clear room
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => setDetailsOpen(true)}
-            className="flex items-center gap-1.5 border border-line-hard px-2 py-1 text-[10px] text-accent outline-none transition-colors hover:bg-cyan-950/30 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
-          >
-            Details
-            {noteCount > 0 && <span className="tabular-nums text-zinc-500">{noteCount}</span>}
-          </button>
         </div>
       </div>
-      <div className={`dualith-mobile-pane dualith-mobile-pane--preview ${mobileView === "preview" ? "is-mobile-active" : ""}`}>
-        <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive={mobileView === "preview"} />
+      <div className="dualith-team-center">
+        <TaskWorkspace project={project} projectEvents={projectEvents} onHumanAnswer={onHumanAnswer} onAddressNotes={addressNotes} teamMessages={teamMessages} />
+        <LiveWorkingBubble project={project} projectEvents={projectEvents} />
       </div>
-      <div className={`dualith-mobile-pane dualith-mobile-pane--chat ${mobileView === "chat" ? "is-mobile-active" : ""}`}>
-        <ConversationThread project={project} projectEvents={projectEvents} results={results} onApprovePlan={onApprovePlan} />
-        {blocked && project && <HumanInputPane project={project} onSubmit={onHumanAnswer} />}
-      </div>
-      <div className={`dualith-mobile-composer-pane ${mobileView === "chat" ? "is-mobile-active" : ""}`}>
-        <ChatComposer project={project} onSendChat={onSendChat} onStopChat={onStopChat} runnerHealth={runnerHealth} />
-      </div>
-      {detailsOpen && (
-        <DetailsDrawer project={project} appStatus={appStatus} onClose={() => setDetailsOpen(false)} onDevServerAction={onDevServerAction} />
-      )}
     </main>
   );
 }
@@ -3059,12 +5053,80 @@ function tokenLabel(value: number | null | undefined) {
   return compactNumber(value);
 }
 
+function countLabel(value: number | null | undefined) {
+  if (!value) return "0";
+  return compactNumber(value);
+}
+
 function quotaLimitLabel(value: number) {
   return value ? `${compactNumber(value)} tok` : "not set";
 }
 
 function quotaSourceLabel(period: QuotaPeriod) {
-  return period.source === "status" ? "/status" : "fallback";
+  return period.source === "status" ? "runner usage" : "fallback";
+}
+
+function quotaLimitKnown(period: QuotaPeriod) {
+  return period.limit_known ?? period.limit > 0;
+}
+
+function quotaLimitSourceLabel(period: QuotaPeriod) {
+  if (!quotaLimitKnown(period)) return "no cap";
+  if (period.limit_source === "statusline" || period.limit_source === "rate_limit") return "derived cap";
+  if (period.limit_source === "status") return "provider cap";
+  if (period.limit_source === "manual") return "configured cap";
+  return "configured cap";
+}
+
+function quotaPercentValue(period: QuotaPeriod) {
+  if (typeof period.percent_usable === "number") return period.percent_usable;
+  if (period.usable_limit > 0) return (period.used / period.usable_limit) * 100;
+  return null;
+}
+
+function quotaPercentLabel(period: QuotaPeriod) {
+  const pct = quotaPercentValue(period);
+  if (pct === null) return "unknown";
+  return `${Math.min(999, Math.max(0, pct)).toFixed(pct >= 10 ? 0 : 1)}%`;
+}
+
+function quotaStateTone(period: QuotaPeriod) {
+  const state = period.state ?? (quotaLimitKnown(period) ? "ok" : "limit_unknown");
+  if (state === "over_reserve") return "text-danger";
+  if (state === "near_limit" || state === "watch" || state === "limit_unknown") return "text-warn";
+  return "text-ok";
+}
+
+function quotaStateLabel(period: QuotaPeriod) {
+  const state = period.state ?? (quotaLimitKnown(period) ? "ok" : "limit_unknown");
+  if (state === "limit_unknown") return "limit unknown";
+  if (state === "over_reserve") return "over reserve";
+  if (state === "near_limit") return "near reserve";
+  if (state === "watch") return "watch";
+  return "healthy";
+}
+
+function quotaStatusCopy(period: QuotaPeriod) {
+  if (!quotaLimitKnown(period)) return "Set a cap to calculate remaining budget.";
+  if (period.state === "over_reserve") return "Routing guard will avoid this runner when possible.";
+  if (period.state === "near_limit") return "Close to reserve. Expect fallback routing soon.";
+  if (period.state === "watch") return "Usage is rising. Keep an eye on this window.";
+  return `${tokenLabel(period.usable_remaining)} usable tokens left.`;
+}
+
+function quotaWindowMeta(period: QuotaPeriod) {
+  const limitLabel = quotaLimitKnown(period)
+    ? `${quotaLimitLabel(period.limit)} ${quotaLimitSourceLabel(period)}`
+    : period.usage_known
+      ? "provider cap unavailable"
+      : "no fallback cap configured";
+  const pieces = [
+    `${tokenLabel(period.used)} used`,
+    limitLabel,
+    period.resets ? `resets ${period.resets}` : "",
+    period.checked_at ? `checked ${timestampLabel(period.checked_at)}` : "",
+  ].filter(Boolean);
+  return pieces.join(" / ");
 }
 
 function statusEntryHasParsedLimit(entry: RunnerStatusEntry) {
@@ -3088,6 +5150,73 @@ function runnerStatusTone(entry: RunnerStatusEntry) {
   if (entry.status === "ok" && (statusEntryHasParsedLimit(entry) || statusEntryHasUsage(entry))) return "text-ok";
   if (entry.status === "error" || entry.status === "timeout") return "text-danger";
   if (entry.status === "ok") return "text-warn";
+  return "text-zinc-600";
+}
+
+function tokenCoverageKnown(totals: UsageTotals) {
+  return (totals.token_runs ?? 0) > 0 || (totals.total_tokens ?? 0) > 0;
+}
+
+function unknownTokenRuns(totals: UsageTotals) {
+  const reported = totals.token_runs ?? 0;
+  const explicit = totals.unknown_token_runs ?? 0;
+  if (explicit) return explicit;
+  return Math.max(0, (totals.runs ?? 0) - reported);
+}
+
+function usageTokenLabel(totals: UsageTotals) {
+  if (!totals.runs) return "none";
+  if (tokenCoverageKnown(totals)) return `${countLabel(totals.total_tokens)} tok`;
+  return "not reported";
+}
+
+function usageTokenDetail(totals: UsageTotals) {
+  if (!totals.runs) return "No completed runs tracked.";
+  const known = totals.token_runs ?? 0;
+  const unknown = unknownTokenRuns(totals);
+  if (known && unknown) return `${known} runs reported tokens, ${unknown} did not.`;
+  if (known) return `${known} runs reported token totals.`;
+  return `${unknown || totals.runs} runs did not emit per-run token totals.`;
+}
+
+function usageStatusLabel(totals: UsageTotals) {
+  const parts = [
+    totals.ok_runs ? `${totals.ok_runs} ok` : "",
+    totals.error_runs ? `${totals.error_runs} error` : "",
+    totals.stopped_runs ? `${totals.stopped_runs} stopped` : "",
+  ].filter(Boolean);
+  return parts.join(" / ") || "no finished runs";
+}
+
+function usageOutputLabel(totals: UsageTotals) {
+  if (!totals.output_chars && !totals.output_lines) return "no output";
+  return `${countLabel(totals.output_chars)} chars / ${countLabel(totals.output_lines)} lines`;
+}
+
+function usageRunMeta(totals: UsageTotals) {
+  const time = durationLabel(totals.duration_ms);
+  const output = usageOutputLabel(totals);
+  return `${time === "-" ? "0s" : time} tracked / ${output}`;
+}
+
+function usageRunTokenLabel(run: UsageRun) {
+  if (run.total_tokens !== null && run.total_tokens !== undefined) return `${compactNumber(run.total_tokens)} tok`;
+  if (run.output_chars) return `${countLabel(run.output_chars)} chars`;
+  return "tracking output";
+}
+
+function activeDurationLabel(run: UsageRun, tick: number) {
+  void tick;
+  const started = new Date(run.started_at || "").getTime();
+  if (!Number.isFinite(started) || !started) return durationLabel(run.duration_ms);
+  return durationLabel(Date.now() - started);
+}
+
+function usageStatusTone(status: string | undefined) {
+  if (status === "running") return "text-accent";
+  if (status === "ok") return "text-ok";
+  if (status === "stopped") return "text-warn";
+  if (status === "error") return "text-danger";
   return "text-zinc-600";
 }
 
@@ -3121,31 +5250,34 @@ function normalizeQuotaSettings(settings: Partial<QuotaSettings> | null | undefi
 }
 
 function QuotaLine({ label, period }: { label: string; period: QuotaPeriod }) {
-  const hasLimit = period.limit > 0;
-  const pct = hasLimit ? Math.min((period.used / period.limit) * 100, 100) : 0;
-  const barColor = pct >= 90 ? "bg-danger" : pct >= 70 ? "bg-warn" : "bg-ok";
-  const tone = !hasLimit ? "text-zinc-600" : period.available ? "text-ok" : "text-danger";
-  const status = !hasLimit ? "—" : period.available ? `${tokenLabel(period.usable_remaining)} left` : "over reserve";
+  const hasLimit = quotaLimitKnown(period);
+  const pct = quotaPercentValue(period);
+  const width = pct === null ? 0 : Math.min(pct, 100);
+  const barColor = !hasLimit || period.state === "limit_unknown" ? "bg-warn" : width >= 90 ? "bg-danger" : width >= 75 ? "bg-warn" : "bg-ok";
+  const tone = quotaStateTone(period);
+  const statusCopy = hasLimit ? quotaStatusCopy(period) : "Add cap to calculate remaining budget.";
+  const windowMeta = quotaWindowMeta(period);
 
   return (
-    <div className="py-1">
+    <div className="py-1.5">
       <div className="grid grid-cols-[96px_1fr_auto] items-baseline gap-x-2 text-[10px]">
         <span className="truncate uppercase tracking-wider text-zinc-600">{label}</span>
-        <span className="min-w-0 truncate text-zinc-600">
-          {tokenLabel(period.used)}{hasLimit ? ` / ${quotaLimitLabel(period.limit)}` : ""} via {quotaSourceLabel(period)}
-        </span>
-        <span className={`shrink-0 tabular-nums ${tone}`}>{status}</span>
+        <span className="min-w-0 leading-4 text-zinc-600" title={windowMeta}>{windowMeta}</span>
+        <span className={`shrink-0 tabular-nums ${tone}`}>{hasLimit ? quotaPercentLabel(period) : "cap needed"}</span>
       </div>
-      <div className="mt-0.5 h-0.5 w-full overflow-hidden rounded-full bg-zinc-800">
-        {hasLimit && <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${pct}%` }} />}
+      <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-zinc-800">
+        <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: hasLimit ? `${width}%` : "100%" }} />
       </div>
+      <div className={`mt-1 text-[10px] leading-4 ${tone}`}>{hasLimit ? `${quotaStateLabel(period)} / ${statusCopy}` : statusCopy}</div>
     </div>
   );
 }
 
-function UsagePeriodBar({ used, limit, resets, label }: { used: number; limit: number; resets?: string; label: string }) {
-  const pct = limit > 0 ? Math.min((used / limit) * 100, 100) : 0;
-  const barColor = pct >= 90 ? "bg-danger" : pct >= 70 ? "bg-warn" : "bg-ok";
+function UsagePeriodBar({ used, limit, resets, label, period }: { used: number; limit: number; resets?: string; label: string; period?: QuotaPeriod }) {
+  const hasLimit = period ? quotaLimitKnown(period) : limit > 0;
+  const pct = period ? quotaPercentValue(period) : limit > 0 ? Math.min((used / limit) * 100, 100) : null;
+  const width = pct === null ? 0 : Math.min(pct, 100);
+  const barColor = !hasLimit ? "bg-warn" : width >= 90 ? "bg-danger" : width >= 75 ? "bg-warn" : "bg-ok";
   return (
     <div className="space-y-0.5">
       <div className="flex items-baseline justify-between gap-2">
@@ -3154,22 +5286,45 @@ function UsagePeriodBar({ used, limit, resets, label }: { used: number; limit: n
           {compactNumber(used)} tok{resets ? <span className="text-zinc-600"> · {resets}</span> : null}
         </span>
       </div>
-      {limit > 0 ? (
-        <div className="h-0.5 w-full overflow-hidden rounded-full bg-zinc-800">
-          <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${pct}%` }} />
-        </div>
-      ) : (
-        <div className="h-0.5 w-full rounded-full bg-zinc-800" />
-      )}
+      <div className="h-0.5 w-full overflow-hidden rounded-full bg-zinc-800">
+        <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: hasLimit ? `${width}%` : "100%" }} />
+      </div>
+      {period && <div className={`truncate text-[10px] ${quotaStateTone(period)}`}>{quotaStateLabel(period)} / {hasLimit ? `${quotaPercentLabel(period)} usable` : "set cap to show remaining"}</div>}
     </div>
   );
 }
 
-function RunnerStatusCard({ label, entry, runner, quotaPeriods }: {
+function LimitAwareUsagePeriodBar({ label, period }: { label: string; period: QuotaPeriod }) {
+  const hasLimit = quotaLimitKnown(period);
+  const pct = quotaPercentValue(period);
+  const width = pct === null ? 0 : Math.min(pct, 100);
+  const barColor = !hasLimit || period.state === "limit_unknown" ? "bg-warn" : width >= 90 ? "bg-danger" : width >= 75 ? "bg-warn" : "bg-ok";
+  const windowMeta = quotaWindowMeta(period);
+  const statusCopy = hasLimit ? quotaStatusCopy(period) : "Cap needed for remaining budget.";
+
+  return (
+    <div className="space-y-0.5">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</span>
+        <span className={`shrink-0 tabular-nums text-[10px] ${quotaStateTone(period)}`}>
+          {hasLimit ? `${quotaPercentLabel(period)} used` : "cap needed"}
+        </span>
+      </div>
+      <div className="h-0.5 w-full overflow-hidden rounded-full bg-zinc-800">
+        <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: hasLimit ? `${width}%` : "100%" }} />
+      </div>
+      <div className="text-[10px] leading-4 text-zinc-600" title={windowMeta}>{windowMeta}</div>
+      {hasLimit && <div className={`text-[10px] leading-4 ${quotaStateTone(period)}`}>{statusCopy}</div>}
+    </div>
+  );
+}
+
+function RunnerStatusCard({ label, entry, runner, quotaPeriods, className }: {
   label: string;
   entry: RunnerStatusEntry;
   runner: "codex" | "claude";
-  quotaPeriods: { label: string; key: string; limit: number }[];
+  quotaPeriods: { label: string; key: string; period: QuotaPeriod }[];
+  className?: string;
 }) {
   const periods = runner === "codex"
     ? [{ label: "Monthly", key: "monthly" }]
@@ -3179,12 +5334,13 @@ function RunnerStatusCard({ label, entry, runner, quotaPeriods }: {
     const p = entry.parsed[key];
     return p && p.used > 0;
   });
+  const hasUnknownLimit = quotaPeriods.some((quotaPeriod) => !quotaLimitKnown(quotaPeriod.period));
 
   const isError = entry.status === "error" || entry.status === "timeout";
-  const dot = isError ? "bg-danger" : hasData ? "bg-ok" : entry.status === "ok" ? "bg-warn" : "bg-zinc-700";
+  const dot = isError ? "bg-danger" : hasUnknownLimit ? "bg-warn" : hasData ? "bg-ok" : entry.status === "ok" ? "bg-warn" : "bg-zinc-700";
 
   return (
-    <div className="min-w-0 space-y-2 border-r border-line-hard px-3 py-2.5 last:border-r-0">
+    <div className={`min-w-0 space-y-2 px-3 py-2.5 ${className ?? ""}`}>
       <div className="flex items-center justify-between gap-1">
         <span className="flex min-w-0 items-center gap-2 text-[10px] font-semibold uppercase tracking-widest text-zinc-400">
           <RunnerMascot runner={runner} size={16} />
@@ -3203,12 +5359,15 @@ function RunnerStatusCard({ label, entry, runner, quotaPeriods }: {
             const p = entry.parsed[key];
             if (!p) return null;
             const qp = quotaPeriods.find((q) => q.key === key);
+            if (qp) {
+              return <LimitAwareUsagePeriodBar key={key} label={pLabel} period={qp.period} />;
+            }
             return (
               <UsagePeriodBar
                 key={key}
                 label={pLabel}
                 used={p.used}
-                limit={qp?.limit ?? 0}
+                limit={0}
                 resets={p.resets}
               />
             );
@@ -3307,17 +5466,17 @@ function QuotaEditor({
       </div>
       <div className="grid grid-cols-2 border-b border-line-hard">
         <QuotaInput
-          label="Fallback Codex"
+          label="Codex cap"
           value={settings.codex_monthly_tokens}
           onChange={(value) => updateSetting("codex_monthly_tokens", value)}
         />
         <QuotaInput
-          label="Fallback 5h"
+          label="Claude 5h cap"
           value={settings.claude_five_hour_tokens}
           onChange={(value) => updateSetting("claude_five_hour_tokens", value)}
         />
         <QuotaInput
-          label="Fallback week"
+          label="Claude week cap"
           value={settings.claude_weekly_tokens}
           onChange={(value) => updateSetting("claude_weekly_tokens", value)}
         />
@@ -3347,36 +5506,71 @@ function QuotaEditor({
 // ── Right panel: tabbed Status / Config / Log ─────────────────────────────
 
 type RightTab = "status" | "config" | "log";
+let statusAutoRefreshRequested = false;
 
 function StatusTab({
   usage, quota, onStatusRefresh,
 }: {
   usage: UsageSnapshot;
   quota: QuotaSnapshot;
-  onStatusRefresh: () => Promise<void>;
+  onStatusRefresh: () => Promise<StatusRefreshState | void>;
 }) {
   const active = usage.active ?? [];
   const byModel = usage.by_model ?? [];
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshDetail, setRefreshDetail] = useState("");
+  const refreshInFlightRef = useRef(false);
+  const refreshBaselineRef = useRef("");
+  const statusSignature = `${quota.status.codex.checked_at || ""}|${quota.status.claude.checked_at || ""}`;
 
-  const refresh = async () => {
+  const refresh = useCallback(async (manual = false) => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     setRefreshing(true);
-    try { await onStatusRefresh(); } catch { /* ignore on mount */ } finally { setRefreshing(false); }
-  };
+    refreshBaselineRef.current = statusSignature;
+    setRefreshDetail("refreshing");
+    try {
+      const state = await onStatusRefresh();
+      if (state === "running") {
+        setRefreshDetail("cached");
+      } else if (state === "fresh") {
+        setRefreshDetail("cached");
+      } else if (state === "refreshing") {
+        setRefreshDetail("refreshing");
+      } else {
+        setRefreshDetail(manual ? "refreshed" : "");
+      }
+    } catch {
+      setRefreshDetail("error");
+    } finally {
+      refreshInFlightRef.current = false;
+      setRefreshing(false);
+    }
+  }, [onStatusRefresh, statusSignature]);
 
-  useEffect(() => { void refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (refreshDetail === "refreshing" && refreshBaselineRef.current && statusSignature !== refreshBaselineRef.current) {
+      setRefreshDetail("refreshed");
+    }
+  }, [refreshDetail, statusSignature]);
 
-  const codexPeriods = [{ label: "Monthly", key: "monthly", limit: quota.codex.monthly.limit }];
+  useEffect(() => {
+    if (statusAutoRefreshRequested) return;
+    statusAutoRefreshRequested = true;
+    void refresh(false);
+  }, [refresh]);
+
+  const codexPeriods = [{ label: "Monthly", key: "monthly", period: quota.codex.monthly }];
   const claudePeriods = [
-    { label: "5-Hour", key: "five_hour", limit: quota.claude.five_hour.limit },
-    { label: "Weekly", key: "weekly", limit: quota.claude.weekly.limit },
+    { label: "5-Hour", key: "five_hour", period: quota.claude.five_hour },
+    { label: "Weekly", key: "weekly", period: quota.claude.weekly },
   ];
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
       {/* AI runner token cards */}
-      <div className="grid grid-cols-2 border-b border-line-hard">
-        <RunnerStatusCard label="Codex" entry={quota.status.codex} runner="codex" quotaPeriods={codexPeriods} />
+      <div className="grid grid-cols-1 border-b border-line-hard">
+        <RunnerStatusCard className="border-b border-line-hard" label="Codex" entry={quota.status.codex} runner="codex" quotaPeriods={codexPeriods} />
         <RunnerStatusCard label="Claude" entry={quota.status.claude} runner="claude" quotaPeriods={claudePeriods} />
       </div>
 
@@ -3428,14 +5622,169 @@ function StatusTab({
         {!active.length && !byModel.length && <EmptyState message="No runs yet today." />}
       </div>
 
-      <div className="shrink-0 border-t border-line-hard px-3 py-1.5 text-right">
+      <div className="flex shrink-0 items-center justify-end gap-2 border-t border-line-hard px-3 py-1.5">
+        {refreshDetail && (
+          <span className={`text-[10px] ${refreshDetail === "error" ? "text-danger" : refreshDetail === "refreshing" ? "text-warn" : "text-zinc-600"}`}>
+            {refreshDetail}
+          </span>
+        )}
         <button
           type="button"
           disabled={refreshing}
-          onClick={() => void refresh()}
+          onClick={() => void refresh(true)}
           className="text-[10px] text-accent outline-none hover:text-zinc-300 disabled:text-zinc-700"
         >
-          {refreshing ? "Checking…" : "↻ Refresh usage"}
+          {refreshing ? "Checking..." : "Refresh usage"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function UsageStatusTab({
+  usage, quota, onStatusRefresh,
+}: {
+  usage: UsageSnapshot;
+  quota: QuotaSnapshot;
+  onStatusRefresh: (force?: boolean) => Promise<StatusRefreshState | void>;
+}) {
+  const active = usage.active ?? [];
+  const byModel = usage.by_model ?? [];
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshDetail, setRefreshDetail] = useState("");
+  const [nowTick, setNowTick] = useState(0);
+  const refreshInFlightRef = useRef(false);
+  const refreshBaselineRef = useRef("");
+  const statusSignature = `${quota.status.codex.checked_at || ""}|${quota.status.claude.checked_at || ""}`;
+
+  const refresh = useCallback(async (manual = false) => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    setRefreshing(true);
+    refreshBaselineRef.current = statusSignature;
+    setRefreshDetail("refreshing");
+    try {
+      const state = await onStatusRefresh(manual);
+      if (state === "running") {
+        setRefreshDetail("cached");
+      } else if (state === "fresh") {
+        setRefreshDetail(manual ? "fresh" : "cached");
+      } else if (state === "refreshing") {
+        setRefreshDetail("refreshing");
+      } else {
+        setRefreshDetail(manual ? "refreshed" : "");
+      }
+    } catch {
+      setRefreshDetail("error");
+    } finally {
+      refreshInFlightRef.current = false;
+      setRefreshing(false);
+    }
+  }, [onStatusRefresh, statusSignature]);
+
+  useEffect(() => {
+    if (refreshDetail === "refreshing" && refreshBaselineRef.current && statusSignature !== refreshBaselineRef.current) {
+      setRefreshDetail("refreshed");
+    }
+  }, [refreshDetail, statusSignature]);
+
+  useEffect(() => {
+    if (statusAutoRefreshRequested) return;
+    statusAutoRefreshRequested = true;
+    void refresh(false);
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!active.length) return;
+    const timer = window.setInterval(() => setNowTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [active.length]);
+
+  const codexPeriods = [{ label: "Monthly", key: "monthly", period: quota.codex.monthly }];
+  const claudePeriods = [
+    { label: "5-Hour", key: "five_hour", period: quota.claude.five_hour },
+    { label: "Weekly", key: "weekly", period: quota.claude.weekly },
+  ];
+  const tokenWarning = usage.today.runs > 0 && !tokenCoverageKnown(usage.today);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+      <div className="grid grid-cols-1 border-b border-line-hard">
+        <RunnerStatusCard className="border-b border-line-hard" label="Codex" entry={quota.status.codex} runner="codex" quotaPeriods={codexPeriods} />
+        <RunnerStatusCard label="Claude" entry={quota.status.claude} runner="claude" quotaPeriods={claudePeriods} />
+      </div>
+
+      <div className="border-b border-line-hard px-3 py-2.5">
+        <div className="mb-1.5 flex items-baseline justify-between gap-2">
+          <span className="text-[10px] uppercase tracking-widest text-zinc-600">Today</span>
+          <span className="truncate text-[10px] text-zinc-600">{usageStatusLabel(usage.today)}</span>
+        </div>
+        <div className="grid grid-cols-3 border border-line-hard">
+          <UsageStat label="Runs" value={String(usage.today.runs)} />
+          <UsageStat label="Runtime" value={durationLabel(usage.today.duration_ms) === "-" ? "0s" : durationLabel(usage.today.duration_ms)} />
+          <UsageStat label="Tokens" value={usageTokenLabel(usage.today)} />
+        </div>
+        <div className="mt-2 grid grid-cols-[1fr_auto] gap-2 text-[10px]">
+          <span className="min-w-0 truncate text-zinc-600">{usageRunMeta(usage.today)}</span>
+          <span className={tokenWarning ? "text-warn" : "text-zinc-600"}>{usageTokenDetail(usage.today)}</span>
+        </div>
+      </div>
+
+      {active.length > 0 && (
+        <div className="border-b border-line-hard px-3 py-2">
+          <div className="mb-1.5 text-[10px] uppercase tracking-widest text-zinc-600">Running now</div>
+          <div className="space-y-1">
+            {active.map((run) => (
+              <div key={run.id} className="grid grid-cols-[auto_1fr_auto] items-center gap-2 border border-line-hard px-2 py-1.5">
+                <span className={`text-[10px] uppercase ${usageStatusTone(run.status)}`}>{run.status}</span>
+                <span className="flex min-w-0 items-center gap-1.5 truncate text-[10px] text-zinc-500">
+                  <RunnerMascot runner={run.runner} size={14} />
+                  <span className="truncate">{run.project} / {modeLabels[run.mode]} / {run.model || "default"}</span>
+                </span>
+                <span className="shrink-0 tabular-nums text-[10px] text-zinc-600">{activeDurationLabel(run, nowTick)} / {usageRunTokenLabel(run)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className="sticky top-0 z-10 flex items-baseline justify-between gap-2 border-b border-line-hard bg-bg px-3 py-2 text-[10px]">
+          <span className="uppercase tracking-widest text-zinc-600">Tracked by model</span>
+          <span className="truncate text-zinc-600">{usage.totals.runs} runs / {durationLabel(usage.totals.duration_ms) === "-" ? "0s" : durationLabel(usage.totals.duration_ms)}</span>
+        </div>
+        {byModel.map((item) => (
+          <div key={item.id} className="border-b border-zinc-950 px-3 py-1.5">
+            <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2">
+              <span className="shrink-0 text-[10px] uppercase text-zinc-600">{item.runs}x</span>
+              <span className="flex min-w-0 items-center gap-1.5 truncate text-[10px] text-zinc-500">
+                <RunnerMascot runner={item.runner} size={14} />
+                <span className="truncate">{runnerLabels[item.runner] ?? item.runner} / {item.model}</span>
+              </span>
+              <span className="shrink-0 tabular-nums text-[10px] text-zinc-600">{usageTokenLabel(item)}</span>
+            </div>
+            <div className="mt-0.5 grid grid-cols-[1fr_auto] gap-2 text-[10px] text-zinc-700">
+              <span className="min-w-0 truncate">{usageRunMeta(item)}</span>
+              <span className={`shrink-0 ${usageStatusTone(item.last_status)}`}>{item.last_status || usageStatusLabel(item)}</span>
+            </div>
+          </div>
+        ))}
+        {!byModel.length && <EmptyState message="No usage runs tracked yet." />}
+      </div>
+
+      <div className="flex shrink-0 items-center justify-end gap-2 border-t border-line-hard px-3 py-1.5">
+        {refreshDetail && (
+          <span className={`text-[10px] ${refreshDetail === "error" ? "text-danger" : refreshDetail === "refreshing" ? "text-warn" : "text-zinc-600"}`}>
+            {refreshDetail}
+          </span>
+        )}
+        <button
+          type="button"
+          disabled={refreshing}
+          onClick={() => void refresh(true)}
+          className="text-[10px] text-accent outline-none hover:text-zinc-300 disabled:text-zinc-700"
+        >
+          {refreshing ? "Checking..." : "Refresh usage"}
         </button>
       </div>
     </div>
@@ -3449,6 +5798,8 @@ function ConfigTab({
   onQuotaSave: (settings: QuotaSettings) => Promise<void>;
 }) {
   const runnerPolicy = normalizeRunnerPolicy(quota.settings.runner_policy);
+  const quotaPeriods = [quota.codex.monthly, quota.claude.five_hour, quota.claude.weekly];
+  const unknownLimits = quotaPeriods.filter((period) => !quotaLimitKnown(period)).length;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
@@ -3456,7 +5807,12 @@ function ConfigTab({
       <div className="border-b border-line-hard px-3 py-2.5">
         <div className="mb-1.5 flex items-baseline justify-between gap-2 text-[10px]">
           <span className="uppercase tracking-widest text-zinc-600">Token limits</span>
-          <span className="truncate text-zinc-500">{runnerPolicyLabels[runnerPolicy]}</span>
+          <span className={`truncate ${unknownLimits ? "text-warn" : "text-ok"}`}>{unknownLimits ? `${unknownLimits} limits unknown` : "limits active"}</span>
+        </div>
+        <div className={`mb-2 text-[10px] leading-4 ${unknownLimits ? "text-warn" : "text-zinc-600"}`}>
+          {unknownLimits
+            ? "Codex /status and Claude /usage can show usage, but no provider cap was exposed here. Add fallback caps below for remaining budget and reserve warnings."
+            : `${runnerPolicyLabels[runnerPolicy]} guard is using configured caps and ${quota.settings.reserve_percent}% reserve.`}
         </div>
         <div className="space-y-2">
           <QuotaLine label="Codex monthly" period={quota.codex.monthly} />
@@ -3517,7 +5873,7 @@ function CommandColumn({
   usage: UsageSnapshot;
   quota: QuotaSnapshot;
   onQuotaSave: (settings: QuotaSettings) => Promise<void>;
-  onStatusRefresh: () => Promise<void>;
+  onStatusRefresh: (force?: boolean) => Promise<StatusRefreshState | void>;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onCloseMobile?: () => void;
@@ -3602,6 +5958,152 @@ function CommandColumn({
   );
 }
 
+type WorkspaceRightTab = "direct" | "artifacts" | "logs" | "quota" | "preview";
+
+function artifactReadyCount(project: ProjectRecord | null) {
+  const artifacts = project?.artifacts;
+  return [
+    artifacts?.architecture,
+    artifacts?.decisions,
+    artifacts?.project_memory,
+    artifacts?.plan,
+    artifacts?.feedback,
+    artifacts?.lessons,
+  ].filter((value) => Boolean(value?.trim())).length;
+}
+
+function QuotaPanel({
+  usage,
+  quota,
+  onQuotaSave,
+  onStatusRefresh,
+}: {
+  usage: UsageSnapshot;
+  quota: QuotaSnapshot;
+  onQuotaSave: (settings: QuotaSettings) => Promise<void>;
+  onStatusRefresh: (force?: boolean) => Promise<StatusRefreshState | void>;
+}) {
+  return (
+    <div className="dualith-quota-panel">
+      <UsageStatusTab usage={usage} quota={quota} onStatusRefresh={onStatusRefresh} />
+      <ConfigTab quota={quota} onQuotaSave={onQuotaSave} />
+    </div>
+  );
+}
+
+function WorkspaceRightPanel({
+  project,
+  results,
+  entries,
+  commits,
+  usage,
+  quota,
+  appStatus,
+  mobileView,
+  onSendChat,
+  onStopChat,
+  onHumanAnswer,
+  onApprovePlan,
+  onDevServerAction,
+  onQuotaSave,
+  onStatusRefresh,
+  runnerHealth,
+  initialTab,
+  onClose,
+}: {
+  project: ProjectRecord | null;
+  results: AgentResult[];
+  entries: ConsoleEntry[];
+  commits: string[];
+  usage: UsageSnapshot;
+  quota: QuotaSnapshot;
+  appStatus: AppStatus;
+  mobileView: MobileView;
+  onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean }) => Promise<void>;
+  onStopChat: (projectName: string) => Promise<void>;
+  onHumanAnswer: (projectName: string, answer: string) => Promise<void>;
+  onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
+  onDevServerAction: (projectName: string, action: DevServerAction) => Promise<void>;
+  onQuotaSave: (settings: QuotaSettings) => Promise<void>;
+  onStatusRefresh: (force?: boolean) => Promise<StatusRefreshState | void>;
+  runnerHealth: RunnerHealth;
+  initialTab?: WorkspaceRightTab;
+  onClose?: () => void;
+}) {
+  const [tab, setTab] = useState<WorkspaceRightTab>(initialTab ?? "direct");
+
+  useEffect(() => {
+    if (initialTab) setTab(initialTab);
+  }, [initialTab]);
+  const activeRuns = usage.active ?? [];
+  const readyArtifacts = artifactReadyCount(project);
+  const previewStatus = project?.dev_server?.status ?? "stopped";
+
+  useEffect(() => {
+    if (mobileView === "direct") setTab("direct");
+    if (mobileView === "details" && tab === "direct") setTab("artifacts");
+  }, [mobileView, tab]);
+
+  const tabs: { id: WorkspaceRightTab; label: string; badge?: string }[] = [
+    { id: "direct", label: "Direct" },
+    { id: "artifacts", label: "Artifacts", badge: readyArtifacts ? String(readyArtifacts) : undefined },
+    { id: "logs", label: "Logs", badge: entries.length ? String(entries.length) : undefined },
+    { id: "quota", label: "Quota", badge: activeRuns.length ? String(activeRuns.length) : undefined },
+    { id: "preview", label: "Preview", badge: previewStatus !== "stopped" ? previewStatus : undefined },
+  ];
+
+  return (
+    <aside className={`dualith-right-panel ${(mobileView === "direct" || mobileView === "details") ? "is-mobile-active" : ""}`}>
+      <div className="dualith-right-tabs" role="tablist" aria-label="Direct chat and details">
+        {tabs.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === item.id}
+            onClick={() => setTab(item.id)}
+            className={tab === item.id ? "is-active" : ""}
+          >
+            <span>{item.label}</span>
+            {item.badge && <em>{item.badge}</em>}
+          </button>
+        ))}
+        {onClose && (
+          <button type="button" aria-label="Close panel" className="dualith-right-close" onClick={onClose}>✕</button>
+        )}
+      </div>
+      <div className="dualith-right-content">
+        {tab === "direct" && (
+          <DirectChatPanel
+            project={project}
+            results={results}
+            onSendChat={onSendChat}
+            onStopChat={onStopChat}
+            onHumanAnswer={onHumanAnswer}
+            onApprovePlan={onApprovePlan}
+            runnerHealth={runnerHealth}
+          />
+        )}
+        {tab === "artifacts" && (
+          <div className="dualith-right-stack">
+            <ReviewPane project={project} />
+            <ArtifactPane project={project} />
+            <MemoryPane project={project} />
+            <CommitPane commits={project?.commits ?? []} />
+          </div>
+        )}
+        {tab === "logs" && <LogTab entries={entries} commits={commits} />}
+        {tab === "quota" && <QuotaPanel usage={usage} quota={quota} onQuotaSave={onQuotaSave} onStatusRefresh={onStatusRefresh} />}
+        {tab === "preview" && (
+          <div className="dualith-right-stack">
+            <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive={mobileView === "details"} />
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
 function useAppearance() {
   const [theme, setTheme] = useState<ThemeId>("daylight");
   const [density, setDensity] = useState<DensityId>("comfortable");
@@ -3651,17 +6153,17 @@ function SettingsMenu({ theme, setTheme, density, setDensity }: {
   }, [open]);
 
   return (
-    <div ref={ref} className="relative flex items-center">
+    <div ref={ref} className="dualith-settings-menu relative flex items-center">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="border border-line-hard px-2 py-1 text-[10px] uppercase tracking-widest text-zinc-500 outline-none transition-colors hover:text-zinc-200 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+        className="dualith-settings-trigger border border-line-hard px-2 py-1 text-[10px] uppercase tracking-widest text-zinc-500 outline-none transition-colors hover:text-zinc-200 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
         title="Appearance settings"
       >
         Theme
       </button>
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-1 w-60 rounded-md border border-line bg-surface p-3 text-zinc-300 shadow-xl shadow-black/50">
+          <div className="dualith-settings-popover absolute right-0 top-full z-50 mt-1 w-60 rounded-md border border-line bg-surface p-3 text-zinc-300 shadow-xl shadow-black/50">
           <div className="mb-1.5 text-[10px] uppercase tracking-widest text-zinc-500">Theme</div>
           <div className="mb-3 grid grid-cols-2 gap-1.5">
             {themeOptions.map((option) => (
@@ -3709,10 +6211,9 @@ function DualithApp() {
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupMode, setSetupMode] = useState<SetupMode>("new");
-  const [systemCollapsed, setSystemCollapsed] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
-  const [mobileView, setMobileView] = useState<MobileView>("chat");
+  const [mobileView, setMobileView] = useState<MobileView>("team");
   const [socketStatus, setSocketStatus] = useState("Connecting...");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -3926,10 +6427,12 @@ function DualithApp() {
     applySnapshot(await response.json());
   }, [applySnapshot]);
 
-  const refreshStatus = useCallback(async () => {
-    const response = await fetch(`${apiBase}/api/status/refresh`, { method: "POST" });
+  const refreshStatus = useCallback(async (force = false) => {
+    const response = await fetch(`${apiBase}/api/status/refresh${force ? "?force=true" : ""}`, { method: "POST" });
     if (!response.ok) throw new Error(await readErrorMessage(response));
+    const refreshState = response.headers.get("X-Dualith-Status-Refresh") as StatusRefreshState | null;
     applySnapshot(await response.json());
+    return refreshState ?? "refreshed";
   }, [applySnapshot]);
 
   const openSetup = useCallback((mode: SetupMode = "new") => {
@@ -3943,8 +6446,6 @@ function DualithApp() {
     setMobileView(view);
     if (view === "projects") {
       setMobilePanel("projects");
-    } else if (view === "system") {
-      setMobilePanel("system");
     } else {
       setMobilePanel(null);
     }
@@ -3970,63 +6471,149 @@ function DualithApp() {
   const live = socketStatus === "Live";
   const errored = socketStatus === "Connection error";
 
+  const [projectsOpen, setProjectsOpen] = useState(false);
+  const [drawerTab, setDrawerTab] = useState<WorkspaceRightTab | null>(null);
+
   return (
     <div className="dualith-app-shell h-screen w-screen overflow-hidden bg-bg text-zinc-300">
-      <header className={`dualith-topbar border-b border-line text-xs ${sidebarCollapsed ? "dualith-topbar--sidebar-collapsed" : ""}`}>
-        <div className="flex items-center gap-2 border-r border-line px-3 overflow-hidden">
+      <header className="dualith-topbar-b border-b border-line">
+        <div className="dualith-topbar-b__primary flex items-center gap-3 px-4">
+          <DualithLogo />
+          <span className="dualith-topbar-b__divider text-muted">/</span>
           <button
             type="button"
-            onClick={() => setSidebarCollapsed((v) => !v)}
-            className="dualith-desktop-only flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted outline-none hover:bg-line/40 hover:text-text focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
-            title={sidebarCollapsed ? "Show projects" : "Hide projects"}
-            aria-label="Toggle projects sidebar"
+            onClick={() => setProjectsOpen((v) => !v)}
+            className="dualith-topbar-b__project-trigger dualith-project-pill flex items-center gap-2 border border-line-hard px-3 py-1 text-xs outline-none transition-colors hover:border-line hover:text-text focus-visible:ring-1 focus-visible:ring-accent/60"
+            aria-label="Switch project"
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <rect x="3" y="4" width="18" height="16" rx="2" /><line x1="9" y1="4" x2="9" y2="20" />
-            </svg>
+            <span className="dualith-topbar-b__project-name max-w-[180px] truncate font-medium text-text">{selectedProject ? selectedProject.name : "no project"}</span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
-          {!sidebarCollapsed && <DualithLogo />}
+          {selectedProject?.team && (
+            <Badge className="dualith-topbar-b__team-badge" label={`r${selectedProject.team.round} · ${teamModeLabel(selectedProject.team)}`} tone={selectedProject.team.status === "blocked" ? "amber" : selectedProject.team.status === "error" ? "red" : "cyan"} />
+          )}
         </div>
-        <div className="flex min-w-0 items-center justify-between gap-3 border-r border-line px-3 text-zinc-500">
-          <span className="truncate">
-            {selectedProject ? selectedProject.name : "No project selected"}
-          </span>
-          <div className="dualith-mobile-actions">
-            <button type="button" onClick={() => openMobileView("projects")} className="border border-line-hard px-2 py-1 text-[10px] text-accent">Projects</button>
-            <button type="button" onClick={() => openMobileView("system")} className="border border-line-hard px-2 py-1 text-[10px] text-accent">System</button>
-          </div>
-        </div>
-        <div className="flex items-center justify-between gap-2 px-3">
-          <div className={`flex items-center gap-2 transition-colors duration-150 ${live ? "text-ok" : errored ? "text-danger" : "text-warn"}`}>
-            <span
-              aria-hidden="true"
-              title={socketStatus}
-              className={`h-2 w-2 shrink-0 ${
-                live ? "bg-ok" : errored ? "bg-danger" : "bg-warn"
-              }`}
-            />
-            <span className="text-xs">{socketStatus}</span>
+        <div className="dualith-topbar-b__secondary flex items-center gap-3 px-4">
+          <div className={`dualith-topbar-b__live flex items-center gap-1.5 text-xs transition-colors ${live ? "text-ok" : errored ? "text-danger" : "text-warn"}`}>
+            <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${live ? "bg-ok" : errored ? "bg-danger" : "bg-warn"} ${live ? "animate-pulse-glow" : ""}`} />
+            <span>{socketStatus}</span>
           </div>
           <button
             type="button"
-            onClick={() => setMobilePanel((p) => (p === "system" ? null : "system"))}
-            className="dualith-desktop-only border border-line-hard px-2 py-1 text-[10px] text-accent outline-none transition-colors hover:bg-cyan-950/30 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
-            title="System: console, usage, quota"
-          >
-            System
-          </button>
+            onClick={() => openSetup("new")}
+            className="dualith-topbar-b__new border border-line-hard px-2 py-1 text-[10px] uppercase tracking-widest text-muted outline-none transition-colors hover:text-text focus-visible:ring-1 focus-visible:ring-accent/60"
+          >New</button>
           <SettingsMenu theme={theme} setTheme={setTheme} density={density} setDensity={setDensity} />
         </div>
       </header>
-      {mobilePanel && (
-        <button
-          type="button"
-          aria-label="Close drawer"
-          className="dualith-drawer-backdrop"
-          onClick={() => openMobileView("chat")}
-        />
+
+      {/* Projects dropdown drawer */}
+      {projectsOpen && (
+        <>
+          <button type="button" aria-label="Close projects" className="dualith-drawer-backdrop" onClick={() => setProjectsOpen(false)} />
+          <div className="dualith-projects-dropdown">
+            <RegistryColumn
+              projects={projects}
+              selectedName={selectedName}
+              loading={loading}
+              loadError={loadError}
+              socketStatus={socketStatus}
+              onRetry={refreshProjects}
+              onSelect={(name) => { setSelectedName(name); setProjectsOpen(false); }}
+              onOpenSetup={() => { openSetup("new"); setProjectsOpen(false); }}
+              onDelete={deleteProject}
+              onCloseMobile={() => setProjectsOpen(false)}
+            />
+          </div>
+        </>
       )}
-      <div className={`dualith-main-grid ${sidebarCollapsed ? "dualith-main-grid--sidebar-collapsed" : ""}`} data-mobile-view={mobileView}>
+
+      {/* Right drawer (Direct / Artifacts / Logs / Quota / Preview) */}
+      {drawerTab && (
+        <>
+          <button type="button" aria-label="Close panel" className="dualith-drawer-backdrop" onClick={() => setDrawerTab(null)} />
+          <div className="dualith-right-drawer">
+            <WorkspaceRightPanel
+              project={selectedProject}
+              results={results}
+              entries={consoleEntries}
+              commits={globalCommits}
+              usage={usage}
+              quota={quota}
+              appStatus={appStatus}
+              mobileView={mobileView}
+              onSendChat={sendChat}
+              onStopChat={stopChat}
+              onHumanAnswer={submitHumanAnswer}
+              onApprovePlan={approvePlan}
+              onDevServerAction={runDevServerAction}
+              onQuotaSave={saveQuota}
+              onStatusRefresh={refreshStatus}
+              runnerHealth={runnerHealth}
+              initialTab={drawerTab}
+              onClose={() => setDrawerTab(null)}
+            />
+          </div>
+        </>
+      )}
+
+      {/* Main full-bleed workspace */}
+      <div className="dualith-workspace-b">
+        {/* Full-width crew strip */}
+        {selectedProject && <FullWidthCrewStrip project={selectedProject} />}
+
+        {/* Team room — scrollable */}
+        <div className="dualith-room-scroll" ref={null}>
+          {selectedProject ? (
+            <TeamRoomFull
+              project={selectedProject}
+              projectEvents={projectEvents}
+              onHumanAnswer={submitHumanAnswer}
+              onAddressNotes={async (name) => {
+                await sendChat(name, { runner: "auto", model: "", reasoning: "medium", prompt: addressNotesPrompt, attachmentPaths: [], planMode: false });
+              }}
+            />
+          ) : (
+            <div className="dualith-room-empty">
+              <span className="text-muted">No project selected — create or import one to start.</span>
+            </div>
+          )}
+        </div>
+
+        {/* Bottom bar: composer + tab pills */}
+        <div className="dualith-bottom-bar border-t border-line">
+          <div className="dualith-bottom-tabs">
+            {([
+              { id: "direct" as WorkspaceRightTab, label: "Direct" },
+              { id: "artifacts" as WorkspaceRightTab, label: "Artifacts", badge: artifactReadyCount(selectedProject) || undefined },
+              { id: "logs" as WorkspaceRightTab, label: "Logs", badge: consoleEntries.length || undefined },
+              { id: "quota" as WorkspaceRightTab, label: "Quota", badge: (usage.active?.length) || undefined },
+              { id: "preview" as WorkspaceRightTab, label: "Preview" },
+            ] as { id: WorkspaceRightTab; label: string; badge?: number }[]).map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setDrawerTab((v) => v === t.id ? null : t.id)}
+                className={`dualith-bottom-tab ${drawerTab === t.id ? "is-active" : ""}`}
+              >
+                {t.label}
+                {t.badge ? <em>{t.badge}</em> : null}
+              </button>
+            ))}
+          </div>
+          <div className="dualith-bottom-composer">
+            <ChatComposer
+              project={selectedProject}
+              onSendChat={sendChat}
+              onStopChat={stopChat}
+              runnerHealth={runnerHealth}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Hidden old layout — keep for mobile fallback */}
+      <div className="dualith-legacy-grid hidden">
         <div className={`dualith-rail-slot dualith-project-slot ${mobilePanel === "projects" ? "is-open" : ""}`}>
           <RegistryColumn
             projects={projects}
@@ -4035,57 +6622,14 @@ function DualithApp() {
             loadError={loadError}
             socketStatus={socketStatus}
             onRetry={refreshProjects}
-            onSelect={(name) => {
-              setSelectedName(name);
-              openMobileView("chat");
-            }}
+            onSelect={(name) => { setSelectedName(name); openMobileView("team"); }}
             onOpenSetup={() => openSetup("new")}
             onDelete={deleteProject}
-            onCloseMobile={() => openMobileView("chat")}
-          />
-        </div>
-        <WorkspaceColumn
-          project={selectedProject}
-          projectEvents={projectEvents}
-          results={results}
-          appStatus={appStatus}
-          mobileView={mobileView}
-          onSendChat={sendChat}
-          onStopChat={stopChat}
-          onAgentAction={runAgentAction}
-          onDevServerAction={runDevServerAction}
-          onHumanAnswer={submitHumanAnswer}
-          onClearChat={clearChatHistory}
-          onClearAgentChat={clearAgentChat}
-          onApprovePlan={approvePlan}
-          runnerHealth={runnerHealth}
-        />
-        <div className={`dualith-rail-slot dualith-system-slot ${mobilePanel === "system" ? "is-open" : ""}`}>
-          <CommandColumn
-            entries={consoleEntries}
-            commits={globalCommits}
-            usage={usage}
-            quota={quota}
-            onQuotaSave={saveQuota}
-            onStatusRefresh={refreshStatus}
-            collapsed={systemCollapsed}
-            onCollapsedChange={setSystemCollapsed}
-            onCloseMobile={() => openMobileView("chat")}
+            onCloseMobile={() => openMobileView("team")}
           />
         </div>
       </div>
-      <nav className="dualith-mobile-tabs" aria-label="Dualith mobile navigation">
-        {(["chat", "preview", "projects", "system"] as MobileView[]).map((view) => (
-          <button
-            key={view}
-            type="button"
-            onClick={() => openMobileView(view)}
-            className={mobileView === view ? "is-active" : ""}
-          >
-            {view[0].toUpperCase() + view.slice(1)}
-          </button>
-        ))}
-      </nav>
+
       <ProjectSetupModal
         open={setupOpen}
         mode={setupMode}
