@@ -2446,6 +2446,38 @@ select option:disabled {
   padding: 2px 7px;
 }
 
+.team-ack b {
+  color: var(--dualith-text-muted);
+  font-weight: 500;
+}
+
+.team-ack.is-wait {
+  border-style: dashed;
+}
+
+/* Role-kind label in the turn header (build / verify / review ...) */
+.team-turn__kind {
+  font-size: 9.5px;
+  color: var(--dualith-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Composer route hint — previews where the intent classifier will send the brief */
+.dualith-composer-hint {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  color: var(--dualith-text-faint);
+  padding: 0 8px 4px;
+}
+
+/* Workflow · round · step readout in the room task header */
+.room-task-header__step {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  color: var(--dualith-muted);
+}
+
 /* Working line: the active agent's current action with a blinking cursor */
 .working-line {
   display: grid;
