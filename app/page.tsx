@@ -3993,7 +3993,7 @@ function TeamRoom({
   return (
     <section aria-label="Mission feed" className="mission-feed-root">
       {workItems.length > 0 ? (
-        <div className="mission-panel mission-panel--thread" ref={threadRef}>
+        <div className="mission-panel mission-panel--thread dualith-thread-measure" ref={threadRef}>
           {workItems.map((item) => {
             if (item.kind === "team") {
               return (
@@ -7050,7 +7050,7 @@ function TeamRoomFull({
 
       {/* Chat tab */}
       {activeTab === "chat" && (
-        <div className="room-chat-thread">
+        <div className="room-chat-thread dualith-thread-measure">
           {chatMessages.length === 0 ? (
             <div className="room-chat-empty">
               <span>No conversation yet — send a message or brief the team below.</span>

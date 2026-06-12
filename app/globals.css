@@ -2827,6 +2827,11 @@ select option:disabled {
   gap: 0;
 }
 
+.dualith-thread-measure {
+  width: min(100%, 68rem);
+  margin-inline: auto;
+}
+
 .mission-msg {
   padding: 1rem 1rem 0.75rem;
 }
