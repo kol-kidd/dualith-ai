@@ -107,6 +107,10 @@ Edit `.env.local` after copying the example.
 | `DUALITH_CLAUDE_STATUS_COMMAND` | Command for Claude status refresh. |
 | `DUALITH_CLAUDE_STATUS_ARGS` | Args for Claude status refresh. |
 | `DUALITH_STATUS_TIMEOUT_SECONDS` | Timeout for status refresh commands. |
+| `DUALITH_AGENT_IDLE_TIMEOUT_SECONDS` | Idle watchdog in seconds for agent runs with no output. Defaults to `600`; set `0` to disable. |
+| `DUALITH_IDEA_RUN_TIMEOUT` | Timeout in seconds for Ideas planning chat and brief generation. Defaults to `300`. |
+| `DUALITH_IDEA_CODEX_SEARCH` | Enables native Codex web search for Ideas planning when set to `1`. Defaults to `1`. |
+| `DUALITH_IDEA_CLAUDE_TOOLS` | Claude tools available to Ideas planning. Defaults to `WebSearch,WebFetch`. |
 
 ## Running Locally
 

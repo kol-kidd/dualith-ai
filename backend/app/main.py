@@ -26,6 +26,14 @@ from pydantic import BaseModel, Field
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from .dialogue import HANDOFF_PROMPT_TRAILER, Handoff, bounce_prompt, parse_handoff
+from .events import event_bus, narration_for
+from .failures import translate as translate_failure
+from .orchestration.planner import plan_from_prompt
+from .orchestration.scheduler import plan_node_summary
+from .orchestration.schema import OrchestrationPlan, PlanValidationResult
+from .orchestration.validator import validate_plan
+
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DUALITH_DIR = ROOT_DIR / ".dualith"
 REGISTRY_PATH = DUALITH_DIR / "projects.json"
@@ -78,9 +86,13 @@ def _setup_logger() -> logging.Logger:
 log = _setup_logger()
 # ─────────────────────────────────────────────────────────────────────────────
 PROJECTS_ROOT = Path(os.environ.get("DUALITH_PROJECTS_ROOT", ROOT_DIR.parent)).expanduser().resolve()
+DYNAMIC_ORCHESTRATION_ENABLED = os.environ.get("DUALITH_DYNAMIC_ORCHESTRATION", "").strip().lower() in {"1", "true", "yes", "on"}
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 SAFE_MODEL = re.compile(r"^[A-Za-z0-9._:@/+ -]+$")
 SAFE_REASONING = {"low", "medium", "high", "extra-high"}
+ROUTE_MODE_VALUES = {"ask", "team", "auto"}
+TEAM_MODE_VALUES = {"lean", "full"}
+STACK_PROFILE_VALUES = {"smart", "next-web", "fastify-api", "fastapi-api", "none"}
 CODE_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".py", ".html", ".css", ".md"}
 SKIP_IMPORT_DIRS = {".git", "node_modules", ".next", "dist", "build", ".venv", "__pycache__", ".cache", ".turbo"}
 CHECKPOINT_EXCLUDE_PATHS = (*sorted(SKIP_IMPORT_DIRS - {".git"}), ".dualith", ".dualith-result")
@@ -91,6 +103,7 @@ STATUS_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_STATUS_TIMEOUT_SECONDS", "1
 STATUS_REFRESH_TTL_SECONDS = int(os.environ.get("DUALITH_STATUS_REFRESH_TTL_SECONDS", "60"))
 CLAUDE_STATUSLINE_TTL_SECONDS = int(os.environ.get("DUALITH_CLAUDE_STATUSLINE_TTL_SECONDS", "1800"))
 CODEX_APP_SERVER_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_CODEX_APP_SERVER_TIMEOUT_SECONDS", str(STATUS_TIMEOUT_SECONDS)))
+AGENT_IDLE_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_AGENT_IDLE_TIMEOUT_SECONDS", "600"))
 RESULT_LIMIT = 100
 RESULT_CONTENT_MAX_CHARS = 32_000
 APP_FEATURES = [
@@ -110,6 +123,11 @@ APP_FEATURES = [
     "specialist-reviewers",
     "structured-hitl",
     "project-memory",
+    "ideas-workbench",
+    "agent-idle-watchdog",
+    "explicit-route-mode",
+    "lean-team-mode",
+    "smart-stack-scaffold",
 ]
 DUALITH_WEB_PORT = int(os.environ.get("DUALITH_WEB_PORT", "3200"))
 DUALITH_API_PORT = int(os.environ.get("DUALITH_API_PORT", "4200"))
@@ -181,6 +199,8 @@ TASK_STATUSES = {"pending", "active", "blocked", "completed", "failed"}
 TASK_PHASES = ("pm", "architect", "planner", "lead", "tester", "reviewer")
 TASK_EVENT_TYPES = {"conversation", "agent_activity", "decision", "system", "review", "queue_event"}
 TASK_LIMIT_PER_PROJECT = 80
+IDEA_LIMIT = 100
+IDEA_MESSAGE_LIMIT = 80
 DEFAULT_STATUS_CACHE = {
     "codex": {
         "checked_at": "",
@@ -201,7 +221,6 @@ DEFAULT_STATUS_CACHE = {
 }
 
 console_events: deque[dict[str, str]] = deque(maxlen=120)
-websocket_clients: set[WebSocket] = set()
 observer: Observer | None = None
 event_loop: asyncio.AbstractEventLoop | None = None
 watch_handles: dict[str, Any] = {}
@@ -213,12 +232,20 @@ team_resume_events: dict[str, asyncio.Event] = {}
 plan_approval_events: dict[str, asyncio.Event] = {}
 plan_approval_results: dict[str, dict[str, Any]] = {}
 active_dev_servers: dict[str, dict[str, Any]] = {}
+team_room_broadcast_pending = False
 status_refresh_lock: asyncio.Lock | None = None
 status_refresh_task: asyncio.Task[tuple[dict[str, Any], str]] | None = None
 runner_health: dict[str, dict[str, Any]] = {
     "codex": {"ready": False, "version": "", "error": ""},
     "claude": {"ready": False, "version": "", "error": ""},
 }
+
+# Claude live streaming: stream-json gives per-message output during the run.
+# Disable (set to "0") if the installed Claude CLI rejects the flag combination.
+CLAUDE_STREAM_ENABLED = os.environ.get("DUALITH_CLAUDE_STREAM", "1") != "0"
+
+# Bounded reviewer/tester → lead question bounce-backs per team round.
+MAX_BOUNCES_PER_ROUND = int(os.environ.get("DUALITH_MAX_BOUNCES", "2"))
 
 # Default upper bound on builder/auditor iterations for the autonomous pipeline.
 PIPELINE_MAX_ITERATIONS = int(os.environ.get("DUALITH_PIPELINE_MAX_ITERATIONS", "6"))
@@ -515,6 +542,7 @@ RUNNER_COMMANDS = {
 class ProjectCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     spec: str = Field(default="", max_length=200_000)
+    stack_profile: Literal["smart", "next-web", "fastify-api", "fastapi-api", "none"] = "smart"
 
 
 class AgentStartRequest(BaseModel):
@@ -539,6 +567,7 @@ class TeamStartRequest(BaseModel):
     reasoning: str = Field(default="medium", max_length=40)
     prompt: str = Field(default="", max_length=20_000)
     max_rounds: int = Field(default=0, ge=0, le=20)
+    team_mode: Literal["lean", "full"] = "lean"
 
 
 class HumanInputRequest(BaseModel):
@@ -558,12 +587,43 @@ class SpecRefineRequest(BaseModel):
     runner: Literal["codex", "claude"] = "claude"
 
 
+class IdeaCreateRequest(BaseModel):
+    raw_idea: str = Field(min_length=1, max_length=20_000)
+    title: str = Field(default="", max_length=120)
+
+
+class IdeaPatchRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+    raw_idea: str | None = Field(default=None, max_length=20_000)
+    status: str | None = Field(default=None, max_length=40)
+    brief: str | None = Field(default=None, max_length=200_000)
+    suggested_name: str | None = Field(default=None, max_length=80)
+
+
+class IdeaChatRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=20_000)
+    runner: Literal["codex", "claude"] = "claude"
+
+
+class IdeaBriefRequest(BaseModel):
+    runner: Literal["codex", "claude"] = "claude"
+
+
+class IdeaPromoteRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    brief: str = Field(default="", max_length=200_000)
+    stack_profile: Literal["smart", "next-web", "fastify-api", "fastapi-api", "none"] = "smart"
+
+
 class DevServerStartRequest(BaseModel):
     command: str = Field(default="", max_length=500)
     port: int = Field(default=0, ge=0, le=65535)
 
 
 SPEC_REFINE_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_SPEC_REFINE_TIMEOUT", "120"))
+IDEA_RUN_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_IDEA_RUN_TIMEOUT", "300"))
+IDEA_CLAUDE_TOOLS = os.environ.get("DUALITH_IDEA_CLAUDE_TOOLS", "WebSearch,WebFetch")
+IDEA_CODEX_SEARCH_ENABLED = os.environ.get("DUALITH_IDEA_CODEX_SEARCH", "1").lower() not in {"0", "false", "no", "off"}
 
 SPEC_REFINE_META_PROMPT = """\
 You are a software spec writer. The user has described a rough project idea in the app's Goal field. Turn it into a structured SPEC.md for an AI builder agent.
@@ -596,6 +656,92 @@ Important error conditions, empty states, and constraints the builder must handl
 
 Current Goal field text:
 {idea}
+"""
+
+IDEA_CHAT_META_PROMPT = """\
+You are Dualith's pre-project planning partner. The user is thinking through a product idea before creating a repo.
+
+Important boundaries:
+- You are not inside a project folder.
+- Do not claim to inspect files, run commands, edit code, create commits, or start a build.
+- Keep the conversation focused on turning a vague idea into a build-ready project brief.
+- Keep responses concise enough for an interactive planning drawer.
+- When the user asks for current third-party sources, APIs, pricing, terms, or market evidence, use web search when available and cite source URLs.
+- If web search is not available to this runner, say so plainly and give a source checklist or preliminary shortlist instead of stalling.
+- Ask at most three focused questions in one response.
+- When enough is known, say the idea is ready for "Generate brief" and summarize the remaining decision.
+
+Planning axes to cover over the conversation:
+- target user and buyer
+- painful workflow or job to be done
+- first version scope
+- first channel or surface
+- success metric
+- constraints, integrations, data, and risks
+- launch or validation path
+
+Current idea record:
+Title: {title}
+Raw idea: {raw_idea}
+
+Conversation so far:
+{conversation}
+
+New user message:
+{prompt}
+"""
+
+IDEA_BRIEF_META_PROMPT = """\
+You are writing a build-ready project brief for Dualith. The user has planned a product idea, but no repo exists yet.
+
+Output ONLY raw markdown. No preamble, no code fences, no commentary. Use these headings exactly:
+
+# <Project Name>
+
+## Goal
+One or two direct sentences describing what this project does and why.
+
+## Users
+Who uses it, who buys or approves it, and the first narrow audience.
+
+## MVP Scope
+A concrete first version that can be built without additional product decisions.
+
+## Out of Scope
+Features or channels that should wait.
+
+## UX Screens
+The first screens or flows the builder should implement.
+
+## Data Model
+Core entities, fields, and relationships. Keep this implementation-friendly.
+
+## Integrations
+External APIs, auth, messaging, payments, storage, or calendar systems if relevant. Say "None for V1" if none are needed.
+
+## Build
+A numbered list of implementation tasks.
+
+## Check
+A numbered checklist of acceptance criteria and verification steps.
+
+## Ship
+Run, build, and release notes. Include environment variables only when clearly needed.
+
+## Risks
+Product, implementation, data, or operational risks the builder should watch.
+
+Preserve the user's intent and wording where useful. Do not invent a large platform if the idea is still small.
+
+Current idea record:
+Title: {title}
+Raw idea: {raw_idea}
+
+Conversation:
+{conversation}
+
+Existing brief draft, if any:
+{brief}
 """
 
 BUILDER_SKILL_TEXT = """---
@@ -766,9 +912,11 @@ Do not create Git commits automatically as part of your normal build work — Du
 
 If the task is large or naturally parallel (e.g. updating multiple independent files, running tests while writing code), you may spawn subagents to work in parallel. Use your judgment — don't spawn subagents for simple sequential tasks.
 
+Do not leave long-lived dev servers running in the foreground. If you start a preview server, launch it as a detached/background process with separate log files, report the URL, and then exit.
+
 First, address any review notes your teammate left in the latest `### Teammate` section of AGENT_CHAT.md. Then continue the implementation.
 
-When you finish this round, append a section to AGENT_CHAT.md that starts with a markdown header `### Lead`. Write your update as if you're giving the user a quick, friendly status — what you did, what you noticed, and what you're handing off to your teammate to look at. Keep it short (2–4 sentences), warm, and jargon-free. No bullet points, no sub-headers. Write to be read by a person watching over your shoulder, not a machine.
+Required output — when you finish this round, append a section to AGENT_CHAT.md that starts with the markdown header `### Lead`, containing 2–4 plain sentences: what you did, what you noticed, and what your teammate should look at. Write it for a person watching over your shoulder. This section is the only required formatting; everything else is up to you.
 
 {HANDOFF_CONVENTION}
 
@@ -824,16 +972,12 @@ TEAMMATE_PROMPT = f"""You are the TEAMMATE and final reviewer on a multi-agent e
 
 Do not edit source files and do not create commits. Read SPEC.md, ARCHITECTURE.md, DECISIONS.md, PLAN.md, FEEDBACK.md, LESSONS.md, AGENT_CHAT.md, and the latest git diff. Review the lead's work after Tester and specialist reviewers have had their turns.
 
-Append a section to AGENT_CHAT.md that starts with `### Teammate`. Write 2-4 direct sentences with at least two concrete observations: what is solid, what still looks risky, and whether the lead should keep working.
-
-For frontend or UI review, audit against PRODUCT.md, DESIGN.md, and the Impeccable anti-pattern standard. Call out contrast, focus, responsive behavior, text overflow, missing states, token drift, nested cards, decorative glass, gradient text, and generic AI/SaaS visuals when present.
-
-Approval only counts if your section includes at least two concrete observations.
-
-End your section with exactly one of these verdicts on its own line:
+Required output — append a section to AGENT_CHAT.md that starts with `### Teammate`: 2–4 direct sentences covering what is solid, what still looks risky, and whether the lead should keep working, then exactly one verdict on its own line:
 TEAMMATE: APPROVED
 or
 TEAMMATE: CHANGES REQUESTED
+
+For frontend or UI review, audit against PRODUCT.md, DESIGN.md, and the Impeccable anti-pattern standard. Call out contrast, focus, responsive behavior, text overflow, missing states, token drift, nested cards, decorative glass, gradient text, and generic AI/SaaS visuals when present.
 
 {HANDOFF_CONVENTION}
 
@@ -989,9 +1133,14 @@ async def lifespan(app: FastAPI):
     log.info("Dualith backend starting  host=%s port=%s lan=%s log=%s",
              DUALITH_API_HOST, DUALITH_API_PORT, LAN_MODE,
              DUALITH_DIR / "logs" / "dualith.log")
+    reconcile_interrupted_active_tasks()
     asyncio.create_task(check_runner_health())
     asyncio.create_task(refresh_status_cache())
+    # FastAPI ignores @app.on_event handlers once an explicit lifespan is set,
+    # so the startup/shutdown logic must be invoked from here.
+    await startup()
     yield
+    await shutdown()
     log.info("Dualith backend shutting down")
 
 
@@ -1103,6 +1252,8 @@ def orchestration_manifest() -> dict[str, Any]:
 
     return {
         "default_workflow": "auto-team",
+        "default_team_mode": "lean",
+        "default_stack_profile": "smart",
         "agents": agents,
         "workflows": workflows,
         "runner_policies": [
@@ -1138,6 +1289,10 @@ def claude_rate_limits_path() -> Path:
 
 def tasks_path() -> Path:
     return DUALITH_DIR / "tasks.json"
+
+
+def ideas_path() -> Path:
+    return DUALITH_DIR / "ideas.json"
 
 
 def central_memory_path() -> Path:
@@ -1206,6 +1361,8 @@ def ensure_dualith_store() -> None:
         status_path().write_text(json.dumps(DEFAULT_STATUS_CACHE, indent=2) + "\n", encoding="utf-8")
     if not tasks_path().exists():
         tasks_path().write_text('{"tasks":[]}\n', encoding="utf-8")
+    if not ideas_path().exists():
+        ideas_path().write_text('{"ideas":[]}\n', encoding="utf-8")
     if not central_memory_path().exists():
         central_memory_path().write_text("{}\n", encoding="utf-8")
 
@@ -1382,6 +1539,152 @@ def write_tasks(tasks: list[dict[str, Any]]) -> None:
     temp_path = tasks_path().with_suffix(".json.tmp")
     temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     temp_path.replace(tasks_path())
+    schedule_team_room_broadcast()
+
+
+def idea_title_from_text(value: str) -> str:
+    for line in value.splitlines():
+        cleaned = line.strip().strip("#*- ")
+        if cleaned:
+            return cleaned[:96]
+    return "Untitled idea"
+
+
+def suggested_project_name(value: str) -> str:
+    base = value.strip().lower()
+    base = re.sub(r"[^a-z0-9._-]+", "-", base)
+    base = re.sub(r"-{2,}", "-", base).strip("-._")
+    if not base:
+        base = "project-idea"
+    if len(base) > 42:
+        base = base[:42].rstrip("-._")
+    return base or "project-idea"
+
+
+def normalize_idea_message(item: dict[str, Any]) -> dict[str, str] | None:
+    role = str(item.get("role", "")).strip().lower()
+    if role not in {"user", "assistant", "system"}:
+        return None
+    content = str(item.get("content", "")).strip()
+    if not content:
+        return None
+    return {
+        "id": str(item.get("id", "")) or uuid4().hex,
+        "role": role,
+        "content": content,
+        "runner": str(item.get("runner", "")),
+        "timestamp": str(item.get("timestamp", "")) or utc_now(),
+    }
+
+
+def normalize_idea_record(item: dict[str, Any]) -> dict[str, Any]:
+    now = utc_now()
+    raw_idea = str(item.get("raw_idea", "")).strip()
+    title = str(item.get("title", "")).strip() or idea_title_from_text(raw_idea)
+    status = str(item.get("status", "draft")).strip().lower()
+    if status not in {"draft", "planning", "briefed", "promoted"}:
+        status = "draft"
+    raw_messages = item.get("messages", [])
+    if not isinstance(raw_messages, list):
+        raw_messages = []
+    messages = [
+        message for raw in raw_messages
+        if isinstance(raw, dict) and (message := normalize_idea_message(raw))
+    ][-IDEA_MESSAGE_LIMIT:]
+    suggested = str(item.get("suggested_name", "")).strip() or suggested_project_name(title)
+    if not SAFE_NAME.fullmatch(suggested):
+        suggested = suggested_project_name(suggested)
+    return {
+        "id": str(item.get("id", "")) or uuid4().hex,
+        "title": title[:120],
+        "raw_idea": raw_idea,
+        "status": status,
+        "messages": messages,
+        "brief": str(item.get("brief", "")),
+        "suggested_name": suggested[:80],
+        "promoted_project": str(item.get("promoted_project", "")),
+        "created_at": str(item.get("created_at", "")) or now,
+        "updated_at": str(item.get("updated_at", "")) or now,
+    }
+
+
+def read_ideas() -> list[dict[str, Any]]:
+    ensure_dualith_store()
+    try:
+        data = json.loads(ideas_path().read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        data = {"ideas": []}
+    ideas = data.get("ideas", [])
+    if not isinstance(ideas, list):
+        return []
+    return [normalize_idea_record(item) for item in ideas if isinstance(item, dict)][-IDEA_LIMIT:]
+
+
+def write_ideas(ideas: list[dict[str, Any]]) -> None:
+    ensure_dualith_store()
+    normalized = [normalize_idea_record(idea) for idea in ideas]
+    payload = {
+        "ideas": sorted(normalized, key=lambda item: str(item.get("updated_at", "")), reverse=True)[:IDEA_LIMIT]
+    }
+    temp_path = ideas_path().with_suffix(".json.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    temp_path.replace(ideas_path())
+
+
+def idea_by_id(idea_id: str) -> dict[str, Any] | None:
+    for idea in read_ideas():
+        if idea["id"] == idea_id:
+            return idea
+    return None
+
+
+def require_idea(idea_id: str) -> dict[str, Any]:
+    idea = idea_by_id(idea_id)
+    if not idea:
+        raise HTTPException(status_code=404, detail="Idea not found.")
+    return idea
+
+
+def mutate_idea(idea_id: str, mutate: Any) -> dict[str, Any]:
+    ideas = read_ideas()
+    found: dict[str, Any] | None = None
+    for idea in ideas:
+        if idea["id"] == idea_id:
+            mutate(idea)
+            idea["updated_at"] = utc_now()
+            found = normalize_idea_record(idea)
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="Idea not found.")
+    write_ideas(ideas)
+    return found
+
+
+def append_idea_message(idea_id: str, role: str, content: str, runner: str = "") -> dict[str, Any]:
+    def mutate(idea: dict[str, Any]) -> None:
+        messages = list(idea.get("messages", []))
+        messages.append({
+            "id": uuid4().hex,
+            "role": role,
+            "content": content.strip(),
+            "runner": runner,
+            "timestamp": utc_now(),
+        })
+        idea["messages"] = messages[-IDEA_MESSAGE_LIMIT:]
+        if role == "user" and idea.get("status") == "draft":
+            idea["status"] = "planning"
+
+    return mutate_idea(idea_id, mutate)
+
+
+def idea_conversation_text(idea: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for message in idea.get("messages", [])[-24:]:
+        role = str(message.get("role", "message")).title()
+        content = str(message.get("content", "")).strip()
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n\n".join(lines) or "(No conversation yet.)"
 
 
 def task_phase_state(status: str = "pending", runner: str = "") -> dict[str, str]:
@@ -1437,6 +1740,17 @@ def normalize_task_decision(decision: dict[str, Any]) -> dict[str, str]:
 
 def normalize_task_record(task: dict[str, Any]) -> dict[str, Any]:
     workflow_id = str(task.get("workflow_id", ""))
+    route_mode = str(task.get("route_mode", "auto"))
+    team_mode = str(task.get("team_mode", "full"))
+    task["route_mode"] = route_mode if route_mode in ROUTE_MODE_VALUES else "auto"
+    task["team_mode"] = team_mode if team_mode in TEAM_MODE_VALUES else "full"
+    task["estimated_runner_calls"] = int(task.get("estimated_runner_calls") or 0)
+    planned_agents = task.get("planned_agents", [])
+    if not isinstance(planned_agents, list):
+        planned_agents = []
+    task["planned_agents"] = [str(agent) for agent in planned_agents if str(agent).strip()][:24]
+    preflight_status = str(task.get("preflight_status", "ready"))
+    task["preflight_status"] = preflight_status if preflight_status in {"ready", "blocked", "answered", "skipped"} else "ready"
     active_phases = workflow_task_phases(workflow_id)
     phases = task.get("phases", {})
     if not isinstance(phases, dict):
@@ -1502,11 +1816,17 @@ def new_task_record(
     route_reason: str,
     attachment_paths: list[str] | None = None,
     status: str = "pending",
+    orchestration: dict[str, Any] | None = None,
+    route_mode: str = "auto",
+    team_mode: str = "full",
+    estimated_runner_calls: int = 0,
+    planned_agents: list[str] | None = None,
+    preflight_status: str = "ready",
 ) -> dict[str, Any]:
     now = utc_now()
     phases = initial_task_phases(workflow_id)
     specialist_reviews = [specialist_review_state(reviewer) for reviewer in SPECIALIST_REVIEWERS]
-    return {
+    task = {
         "id": uuid4().hex,
         "project": project_name,
         "title": task_title(prompt),
@@ -1516,6 +1836,11 @@ def new_task_record(
         "model": model,
         "reasoning": reasoning,
         "route_reason": route_reason,
+        "route_mode": route_mode if route_mode in ROUTE_MODE_VALUES else "auto",
+        "team_mode": team_mode if team_mode in TEAM_MODE_VALUES else "full",
+        "estimated_runner_calls": max(0, int(estimated_runner_calls or 0)),
+        "planned_agents": planned_agents or [],
+        "preflight_status": preflight_status if preflight_status in {"ready", "blocked", "answered", "skipped"} else "ready",
         "attachment_paths": attachment_paths or [],
         "status": status if status in TASK_STATUSES else "pending",
         "active_phase": "",
@@ -1540,6 +1865,9 @@ def new_task_record(
         "ownership": {"mode": "sequential", "claimed_paths": []},
         "subagents": [],
     }
+    if orchestration:
+        task["orchestration"] = orchestration
+    return task
 
 
 def project_tasks(project_name: str) -> list[dict[str, Any]]:
@@ -1591,8 +1919,30 @@ def create_task(
     route_reason: str,
     attachment_paths: list[str] | None = None,
     status: str = "pending",
+    orchestration: dict[str, Any] | None = None,
+    route_mode: str = "auto",
+    team_mode: str = "full",
+    estimated_runner_calls: int = 0,
+    planned_agents: list[str] | None = None,
+    preflight_status: str = "ready",
 ) -> dict[str, Any]:
-    task = new_task_record(project_name, workflow_id, runner, model, reasoning, prompt, route_reason, attachment_paths, status)
+    task = new_task_record(
+        project_name,
+        workflow_id,
+        runner,
+        model,
+        reasoning,
+        prompt,
+        route_reason,
+        attachment_paths,
+        status,
+        orchestration,
+        route_mode,
+        team_mode,
+        estimated_runner_calls,
+        planned_agents,
+        preflight_status,
+    )
     tasks = read_tasks()
     tasks.append(task)
     write_tasks(tasks)
@@ -1737,9 +2087,77 @@ def set_task_phase(task_id: str | None, phase: str, status: str, runner: str = "
         phases[phase] = current
         task["active_phase"] = phase if status in {"running", "blocked"} else task.get("active_phase", "")
 
-    update_task(task_id, mutate)
+    updated = update_task(task_id, mutate)
     event_type = "review" if phase == "reviewer" else "decision" if phase in {"pm", "architect", "planner"} else "agent_activity"
     append_task_event(task_id, event_type, f"{phase.title()} {status}", body, phase, status)
+    if updated:
+        project_name = str(updated.get("project", ""))
+        team = active_teams.get(project_name) or {}
+        event_bus.publish(
+            "phase",
+            project_name,
+            {
+                "phase": phase,
+                "status": status,
+                "runner": runner,
+                "round": int(team.get("round") or 0),
+                "narration": narration_for(phase, status, body),
+            },
+            task_id=task_id,
+        )
+
+
+def interrupted_task_phase(task: dict[str, Any]) -> str:
+    active_phase = str(task.get("active_phase", "")).strip()
+    if active_phase in TASK_PHASES:
+        return active_phase
+    phases = task.get("phases", {})
+    if isinstance(phases, dict):
+        for phase in TASK_PHASES:
+            state = phases.get(phase, {})
+            if isinstance(state, dict) and str(state.get("status", "")) in {"running", "summarizing"}:
+                return phase
+    return ""
+
+
+def reconcile_interrupted_active_tasks() -> None:
+    tasks = read_tasks()
+    changed = False
+    message = "Backend restarted while this task was active; generated files were preserved. Inspect the worktree, then rerun the task if needed."
+    for task in tasks:
+        if str(task.get("status", "")) != "active":
+            continue
+        now = utc_now()
+        phase = interrupted_task_phase(task)
+        task["status"] = "failed"
+        task["active_phase"] = phase
+        task["updated_at"] = now
+        task["completed_at"] = now
+        phases = task.setdefault("phases", {})
+        if phase in TASK_PHASES and isinstance(phases, dict):
+            current = phases.get(phase, {})
+            if not isinstance(current, dict):
+                current = {}
+            current.update({"status": "failed", "runner": str(current.get("runner", "")), "updated_at": now})
+            phases[phase] = current
+        events = task.setdefault("events", [])
+        if not isinstance(events, list):
+            events = []
+        events.append(
+            {
+                "id": uuid4().hex,
+                "type": "queue_event",
+                "title": "Task failed",
+                "body": message,
+                "role": phase,
+                "status": "failed",
+                "timestamp": now,
+            }
+        )
+        task["events"] = events[-80:]
+        changed = True
+    if changed:
+        write_tasks(tasks)
 
 
 def set_task_specialist_review(task_id: str | None, reviewer: str, status: str, runner: str = "", summary: str = "") -> None:
@@ -1910,6 +2328,69 @@ def taskable_workflow(workflow_id: str) -> bool:
     return kind in {"team", "plan-team", "pm-team", "pipeline"}
 
 
+def team_dispatch_receipt_body(
+    workflow_id: str,
+    workflow: dict[str, Any],
+    status: str,
+    route_reason: str,
+    runner_pref: str,
+    team_mode: str = "lean",
+    estimated_runner_calls: int = 0,
+    planned_agents: list[str] | None = None,
+) -> str:
+    workflow_label = str(workflow.get("label", workflow_id))
+    kind = str(workflow.get("kind", ""))
+    lines = [
+        "Passed to team.",
+        f"Status: {status}.",
+        f"Workflow: {workflow_label}.",
+        f"Mode: {clean_team_mode(team_mode)}.",
+    ]
+    if estimated_runner_calls:
+        lines.append(f"Estimated runner calls: {estimated_runner_calls}.")
+    if planned_agents:
+        labels = [str(RUN_MODES.get(agent, {}).get("label", agent.replace("_", " ").title())) for agent in planned_agents]
+        lines.append(f"Planned agents: {', '.join(labels)}.")
+
+    if kind in {"team", "plan-team", "pm-team"}:
+        lead, teammate, _ = team_runners(runner_pref)
+        lead_label = str(RUNNER_COMMANDS[lead]["label"])
+        teammate_label = str(RUNNER_COMMANDS[teammate]["label"])
+        if lead == teammate:
+            lines.append(f"Team: {lead_label} handles lead and review.")
+        else:
+            lines.append(f"Team: Lead {lead_label}, reviewer {teammate_label}.")
+        if kind == "plan-team":
+            lines.append("Next: planning starts before build.")
+        elif kind == "pm-team":
+            lines.append("Next: PM checks scope before build.")
+        else:
+            lines.append("Next: Team tab will show live handoffs.")
+    elif kind == "pipeline":
+        lines.append("Next: build and review loop will run.")
+
+    clean_reason = route_reason.strip()
+    if clean_reason:
+        suffix = "" if clean_reason.endswith((".", "!", "?")) else "."
+        lines.append(f"Route: {clean_reason}{suffix}")
+    return "\n".join(lines)
+
+
+def append_team_dispatch_receipt(
+    project_path: Path,
+    workflow_id: str,
+    workflow: dict[str, Any],
+    status: str,
+    route_reason: str,
+    runner_pref: str,
+    team_mode: str = "lean",
+    estimated_runner_calls: int = 0,
+    planned_agents: list[str] | None = None,
+) -> None:
+    body = team_dispatch_receipt_body(workflow_id, workflow, status, route_reason, runner_pref, team_mode, estimated_runner_calls, planned_agents)
+    append_chat_history(project_path, f"### Team Dispatch - {utc_now()}\n\n{body}\n\n")
+
+
 def recover_interrupted_tasks() -> None:
     tasks = read_tasks()
     changed = False
@@ -1953,11 +2434,12 @@ async def start_next_queued_task(project_name: str) -> None:
     model = str(task.get("model", ""))
     reasoning = str(task.get("reasoning", "medium"))
     prompt = str(task.get("prompt", ""))
+    team_mode = clean_team_mode(str(task.get("team_mode", "lean")))
     attachment_paths = [str(path) for path in task.get("attachment_paths", []) if str(path).strip()]
 
     set_task_status(task_id, "active", body="Dequeued after the previous task finished.")
     record_event("TASK_STARTED", f"{relative_path(project_path)} :: {task_title(prompt)}")
-    await start_orchestration(project_name, project_path, workflow_id, runner, model, reasoning, prompt, attachment_paths, task_id=task_id)
+    await start_orchestration(project_name, project_path, workflow_id, runner, model, reasoning, prompt, attachment_paths, task_id=task_id, team_mode=team_mode)
     await broadcast("team_event")
 
 
@@ -1972,7 +2454,12 @@ async def finish_task_and_start_next(
         status, detail = task_final_status_from_state(runtime_state, success_step)
         set_task_status(task_id, status, body=detail)
         record_event("TASK_COMPLETED" if status == "completed" else "TASK_FAILED", f"{relative_path(project_path)} :: {detail}")
-        await summarize_project_memory(project_name, project_path, task_id, status, detail)
+        task = task_by_id(task_id)
+        if task and clean_team_mode(str(task.get("team_mode", "lean"))) == "lean":
+            append_project_memory_fallback(project_path, task, status, detail)
+            append_task_event(task_id, "system", "Project memory fallback", "Lean mode recorded deterministic memory without a Summarizer runner.", "summarizer", "fallback")
+        else:
+            await summarize_project_memory(project_name, project_path, task_id, status, detail)
     await start_next_queued_task(project_name)
 
 
@@ -2638,6 +3125,19 @@ def extract_json_result(lines: list[str]) -> str:
         return text_from_json_value(parsed).strip()
     except json.JSONDecodeError:
         pass
+
+    # stream-json: the terminal {"type":"result"} line is the authoritative
+    # final answer — without this, the join-all fallback would duplicate every
+    # intermediate assistant message into the result.
+    for line in reversed(lines):
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and parsed.get("type") == "result":
+            text = text_from_json_value(parsed.get("result")).strip()
+            if text:
+                return text
 
     results: list[str] = []
     for line in lines:
@@ -3370,7 +3870,11 @@ async def terminate_process_tree(process: subprocess.Popen[Any], timeout: float 
         try:
             await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=timeout)
         except asyncio.TimeoutError:
-            pass  # taskkill already sent; process will exit shortly on its own
+            try:
+                process.kill()
+                await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=timeout)
+            except Exception:
+                pass  # taskkill already sent; process will exit shortly on its own
         return
     process.terminate()
     try:
@@ -3538,11 +4042,13 @@ def project_attention(project_path: Path, project_name: str) -> dict[str, Any]:
         counts[priority if priority in counts else "other"] += 1
 
     upper = content.upper()
-    if "AUDIT PASSED" in upper:
+    has_positive_verdict, has_blocking_verdict = feedback_verdict_summary(content)
+    if audit_passed(content):
         status = "clean"
         summary = "AI notes are clean."
     else:
-        has_findings = bool(items) or any(flag in upper for flag in ("TESTER: FAILED", "CHANGES REQUESTED", "FAIL", "BLOCKED", "TODO", "CRITIQUE"))
+        has_unresolved_items = bool(items) and not has_positive_verdict
+        has_findings = has_blocking_verdict or has_unresolved_items or any(flag in upper for flag in ("TESTER: FAILED", "CHANGES REQUESTED", "BLOCKED", "TODO", "CRITIQUE"))
         status = "attention" if has_findings else "none"
         summary = "AI notes need work." if status == "attention" else "No active AI notes."
 
@@ -3660,6 +4166,19 @@ def decision_from_human_answer(answer: str, human_input: dict[str, Any]) -> tupl
     return "Human input", clean, str(human_input.get("question", "")).strip()
 
 
+def write_human_question(project_path: Path, question: str, options: list[dict[str, str]], default_option: str = "1") -> None:
+    lines = [f"{QUESTION_PREFIX} {question.strip()}", "", "OPTIONS:"]
+    for index, option in enumerate(options, start=1):
+        option_id = str(option.get("id", "")).strip() or str(index)
+        label = str(option.get("label", "")).strip() or f"Option {option_id}"
+        description = str(option.get("description", "")).strip()
+        suffix = f" - {description}" if description else ""
+        lines.append(f"[{option_id}] {label}{suffix}")
+    if default_option:
+        lines.extend(["", f"DEFAULT: {default_option}"])
+    human_input_path(project_path).write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
 def write_human_answer(project_path: Path, text: str) -> None:
     path = human_input_path(project_path)
     existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
@@ -3700,6 +4219,26 @@ def memory_prompt_block(project_path: Path) -> str:
         "Immutable global parameters (Dualith long-term memory). "
         "Treat these as authoritative and override your defaults where they conflict:\n"
         f"{lines}\n\n"
+    )
+
+
+def project_memory_prompt_block(project_path: Path) -> str:
+    """Inject PROJECT_MEMORY.md (written by the Summarizer) into agent prompts.
+
+    Closes the memory loop: previously the Summarizer wrote this file after
+    every task but no agent ever read it.
+    """
+    path = project_memory_doc_path(project_path)
+    if not path.exists():
+        return ""
+    content = path.read_text(encoding="utf-8", errors="replace").strip()
+    if not content:
+        return ""
+    if len(content) > 3500:
+        content = f"{content[:2400].rstrip()}\n\n[... trimmed ...]\n\n{content[-1000:].lstrip()}"
+    return (
+        "Project memory (durable context from previous tasks, maintained by the team's Summarizer):\n"
+        f"{content}\n\n"
     )
 
 
@@ -3748,6 +4287,13 @@ def append_chat_history(project_path: Path, text: str) -> None:
     existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
     separator = "" if not existing or existing.endswith("\n") else "\n"
     path.write_text(f"{existing}{separator}{text}", encoding="utf-8")
+    project_name = project_name_for_path(project_path)
+    if project_name:
+        event_bus.publish_threadsafe(
+            "chat",
+            project_name,
+            {"file": "CHAT_HISTORY.md", "body": f"{separator}{text}"},
+        )
 
 
 def clear_chat_history(project_path: Path) -> None:
@@ -3812,6 +4358,16 @@ def append_agent_chat(project_path: Path, text: str) -> None:
     existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
     separator = "" if not existing or existing.endswith("\n") else "\n"
     path.write_text(f"{existing}{separator}{text}", encoding="utf-8")
+    project_name = project_name_for_path(project_path)
+    if project_name:
+        # Carry the appended section inline so clients update the team room
+        # without waiting for (or fetching) a full snapshot.
+        event_bus.publish_threadsafe(
+            "chat",
+            project_name,
+            {"file": "AGENT_CHAT.md", "body": f"{separator}{text}"},
+        )
+    schedule_team_room_broadcast()
 
 
 def agent_chat_size(project_path: Path) -> int:
@@ -3831,8 +4387,10 @@ def append_agent_chat_section_if_missing(project_path: Path, label: str, start_o
     append_agent_chat(project_path, f"### {label} - {utc_now()}\n\n{body.strip()}\n\n")
 
 
-def clear_agent_chat(project_path: Path) -> None:
+def clear_agent_chat(project_path: Path, *, notify: bool = True) -> None:
     agent_chat_path(project_path).write_text("", encoding="utf-8")
+    if notify:
+        schedule_team_room_broadcast()
 
 
 def review_observation_count(section: str) -> int:
@@ -3847,19 +4405,86 @@ def review_observation_count(section: str) -> int:
     return max(len(relevant_lines), sentence_count)
 
 
+_VERDICT_POSITIVE_WORDS = r"(?:APPROVED|PASSED|OK|CLEAN)"
+_VERDICT_NEGATIVE_WORDS = r"(?:CHANGES\s+REQUESTED|NEEDS\s+CHANGES|FAILED|REJECTED)"
+_VERDICT_SEP = r"\s*[:\-—–]+\s*"
+
+_NEGATIVE_LANGUAGE = re.compile(
+    r"\b(must fix|blocker|critical issue|changes? (?:are )?(?:required|requested)|failing|fails\b|broken|regression|vulnerabilit)",
+    re.IGNORECASE,
+)
+
+
+def extract_verdict(marker: str, *texts: str) -> str:
+    """Latest verdict for a role marker across the given texts.
+
+    Tolerant of casing and separators ("Tester: Passed", "TESTER — FAILED",
+    "security review: changes requested"). Returns "positive", "negative",
+    or "missing"; when both appear, the later occurrence wins.
+    """
+    blob = "\n\n".join(text for text in texts if text)
+    if not blob:
+        return "missing"
+    pattern = re.escape(marker).replace(r"\ ", r"\s+")
+    positive = [m.start() for m in re.finditer(f"{pattern}{_VERDICT_SEP}{_VERDICT_POSITIVE_WORDS}\\b", blob, re.IGNORECASE)]
+    negative = [m.start() for m in re.finditer(f"{pattern}{_VERDICT_SEP}{_VERDICT_NEGATIVE_WORDS}", blob, re.IGNORECASE)]
+    if not positive and not negative:
+        return "missing"
+    return "positive" if max(positive, default=-1) > max(negative, default=-1) else "negative"
+
+
+def infer_verdict_from_language(text: str) -> str:
+    """Best-effort verdict when an agent wrote prose but no verdict line."""
+    return "negative" if _NEGATIVE_LANGUAGE.search(text) else "positive"
+
+
+_AUDIT_PASSED = re.compile(r"\bAUDIT\s*[:\-—–]?\s*(?:PASSED|CLEAN)\b", re.IGNORECASE)
+
+
+_FEEDBACK_VERDICT = re.compile(
+    r"\b("
+    r"TESTER|AUDIT|TEAMMATE|"
+    r"ARCHITECTURE\s+REVIEW|SECURITY\s+REVIEW|PERFORMANCE\s+REVIEW|MAINTAINABILITY\s+REVIEW"
+    r")\s*[:\-\u2014\u2013]?\s*("
+    r"APPROVED|PASSED|OK|CLEAN|CHANGES\s+REQUESTED|NEEDS\s+CHANGES|FAILED|REJECTED"
+    r")\b",
+    re.IGNORECASE,
+)
+_FEEDBACK_NEGATIVE = re.compile(r"CHANGES\s+REQUESTED|NEEDS\s+CHANGES|FAILED|REJECTED", re.IGNORECASE)
+
+
+def latest_feedback_verdicts(content: str) -> dict[str, tuple[str, int]]:
+    verdicts: dict[str, tuple[str, int]] = {}
+    for match in _FEEDBACK_VERDICT.finditer(content):
+        marker = re.sub(r"\s+", " ", match.group(1).upper()).strip()
+        verdict = "negative" if _FEEDBACK_NEGATIVE.search(match.group(2)) else "positive"
+        verdicts[marker] = (verdict, match.start())
+    return verdicts
+
+
+def feedback_verdict_summary(content: str) -> tuple[bool, bool]:
+    verdicts = latest_feedback_verdicts(content)
+    if not verdicts:
+        return False, False
+    latest_positive = max((pos for verdict, pos in verdicts.values() if verdict == "positive"), default=-1)
+    blocking = any(verdict == "negative" and pos > latest_positive for verdict, pos in verdicts.values())
+    return latest_positive >= 0, blocking
+
+
+def audit_passed(content: str) -> bool:
+    """Case-insensitive check accepting `AUDIT PASSED`, `audit: passed`, `Audit clean`."""
+    has_positive, has_blocking = feedback_verdict_summary(content)
+    return bool(_AUDIT_PASSED.search(content)) or (has_positive and not has_blocking)
+
+
 def parse_team_signoff(project_path: Path) -> bool:
-    """True when the most recent teammate section signs off with TEAMMATE: APPROVED."""
-    content = read_agent_chat(project_path)
-    marker = content.upper().rfind("TEAMMATE: APPROVED")
-    if marker == -1:
-        return False
-    changes = content.upper().rfind("TEAMMATE: CHANGES REQUESTED")
-    # Approved only counts if it is the latest verdict.
-    if marker <= changes:
-        return False
-    section_marker = content.upper().rfind("### TEAMMATE", 0, marker)
-    section = content[section_marker:] if section_marker != -1 else content[max(0, marker - 1200):]
-    return review_observation_count(section) >= 2
+    """True when the latest Teammate verdict in AGENT_CHAT.md is an approval.
+
+    Case-insensitive and separator-tolerant; the former ≥2-observation gate is
+    gone — observation count is advisory only (it silently demoted approvals
+    written as bullet lists, killing otherwise-successful runs).
+    """
+    return extract_verdict("TEAMMATE", read_agent_chat(project_path)) == "positive"
 
 
 def run_git_sync(project_path: Path, args: tuple[str, ...]) -> tuple[int, str]:
@@ -4442,6 +5067,7 @@ async def collect_snapshot() -> dict[str, Any]:
         "usage": usage_snapshot(),
         "quota": quota_snapshot(),
         "results": read_results(),
+        "ideas": read_ideas(),
         "projects_root": display_path(PROJECTS_ROOT),
         "memory_path": display_path(DUALITH_DIR),
         "runner_health": dict(runner_health),
@@ -4455,20 +5081,10 @@ async def broadcast(message_type: str, event: dict[str, str] | None = None) -> N
     if event:
         payload["event"] = event
 
-    message = {
+    event_bus.publish_message({
         "type": message_type,
         "payload": payload,
-    }
-
-    disconnected: list[WebSocket] = []
-    for websocket in websocket_clients:
-        try:
-            await asyncio.wait_for(websocket.send_json(message), timeout=1.0)
-        except Exception:
-            disconnected.append(websocket)
-
-    for websocket in disconnected:
-        websocket_clients.discard(websocket)
+    })
 
 
 def record_event(action: str, path: Path | str) -> dict[str, str]:
@@ -4492,6 +5108,27 @@ def schedule_broadcast(message_type: str, event: dict[str, str] | None = None) -
     asyncio.run_coroutine_threadsafe(broadcast(message_type, event), event_loop)
 
 
+async def _team_room_broadcast_soon() -> None:
+    global team_room_broadcast_pending
+    try:
+        await asyncio.sleep(0.12)
+    finally:
+        team_room_broadcast_pending = False
+    await broadcast("team_event")
+
+
+def schedule_team_room_broadcast() -> None:
+    global team_room_broadcast_pending
+    if not event_loop or team_room_broadcast_pending:
+        return
+
+    team_room_broadcast_pending = True
+    try:
+        asyncio.run_coroutine_threadsafe(_team_room_broadcast_soon(), event_loop)
+    except RuntimeError:
+        team_room_broadcast_pending = False
+
+
 def watch_project(project_path: Path) -> None:
     if not observer or not project_path.exists():
         return
@@ -4500,7 +5137,7 @@ def watch_project(project_path: Path) -> None:
     if key in watch_handles:
         return
 
-    watch_handles[key] = observer.schedule(WorkspaceEventHandler(), str(project_path), recursive=True)
+    watch_handles[key] = observer.schedule(WorkspaceEventHandler(key), str(project_path), recursive=True)
 
 
 def unwatch_project(project_path: Path) -> None:
@@ -4518,7 +5155,24 @@ def watch_registered_projects() -> None:
         watch_project(Path(entry["path"]).resolve())
 
 
+# Per-project last file-system activity (workspace key → ISO timestamp).
+# Used as a liveness signal so silent long builds aren't idle-killed.
+last_fs_activity: dict[str, str] = {}
+
+
+def seconds_since_fs_activity(project_path: Path) -> float:
+    key = display_path(project_path.resolve()).lower()
+    timestamp = parse_timestamp(last_fs_activity.get(key, ""))
+    if not timestamp:
+        return float("inf")
+    return max(0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+
+
 class WorkspaceEventHandler(FileSystemEventHandler):
+    def __init__(self, root_key: str) -> None:
+        super().__init__()
+        self._root_key = root_key
+
     def on_any_event(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
@@ -4527,14 +5181,454 @@ class WorkspaceEventHandler(FileSystemEventHandler):
         if ".git" in src_path.parts:
             return
 
+        last_fs_activity[self._root_key] = utc_now()
         action = f"FILE_{event.event_type.upper()}"
         entry = record_event(action, src_path)
         schedule_broadcast("fs_event", entry)
 
 
-async def write_project_files(project_path: Path, spec: str) -> None:
+def clean_stack_profile(stack_profile: str | None) -> str:
+    value = str(stack_profile or "smart").strip().lower()
+    return value if value in STACK_PROFILE_VALUES else "smart"
+
+
+def infer_stack_profile(spec: str, stack_profile: str | None = "smart") -> str:
+    requested = clean_stack_profile(stack_profile)
+    if requested != "smart":
+        return requested
+
+    text = spec.lower()
+    python_terms = ("python", "fastapi", "ml", "machine learning", "data science", "pandas", "numpy", "notebook")
+    node_api_terms = ("api-only", "api only", "backend api", "rest api", "webhook", "microservice", "fastify")
+    frontend_terms = ("next", "react", "frontend", "ui", "dashboard", "page", "website", "web app", "tailwind")
+    if any(term in text for term in python_terms):
+        return "fastapi-api"
+    if any(term in text for term in node_api_terms) and not any(term in text for term in frontend_terms):
+        return "fastify-api"
+    return "next-web"
+
+
+def write_scaffold_file(project_path: Path, relative_path: str, content: str, *, overwrite: bool = False) -> None:
+    target = project_path / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if overwrite or not target.exists():
+        target.write_text(content.lstrip("\n"), encoding="utf-8")
+
+
+def write_next_web_scaffold(project_path: Path, spec: str) -> None:
+    package_json = {
+        "name": project_path.name,
+        "version": "0.1.0",
+        "private": True,
+        "type": "module",
+        "scripts": {
+            "dev": "next dev",
+            "build": "next build",
+            "start": "next start",
+            "typecheck": "tsc --noEmit",
+            "lint": "eslint . --max-warnings=0",
+            "check": "npm run typecheck && npm run lint",
+        },
+        "dependencies": {
+            "@radix-ui/react-slot": "^1.1.0",
+            "class-variance-authority": "^0.7.1",
+            "clsx": "^2.1.1",
+            "lucide-react": "^0.468.0",
+            "next": "^15.3.0",
+            "react": "^19.0.0",
+            "react-dom": "^19.0.0",
+            "tailwind-merge": "^2.5.5",
+            "tailwindcss-animate": "^1.0.7",
+        },
+        "devDependencies": {
+            "@eslint/eslintrc": "^3.2.0",
+            "@types/node": "^22.10.0",
+            "@types/react": "^19.0.0",
+            "@types/react-dom": "^19.0.0",
+            "eslint": "^9.15.0",
+            "eslint-config-next": "^15.3.0",
+            "autoprefixer": "^10.4.20",
+            "postcss": "^8.4.49",
+            "tailwindcss": "^3.4.17",
+            "typescript": "^5.7.2",
+        },
+    }
+    write_scaffold_file(project_path, "package.json", json.dumps(package_json, indent=2) + "\n")
+    write_scaffold_file(
+        project_path,
+        "tsconfig.json",
+        """{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "es2022"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [{ "name": "next" }]
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+""",
+    )
+    write_scaffold_file(project_path, "next.config.ts", "import type { NextConfig } from \"next\";\n\nconst nextConfig: NextConfig = {};\n\nexport default nextConfig;\n")
+    write_scaffold_file(project_path, "postcss.config.mjs", "export default {\n  plugins: {\n    tailwindcss: {},\n    autoprefixer: {},\n  },\n};\n")
+    write_scaffold_file(
+        project_path,
+        "tailwind.config.ts",
+        """import type { Config } from "tailwindcss";
+import animate from "tailwindcss-animate";
+
+const config: Config = {
+  darkMode: ["class"],
+  content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./lib/**/*.{ts,tsx}"],
+  theme: {
+    extend: {
+      colors: {
+        border: "hsl(var(--border))",
+        background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))",
+        primary: {
+          DEFAULT: "hsl(var(--primary))",
+          foreground: "hsl(var(--primary-foreground))",
+        },
+      },
+    },
+  },
+  plugins: [animate],
+};
+
+export default config;
+""",
+    )
+    write_scaffold_file(
+        project_path,
+        "eslint.config.mjs",
+        """import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { FlatCompat } from "@eslint/eslintrc";
+
+const compat = new FlatCompat({
+  baseDirectory: dirname(fileURLToPath(import.meta.url)),
+});
+
+export default [
+  ...compat.extends("next/core-web-vitals", "next/typescript"),
+  {
+    rules: {
+      "@typescript-eslint/no-explicit-any": "error",
+    },
+  },
+];
+""",
+    )
+    write_scaffold_file(project_path, ".gitignore", "node_modules\n.next\n.env*.local\ndist\ncoverage\n")
+    write_scaffold_file(project_path, "next-env.d.ts", "/// <reference types=\"next\" />\n/// <reference types=\"next/image-types/global\" />\n")
+    write_scaffold_file(
+        project_path,
+        "lib/utils.ts",
+        """import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+export function cn(...inputs: ClassValue[]): string {
+  return twMerge(clsx(inputs));
+}
+""",
+    )
+    write_scaffold_file(
+        project_path,
+        "components/ui/button.tsx",
+        """import * as React from "react";
+import { Slot } from "@radix-ui/react-slot";
+import { cva, type VariantProps } from "class-variance-authority";
+
+import { cn } from "@/lib/utils";
+
+const buttonVariants = cva(
+  "inline-flex h-10 items-center justify-center gap-2 rounded-md border border-transparent px-4 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none disabled:opacity-50",
+  {
+    variants: {
+      variant: {
+        default: "bg-primary text-primary-foreground hover:opacity-90",
+        outline: "border-border bg-transparent hover:bg-foreground/5",
+        ghost: "hover:bg-foreground/5",
+      },
+      size: {
+        default: "h-10 px-4",
+        sm: "h-8 px-3 text-xs",
+        icon: "size-10 p-0",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  },
+);
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  asChild?: boolean;
+}
+
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    const Comp = asChild ? Slot : "button";
+    return <Comp className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...props} />;
+  },
+);
+
+Button.displayName = "Button";
+""",
+    )
+    write_scaffold_file(
+        project_path,
+        "app/layout.tsx",
+        """import type { Metadata } from "next";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Dualith App",
+  description: "A modern strict TypeScript app scaffolded by Dualith.",
+};
+
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}
+""",
+    )
+    title = task_title(spec) if spec.strip() else "Modern App"
+    title_literal = json.dumps(title)
+    write_scaffold_file(
+        project_path,
+        "app/page.tsx",
+        f"""import {{ ArrowRight }} from "lucide-react";
+
+import {{ Button }} from "@/components/ui/button";
+
+export default function HomePage() {{
+  return (
+    <main className="min-h-screen bg-background text-foreground">
+      <section className="mx-auto flex min-h-screen w-full max-w-5xl flex-col justify-center gap-8 px-6 py-12">
+        <div className="max-w-3xl space-y-4">
+          <p className="text-sm font-medium uppercase tracking-wide text-foreground/60">Dualith starter</p>
+          <h1 className="text-4xl font-semibold tracking-normal sm:text-6xl">{{{title_literal}}}</h1>
+          <p className="max-w-2xl text-lg leading-8 text-foreground/70">
+            A Next.js App Router, React, strict TypeScript, Tailwind, and shadcn-compatible foundation is ready.
+          </p>
+        </div>
+        <div>
+          <Button>
+            Start building
+            <ArrowRight className="size-4" aria-hidden="true" />
+          </Button>
+        </div>
+      </section>
+    </main>
+  );
+}}
+""",
+    )
+    write_scaffold_file(
+        project_path,
+        "app/globals.css",
+        """@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 210 40% 98%;
+  --foreground: 222 47% 11%;
+  --border: 214 32% 91%;
+  --primary: 222 47% 11%;
+  --primary-foreground: 210 40% 98%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: Arial, Helvetica, sans-serif;
+}
+""",
+    )
+
+
+def write_fastify_scaffold(project_path: Path) -> None:
+    package_json = {
+        "name": project_path.name,
+        "version": "0.1.0",
+        "private": True,
+        "type": "module",
+        "scripts": {
+            "dev": "tsx watch src/server.ts",
+            "build": "tsc -p tsconfig.json",
+            "start": "node dist/server.js",
+            "typecheck": "tsc --noEmit",
+            "check": "npm run typecheck",
+        },
+        "dependencies": {
+            "@fastify/cors": "^10.0.0",
+            "dotenv": "^16.4.7",
+            "fastify": "^5.1.0",
+            "zod": "^3.24.1",
+        },
+        "devDependencies": {
+            "@types/node": "^22.10.0",
+            "tsx": "^4.19.2",
+            "typescript": "^5.7.2",
+        },
+    }
+    write_scaffold_file(project_path, "package.json", json.dumps(package_json, indent=2) + "\n")
+    write_scaffold_file(
+        project_path,
+        "tsconfig.json",
+        """{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "noImplicitAny": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}
+""",
+    )
+    write_scaffold_file(
+        project_path,
+        "src/server.ts",
+        """import Fastify, { type FastifyInstance } from "fastify";
+import cors from "@fastify/cors";
+import "dotenv/config";
+
+const port = Number(process.env.PORT ?? 3000);
+const host = process.env.HOST ?? "0.0.0.0";
+
+export async function buildServer(): Promise<FastifyInstance> {
+  const app = Fastify({ logger: true });
+  await app.register(cors, { origin: true });
+
+  app.get("/health", async () => ({ ok: true }));
+
+  return app;
+}
+
+const app = await buildServer();
+await app.listen({ port, host });
+""",
+    )
+    write_scaffold_file(project_path, ".env.example", "PORT=3000\nHOST=0.0.0.0\n")
+    write_scaffold_file(project_path, ".gitignore", "node_modules\ndist\n.env\ncoverage\n")
+
+
+def write_fastapi_scaffold(project_path: Path) -> None:
+    write_scaffold_file(
+        project_path,
+        "pyproject.toml",
+        f"""[project]
+name = "{project_path.name}"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "pydantic>=2.10.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3.0", "ruff>=0.8.0"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+""",
+    )
+    write_scaffold_file(
+        project_path,
+        "app/main.py",
+        """from fastapi import FastAPI
+from pydantic import BaseModel, ConfigDict
+
+
+class HealthResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+
+
+app = FastAPI(title="Dualith API")
+
+
+@app.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    return HealthResponse(ok=True)
+""",
+    )
+    write_scaffold_file(
+        project_path,
+        "tests/test_health.py",
+        """from fastapi.testclient import TestClient
+
+from app.main import app
+
+
+def test_health() -> None:
+    client = TestClient(app)
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+""",
+    )
+    write_scaffold_file(project_path, ".env.example", "PORT=8000\n")
+    write_scaffold_file(project_path, ".gitignore", ".venv\n__pycache__\n.pytest_cache\n.ruff_cache\n.env\n")
+
+
+def scaffold_project_stack(project_path: Path, spec: str, stack_profile: str | None) -> str:
+    selected = infer_stack_profile(spec, stack_profile)
+    if selected == "next-web":
+        write_next_web_scaffold(project_path, spec)
+    elif selected == "fastify-api":
+        write_fastify_scaffold(project_path)
+    elif selected == "fastapi-api":
+        write_fastapi_scaffold(project_path)
+    return selected
+
+
+async def write_project_files(project_path: Path, spec: str, stack_profile: str = "smart") -> None:
     project_path.mkdir(parents=True, exist_ok=False)
     await ensure_dualith_files(project_path, spec, overwrite_spec=True)
+    selected_stack = scaffold_project_stack(project_path, spec, stack_profile)
+    if selected_stack != "none":
+        append_chat_history(project_path, f"### Scaffold - {utc_now()}\n\nStack profile: {selected_stack}.\n\n")
 
 
 def copy_impeccable_skill(project_path: Path) -> None:
@@ -4737,7 +5831,13 @@ def add_runner_args(
         prefix = args[:-1]
         prompt = args[-1:]
         if not has_option(prefix, "--output-format"):
-            prefix.extend(["--output-format", "json"])
+            if CLAUDE_STREAM_ENABLED:
+                # stream-json emits per-message JSONL during the run (live tail);
+                # the terminal {"type":"result"} line carries the final answer.
+                # --verbose is required by the CLI when combining -p + stream-json.
+                prefix.extend(["--output-format", "stream-json", "--verbose"])
+            else:
+                prefix.extend(["--output-format", "json"])
         if permission_mode:
             prefix = with_option_value(prefix, "--permission-mode", permission_mode)
         return [*prefix, *prompt]
@@ -4840,6 +5940,84 @@ def runner_progress_message(raw_text: str) -> str | None:
     return None
 
 
+def codex_stream_delta(parsed: dict[str, Any]) -> tuple[str, str] | None:
+    """Normalize one Codex `exec --json` JSONL event into (kind, display text)."""
+    event_type = str(parsed.get("type", ""))
+    item = parsed.get("item")
+    if isinstance(item, dict):
+        item_type = str(item.get("type", ""))
+        if item_type == "agent_message":
+            text = str(item.get("text", "")).strip()
+            return ("message", text) if text else None
+        if item_type == "command_execution":
+            if event_type == "item.started" or str(item.get("status", "")) == "in_progress":
+                command = str(item.get("command", "")).strip()
+                friendly = command_progress_message(command) or "I'm running a command."
+                return ("command", f"{friendly}  $ {command[:160]}" if command else friendly)
+            if event_type == "item.completed" and item.get("exit_code") not in (0, None):
+                return ("progress", "That check hit a snag, so I'm adjusting.")
+            return None
+        if item_type == "file_change":
+            return ("command", "I'm updating files in the project.")
+        if item_type == "reasoning":
+            text = concise_agent_progress(str(item.get("text", "")))
+            return ("progress", text) if text else None
+        return None
+    if event_type == "thread.started":
+        return ("progress", "I'm starting a fresh work thread.")
+    if event_type == "turn.started":
+        return ("progress", "I'm starting the next step.")
+    return None
+
+
+def claude_stream_delta(parsed: dict[str, Any]) -> tuple[str, str] | None:
+    """Normalize one Claude `--output-format stream-json` event into (kind, display text)."""
+    event_type = str(parsed.get("type", ""))
+    if event_type == "assistant":
+        message = parsed.get("message")
+        if not isinstance(message, dict):
+            return None
+        texts: list[str] = []
+        commands: list[str] = []
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = str(block.get("text", "")).strip()
+                if text:
+                    texts.append(text)
+            elif block.get("type") == "tool_use":
+                tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+                command = str(tool_input.get("command", "") or tool_input.get("file_path", "")).strip()
+                friendly = (command_progress_message(command) if command else None) or f"I'm using {block.get('name', 'a tool')}."
+                commands.append(f"{friendly}  $ {command[:160]}" if command else friendly)
+        if texts:
+            return ("message", "\n".join(texts))
+        if commands:
+            return ("command", "\n".join(commands))
+        return None
+    if event_type == "system" and str(parsed.get("subtype", "")) == "init":
+        return ("progress", "I'm starting a fresh work session.")
+    # The terminal {"type":"result"} line is handled at process exit.
+    return None
+
+
+def runner_stream_delta(runner: str, text: str) -> tuple[str, str] | None:
+    """Per-runner line parser feeding the runner-agnostic live output tail."""
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        return ("message", text[:300]) if text.strip() else None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return ("message", text[:300])
+    if not isinstance(parsed, dict):
+        return None
+    if runner == "claude":
+        return claude_stream_delta(parsed)
+    return codex_stream_delta(parsed)
+
+
 def runner_reasoning_arg(runner: str, reasoning: str) -> str:
     if runner == "codex" and reasoning == "extra-high":
         return "xhigh"
@@ -4876,9 +6054,17 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
 
     if project_path is not None:
         prompt = f"{project_runtime_prompt_block(project_path)}{prompt}"
+        if agent not in {"summarizer", "decomposer"}:
+            doc_block = project_memory_prompt_block(project_path)
+            if doc_block:
+                prompt = f"{doc_block}{prompt}"
+                log.debug("project memory injected  agent=%s chars=%s", agent, len(doc_block))
         memory_block = memory_prompt_block(project_path)
         if memory_block:
             prompt = f"{memory_block}{prompt}"
+
+    if agent in {"lead", "tester", "teammate", "builder", "auditor", *SPECIALIST_REVIEWERS}:
+        prompt = f"{prompt}{HANDOFF_PROMPT_TRAILER}"
 
     extra = run_prompt.strip()
     if extra:
@@ -5429,6 +6615,69 @@ def resolve_team_step_model(role: str, assigned_runner: str, executing_runner: s
     return resolve_runner_model(executing_runner, requested_lead_model)
 
 
+def agent_idle_timeout_message(agent: str, timeout_seconds: int) -> str:
+    role_label = str(RUN_MODES.get(agent, {}).get("label", agent.title()))
+    return f"{role_label} stopped after idle timeout; generated files were preserved."
+
+
+def seconds_since_run_output(state: dict[str, Any]) -> float:
+    last_output = parse_timestamp(str(state.get("last_output_at", "")))
+    started_at = parse_timestamp(str(state.get("started_at", "")))
+    timestamp = last_output or started_at
+    if not timestamp:
+        return 0
+    return max(0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+
+
+async def close_agent_streams(process: subprocess.Popen[Any], stream_tasks: list[asyncio.Task[Any]]) -> None:
+    try:
+        await asyncio.wait_for(asyncio.gather(*stream_tasks, return_exceptions=True), timeout=2)
+        return
+    except asyncio.TimeoutError:
+        pass
+    for stream in (process.stdout, process.stderr):
+        try:
+            if stream:
+                stream.close()
+        except Exception:
+            pass
+    for task in stream_tasks:
+        if not task.done():
+            task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.gather(*stream_tasks, return_exceptions=True), timeout=2)
+    except asyncio.TimeoutError:
+        pass
+
+
+async def watch_agent_idle(project_name: str, agent: str, project_path: Path, process: subprocess.Popen[Any]) -> None:
+    timeout_seconds = max(0, AGENT_IDLE_TIMEOUT_SECONDS)
+    if timeout_seconds <= 0:
+        return
+    key = agent_run_key(project_name, agent)
+    while process.poll() is None:
+        await asyncio.sleep(min(10, max(1, timeout_seconds / 10)))
+        state = active_agent_runs.get(key)
+        if not state or state.get("stopping"):
+            return
+        if seconds_since_run_output(state) < timeout_seconds:
+            continue
+        # File modifications count as liveness too: a long compile or test run
+        # can be stdout-silent for minutes while still doing real work.
+        if seconds_since_fs_activity(project_path) < timeout_seconds:
+            continue
+        state["stopping"] = True
+        state["idle_timeout"] = True
+        state["idle_timeout_seconds"] = timeout_seconds
+        message = agent_idle_timeout_message(agent, timeout_seconds)
+        state["last_error"] = message
+        log.warning("%s/%s idle timeout after %ss", project_name, agent, timeout_seconds)
+        entry = record_event("AGENT_IDLE_TIMEOUT", f"{relative_path(project_path)} :: {message}")
+        await broadcast("agent_event", entry)
+        await terminate_process_tree(process, timeout=5)
+        return
+
+
 async def stream_agent_output(project_path: Path, stream: Any, action: str, usage_record: dict[str, Any], lines: list[str]) -> None:
     if not stream:
         return
@@ -5451,13 +6700,78 @@ async def stream_agent_output(project_path: Path, stream: Any, action: str, usag
             active_agent_runs[key]["output_tokens"] = usage_record.get("output_tokens")
             active_agent_runs[key]["total_tokens"] = usage_record.get("total_tokens")
             active_agent_runs[key]["cost_usd"] = usage_record.get("cost_usd")
-        entry = record_event(output_action(action, text), f"{relative_path(project_path)} :: {text[:240]}")
-        progress = runner_progress_message(text)
-        if progress:
-            progress_entry = record_event("RUN_PROGRESS", f"{relative_path(project_path)} :: {progress}")
-            await broadcast("agent_event", progress_entry)
+        record_event(output_action(action, text), f"{relative_path(project_path)} :: {text[:240]}")
+        # Typed delta instead of a full-snapshot broadcast per line: each raw
+        # CLI line is normalized by a per-runner parser into the same
+        # (kind, text) shape, so the live tail is runner-agnostic downstream.
+        project_name = str(usage_record.get("project", ""))
+        run_id = str(usage_record.get("id", ""))
+        agent = str(usage_record.get("mode", ""))
+        runner = str(usage_record.get("runner", ""))
+        is_stderr = action.endswith("_ERR")
+        if is_stderr:
+            # CLI stderr is mostly logging noise; only surface error-looking lines.
+            if "error" in text.lower():
+                event_bus.publish_output(project_name, run_id, agent, "progress", text[:300])
         else:
-            await broadcast("agent_event", entry)
+            delta = runner_stream_delta(runner, text)
+            if delta:
+                kind, display = delta
+                event_bus.publish_output(project_name, run_id, agent, kind, display)
+
+
+def publish_agent_status(project_name: str, agent: str, runner: str, model: str, run_id: str, state: str, detail: str = "") -> None:
+    team = active_teams.get(project_name) or {}
+    event_bus.publish(
+        "agent_status",
+        project_name,
+        {
+            "agent": agent,
+            "role_label": str(RUN_MODES.get(agent, {}).get("label", agent)),
+            "runner": runner,
+            "model": model,
+            "state": state,
+            "round": int(team.get("round") or 0),
+            "detail": detail,
+        },
+        run_id=run_id,
+    )
+
+
+def publish_run_failure(project_name: str, agent: str, runner: str, raw_error: str, action: str = "halt") -> str:
+    """Translate a raw runner failure into a human sentence and publish the typed event.
+
+    Returns the sentence — the only form that may reach chat files or the UI.
+    """
+    failure = translate_failure(raw_error, runner, action)
+    event_bus.publish(
+        "run_error",
+        project_name,
+        {
+            "agent": agent,
+            "runner": runner,
+            "code": failure.code,
+            "message": failure.message,
+            "reset_hint": failure.reset_hint,
+            "action": failure.action,
+        },
+    )
+    return failure.message
+
+
+def publish_verdict(project_name: str, agent: str, verdict: str, summary: str, round_no: int, synthesized: bool = False) -> None:
+    normalized = "approved" if verdict == "approved" else "changes_requested"
+    event_bus.publish(
+        "verdict",
+        project_name,
+        {
+            "agent": agent,
+            "verdict": normalized,
+            "summary": summary,
+            "round": round_no,
+            "synthesized": synthesized,
+        },
+    )
 
 
 async def run_agent_process(project_name: str, agent: str, runner: str, model: str, reasoning: str, run_prompt: str, project_path: Path, partner: str = "", attachment_paths: list[str] | None = None) -> dict[str, Any]:
@@ -5499,6 +6813,11 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
     model_label = model or "default"
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
+    run_id = str(usage_record["id"])
+
+    # Announce before the (seconds-slow) CLI boot so the UI shows the agent
+    # immediately instead of dead air until the first output line.
+    publish_agent_status(project_name, agent, runner, model, run_id, "starting")
 
     try:
         process = await asyncio.to_thread(
@@ -5536,14 +6855,23 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             str(config["start_action"]),
             f"{relative_path(project_path)} :: {mode_label} via {runner_label} :: model {model_label} :: reasoning {reasoning} :: {command} {' '.join(args[:-1])}".strip(),
         )
+        publish_agent_status(project_name, agent, runner, model, run_id, "running")
         await broadcast("agent_event", entry)
 
-        await asyncio.gather(
-            stream_agent_output(project_path, process.stdout, str(config["log_action"]), usage_record, stdout_lines),
-            stream_agent_output(project_path, process.stderr, str(config["error_action"]), usage_record, stderr_lines),
-        )
-        code = await asyncio.to_thread(process.wait)
+        stream_tasks = [
+            asyncio.create_task(stream_agent_output(project_path, process.stdout, str(config["log_action"]), usage_record, stdout_lines)),
+            asyncio.create_task(stream_agent_output(project_path, process.stderr, str(config["error_action"]), usage_record, stderr_lines)),
+        ]
+        watchdog_task = asyncio.create_task(watch_agent_idle(project_name, agent, project_path, process))
+        try:
+            code = await asyncio.to_thread(process.wait)
+        finally:
+            if not watchdog_task.done():
+                watchdog_task.cancel()
+            await asyncio.gather(watchdog_task, return_exceptions=True)
+            await close_agent_streams(process, stream_tasks)
         state = active_agent_runs.get(key, {})
+        idle_timeout = bool(state.get("idle_timeout"))
         status = "stopped" if state.get("stopping") else "ok" if code == 0 else "error"
         finish_usage_record(usage_record, status, code)
         content = extract_result_content(runner, output_path, stdout_lines) if status == "ok" else ""
@@ -5551,12 +6879,18 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         if status == "ok" and agent in CHECKPOINT_MODES:
             checkpoint = await backend_git_checkpoint(project_path, agent, runner, pre_run_git_status)
             content = append_checkpoint_note(content, checkpoint)
-        if status == "stopped":
+        if status == "stopped" and idle_timeout:
+            error = agent_idle_timeout_message(agent, int(state.get("idle_timeout_seconds") or AGENT_IDLE_TIMEOUT_SECONDS))
+        elif status == "stopped":
             error = "I stopped the run before it finished."
         elif status == "ok":
             error = ""
         else:
-            error = friendly_failure_excerpt(stderr_lines, stdout_lines, f"exited {code}")
+            # Translate to a human sentence here so raw CLI JSON never reaches
+            # results, chat files, or the UI. No action suffix: the caller
+            # decides whether to fall back, halt, or wait.
+            raw_error = friendly_failure_excerpt(stderr_lines, stdout_lines, f"exited {code}")
+            error = translate_failure(raw_error, runner, "").message
         result_record = finish_result_record(usage_record, status, content, error, checkpoint)
         # Short-term memory: persist the Ask answer to CHAT_HISTORY.md (Ask runs read-only,
         # so the backend owns the transcript write).
@@ -5565,7 +6899,7 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             await broadcast("chat_event", record_event("CHAT_ANSWER", f"{relative_path(project_path)} :: ask answer"))
         if status == "stopped":
             action = "CODEX_STOPPED" if runner == "codex" else "CLAUDE_STOPPED"
-            exit_message = "stopped before a final answer"
+            exit_message = error if idle_timeout else "stopped before a final answer"
             log.info("⏹ %s/%s stopped by user  exit_code=%s", project_name, agent, code)
         elif status == "ok":
             action = str(config["exit_action"])
@@ -5578,6 +6912,8 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             exit_message = f"exited {code}"
             log.error("✗ %s/%s error  exit_code=%s  %s", project_name, agent, code, error)
         exit_entry = record_event(action, f"{relative_path(project_path)} :: {exit_message}")
+        final_state = "stopped" if status == "stopped" else "done" if status == "ok" else "error"
+        publish_agent_status(project_name, agent, runner, model, run_id, final_state, error)
         await broadcast("agent_event", exit_entry)
         return result_record
     except FileNotFoundError:
@@ -5585,6 +6921,7 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         result_record = finish_result_record(usage_record, "error", "", f"command not found: {command}")
         log.error("command not found: %s  project=%s agent=%s", command, project_name, agent)
         error_entry = record_event(str(config["error_action"]), f"{relative_path(project_path)} :: command not found: {command}")
+        publish_agent_status(project_name, agent, runner, model, run_id, "error", f"command not found: {command}")
         await broadcast("agent_event", error_entry)
         return result_record
     except PermissionError as exc:
@@ -5592,6 +6929,7 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         result_record = finish_result_record(usage_record, "error", "", f"permission denied launching {command}: {exc}")
         log.error("permission denied: %s  project=%s agent=%s  %s", command, project_name, agent, exc)
         error_entry = record_event(str(config["error_action"]), f"{relative_path(project_path)} :: permission denied launching {command}: {exc}")
+        publish_agent_status(project_name, agent, runner, model, run_id, "error", f"permission denied launching {command}")
         await broadcast("agent_event", error_entry)
         return result_record
     except Exception as exc:
@@ -5599,11 +6937,64 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         result_record = finish_result_record(usage_record, "error", "", f"{type(exc).__name__}: {exc}")
         log.exception("unexpected error  project=%s agent=%s  %s", project_name, agent, exc)
         error_entry = record_event(str(config["error_action"]), f"{relative_path(project_path)} :: {type(exc).__name__}: {exc}")
+        publish_agent_status(project_name, agent, runner, model, run_id, "error", f"{type(exc).__name__}: {exc}")
         await broadcast("agent_event", error_entry)
         return result_record
     finally:
+        event_bus.end_run(run_id)
         active_agent_runs.pop(key, None)
         await broadcast("agent_event")
+
+
+async def run_agent_process_with_auto_fallback(
+    project_name: str,
+    agent: str,
+    runner: str,
+    model: str,
+    reasoning: str,
+    run_prompt: str,
+    project_path: Path,
+    runner_pref: str,
+    partner: str = "",
+    attachment_paths: list[str] | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    model = resolve_runner_model(runner, model)
+    result = await run_agent_process(project_name, agent, runner, model, reasoning, run_prompt, project_path, partner, attachment_paths)
+    fallback_runner = paired_runner(runner)
+    if not runner_limit_failure(result, runner) or not can_retry_with_runner(runner_pref, runner, fallback_runner):
+        return result
+
+    role_label = str(RUN_MODES.get(agent, {}).get("label", agent.replace("_", " ").title()))
+    runner_label = str(RUNNER_COMMANDS[runner]["label"])
+    fallback_label = str(RUNNER_COMMANDS[fallback_runner]["label"])
+    reason = publish_run_failure(project_name, agent, runner, agent_result_error(result), f"fallback:{fallback_runner}")
+    note = f"{role_label} via {runner_label} hit a runner limit; retrying with {fallback_label}."
+    append_agent_chat(
+        project_path,
+        f"### Runner Fallback - {utc_now()}\n\n{reason}\n\n",
+    )
+    append_task_event(task_id, "system", "Runner fallback", reason, agent, "retrying")
+    fallback_phase = task_phase_for_agent(agent)
+    if fallback_phase:
+        fallback_status = "summarizing" if agent == "summarizer" else "running"
+        set_task_phase(task_id, fallback_phase, fallback_status, fallback_runner, note)
+    if agent in SPECIALIST_REVIEWERS:
+        set_task_specialist_review(task_id, agent, "running", fallback_runner, note)
+    entry = record_event("RUNNER_FALLBACK", f"{relative_path(project_path)} :: {note}")
+    await broadcast("team_event", entry)
+    fallback_model = resolve_runner_model(fallback_runner, model)
+    return await run_agent_process(
+        project_name,
+        agent,
+        fallback_runner,
+        fallback_model,
+        reasoning,
+        run_prompt,
+        project_path,
+        partner,
+        attachment_paths,
+    )
 
 
 async def stop_agent_process(project_name: str, agent: str) -> None:
@@ -5637,10 +7028,20 @@ async def set_pipeline_state(project_name: str, project_path: Path, message_type
         "PIPELINE",
         f"{relative_path(project_path)} :: {state.get('status')} :: step {state.get('step')} :: iter {state.get('iteration')}",
     )
+    event_bus.publish(
+        "phase",
+        project_name,
+        {
+            "phase": str(state.get("step", "")),
+            "status": str(state.get("status", "")),
+            "round": int(state.get("iteration") or 0),
+            "narration": narration_for(str(state.get("step", "")), str(state.get("status", "")), str(state.get("detail", ""))),
+        },
+    )
     await broadcast(message_type, entry)
 
 
-async def run_pipeline_step(project_name: str, agent: str, runner_pref: str, model: str, reasoning: str, project_path: Path) -> dict[str, Any]:
+async def run_pipeline_step(project_name: str, agent: str, runner_pref: str, model: str, reasoning: str, project_path: Path, task_id: str | None = None) -> dict[str, Any]:
     """Run a single builder/auditor step to completion, honoring auto runner routing."""
     runner = runner_pref
     if runner == "auto":
@@ -5648,7 +7049,17 @@ async def run_pipeline_step(project_name: str, agent: str, runner_pref: str, mod
     if runner not in RUNNER_COMMANDS:
         runner = "codex"
     resolved_model = resolve_runner_model(runner, model)
-    return await run_agent_process(project_name, agent, runner, resolved_model, clean_reasoning(reasoning), "", project_path)
+    return await run_agent_process_with_auto_fallback(
+        project_name,
+        agent,
+        runner,
+        resolved_model,
+        clean_reasoning(reasoning),
+        "",
+        project_path,
+        runner_pref,
+        task_id=task_id,
+    )
 
 
 async def run_pipeline(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_iterations: int, attachment_paths: list[str] | None = None, task_id: str | None = None) -> None:
@@ -5685,9 +7096,11 @@ async def run_pipeline(project_name: str, project_path: Path, runner_pref: str, 
             # Builder step.
             set_task_phase(task_id, "lead", "running", runner_pref, f"Pipeline iteration {iteration}")
             await set_pipeline_state(project_name, project_path, "pipeline_event", status="running", step="builder", iteration=iteration)
-            await run_pipeline_step(project_name, "builder", runner_pref, model, reasoning, project_path)
+            builder_chat_start = agent_chat_size(project_path)
+            await run_pipeline_step(project_name, "builder", runner_pref, model, reasoning, project_path, task_id)
             update_task_ownership_from_git(task_id, project_path, "Builder")
             set_task_phase(task_id, "lead", "done", runner_pref, f"Pipeline iteration {iteration}")
+            await process_step_handoff(project_name, project_path, "builder", iteration, builder_chat_start)
 
             # Builder may have HALTed by writing a question — loop back to the gate.
             if parse_human_input(project_path)["blocked"]:
@@ -5700,8 +7113,10 @@ async def run_pipeline(project_name: str, project_path: Path, runner_pref: str, 
             # Auditor step.
             set_task_phase(task_id, "reviewer", "running", runner_pref, f"Pipeline iteration {iteration}")
             await set_pipeline_state(project_name, project_path, "pipeline_event", status="running", step="auditor", iteration=iteration)
-            await run_pipeline_step(project_name, "auditor", runner_pref, model, reasoning, project_path)
+            auditor_chat_start = agent_chat_size(project_path)
+            await run_pipeline_step(project_name, "auditor", runner_pref, model, reasoning, project_path, task_id)
             set_task_phase(task_id, "reviewer", "done", runner_pref, f"Pipeline iteration {iteration}")
+            await process_step_handoff(project_name, project_path, "auditor", iteration, auditor_chat_start)
 
             if parse_human_input(project_path)["blocked"]:
                 continue
@@ -5745,17 +7160,180 @@ async def set_team_state(project_name: str, project_path: Path, message_type: st
         "TEAM",
         f"{relative_path(project_path)} :: {state.get('status')} :: step {state.get('step')} :: round {state.get('round')} :: {state.get('lead')}<->{state.get('teammate')}",
     )
+    event_bus.publish(
+        "phase",
+        project_name,
+        {
+            "phase": str(state.get("step", "")),
+            "status": str(state.get("status", "")),
+            "round": int(state.get("round") or 0),
+            "narration": narration_for(str(state.get("step", "")), str(state.get("status", "")), str(state.get("detail", ""))),
+        },
+    )
     await broadcast(message_type, entry)
 
 
 def agent_result_failed(result: dict[str, Any] | None) -> bool:
-    return not result or str(result.get("status", "")) == "error"
+    return not result or str(result.get("status", "")) != "ok"
 
 
 def agent_result_error(result: dict[str, Any] | None) -> str:
     if not result:
         return "runner did not return a result"
-    return str(result.get("error") or result.get("summary") or "runner failed").strip()
+    raw = str(result.get("error") or result.get("summary") or "runner failed").strip()
+    if raw and (
+        raw.startswith("{")
+        or "api_error_status" in raw
+        or '"type":"result"' in raw.replace(" ", "")
+        or '"is_error"' in raw
+    ):
+        runner = str(result.get("runner", ""))
+        return translate_failure(raw, runner, "").message
+    return raw
+
+
+def agent_result_runner(result: dict[str, Any] | None, fallback: str) -> str:
+    runner = str(result.get("runner", "")) if result else ""
+    return runner if runner in RUNNER_COMMANDS else fallback
+
+
+def task_phase_for_agent(agent: str) -> str:
+    if agent in {"teammate", "auditor", "summarizer", *SPECIALIST_REVIEWERS}:
+        return "reviewer"
+    if agent == "builder":
+        return "lead"
+    return agent if agent in TASK_PHASES else ""
+
+
+def runner_limit_failure(result: dict[str, Any] | None, runner: str) -> bool:
+    if runner not in RUNNER_COMMANDS or not agent_result_failed(result):
+        return False
+    text = " ".join(
+        str(result.get(key, ""))
+        for key in ("error", "summary", "content")
+        if result and result.get(key)
+    ).lower()
+    compact = re.sub(r"\s+", "", text)
+    if "session limit" in text or "rate limit" in text or "quota" in text:
+        return True
+    if "api_error_status" in compact and "429" in compact:
+        return True
+    return "429" in text and any(token in text for token in ("api", "limit", "rate"))
+
+
+def can_retry_with_runner(runner_pref: str, runner: str, fallback_runner: str) -> bool:
+    if is_manual_runner_pref(runner_pref) or runner == fallback_runner:
+        return False
+    if fallback_runner not in RUNNER_COMMANDS:
+        return False
+    try:
+        return runner_quota_available(fallback_runner, quota_snapshot())
+    except Exception:  # noqa: BLE001 - quota refresh should not crash fallback detection.
+        return False
+
+
+async def repair_missing_chat_section(
+    project_name: str,
+    project_path: Path,
+    label: str,
+    role: str,
+    chat_start: int,
+    result: dict[str, Any],
+    round_no: int,
+) -> None:
+    """Reconstruct an agent's missing AGENT_CHAT.md section from its final answer.
+
+    Contract repair, not enforcement: the process exited cleanly, so the work
+    stands — only the status note was missing. Same pattern as the Summarizer's
+    deterministic fallback. The run continues.
+    """
+    body = str(result.get("content", "") or "").strip()[:600].rstrip()
+    if not body:
+        body = short_result_summary(str(result.get("content", "") or ""), "")
+    if not body:
+        _, git_status = await git_status_porcelain(project_path)
+        changed = [line.strip() for line in git_status.splitlines() if line.strip()][:8]
+        body = "Files changed this round:\n" + "\n".join(f"- {line}" for line in changed) if changed else "Finished this step."
+    body = f"{body}\n\n_(status note reconstructed by Dualith from the {label}'s final answer)_"
+    append_agent_chat_section_if_missing(project_path, label, chat_start, body)
+    record_event("SECTION_REPAIRED", f"{relative_path(project_path)} :: {label} section synthesized from final answer")
+    event_bus.publish(
+        "phase",
+        project_name,
+        {"phase": role, "status": "repaired", "round": round_no, "narration": narration_for(role, "repaired")},
+    )
+
+
+def agent_chat_tail_since(project_path: Path, start_offset: int) -> str:
+    content = read_agent_chat(project_path)
+    return content[max(0, min(start_offset, len(content))):]
+
+
+async def process_step_handoff(
+    project_name: str,
+    project_path: Path,
+    role: str,
+    round_no: int,
+    chat_start: int,
+) -> Handoff:
+    """Parse the agent's handoff trailer, publish the typed event, and append
+    the readable exchange line to AGENT_CHAT.md so the next agent (and the
+    user) sees who handed work to whom and why."""
+    section = agent_chat_tail_since(project_path, chat_start)
+    handoff = parse_handoff(section, role)
+    event_bus.publish(
+        "handoff",
+        project_name,
+        {"from": role, "to": handoff.to, "note": handoff.note, "question": handoff.question, "round": round_no, "synthesized": handoff.synthesized},
+    )
+    role_label = str(RUN_MODES.get(role, {}).get("label", role.replace("_", " ").title()))
+    line = f"{role_label} → @{handoff.to}: {handoff.note}"
+    if handoff.question:
+        line += f"\n\n{role_label} asks @{handoff.to}: {handoff.question}"
+    append_agent_chat(project_path, f"{line}\n\n")
+    record_event("HANDOFF", f"{relative_path(project_path)} :: {role} → @{handoff.to}")
+    return handoff
+
+
+async def maybe_bounce_question(
+    project_name: str,
+    project_path: Path,
+    asker_role: str,
+    handoff: Handoff,
+    lead_runner: str,
+    assigned_lead: str,
+    model: str,
+    reasoning: str,
+    partner: str,
+    runner_pref: str,
+    task_id: str | None,
+    round_no: int,
+) -> None:
+    """One bounded Lead reply when a tester/reviewer handoff carries a direct
+    question addressed to @lead. The asker is not re-run (cost control); the
+    reply lands in AGENT_CHAT.md where the consolidating reviewer sees it."""
+    if not handoff.question or handoff.to != "lead":
+        return
+    state = active_teams.get(project_name)
+    if state is None:
+        return
+    bounces: dict[str, int] = state.setdefault("bounces", {}).setdefault(f"round_{round_no}", {})
+    if bounces.get(asker_role, 0) >= 1 or sum(bounces.values()) >= MAX_BOUNCES_PER_ROUND:
+        record_event("BOUNCE_CAPPED", f"{relative_path(project_path)} :: {asker_role} question skipped (cap reached)")
+        return
+    bounces[asker_role] = bounces.get(asker_role, 0) + 1
+
+    asker_label = str(RUN_MODES.get(asker_role, {}).get("label", asker_role.replace("_", " ").title()))
+    prompt = bounce_prompt(asker_role, asker_label, "Lead", handoff.question)
+    await set_team_state(project_name, project_path, "team_event", status="running", step="lead-reply", round=round_no)
+    chat_start = agent_chat_size(project_path)
+    result = await run_team_step(
+        project_name, "lead", lead_runner, assigned_lead, model, reasoning,
+        project_path, partner, runner_pref, task_id, override_prompt=prompt,
+    )
+    if not agent_result_failed(result):
+        # Publish the reply's handoff (back to the asker); never bounce again.
+        await process_step_handoff(project_name, project_path, "lead", round_no, chat_start)
 
 
 async def stop_team_after_failed_step(
@@ -5768,45 +7346,84 @@ async def stop_team_after_failed_step(
 ) -> None:
     role_label = str(RUN_MODES.get(role, {}).get("label", role.title()))
     runner_label = str(RUNNER_COMMANDS.get(runner, {}).get("label", runner))
-    error = agent_result_error(result)
+    error = publish_run_failure(project_name, role, runner, agent_result_error(result))
     append_chat_history(
         project_path,
         f"### Circuit Breaker - {utc_now()}\n\n"
         f"Run stopped because {role_label} via {runner_label} failed.\n\n"
         f"{error}\n\n"
     )
+    active_phase = "reviewer" if role in {"teammate", *SPECIALIST_REVIEWERS} else role
+    set_task_status(task_id, "failed", active_phase if active_phase in TASK_PHASES else "", error)
     await broadcast("chat_event", record_event("TEAM_STEP_FAILED", f"{relative_path(project_path)} :: {role_label} via {runner_label} failed: {error[:180]}"))
     await set_team_state(project_name, project_path, "team_event", status="error", step=f"{role}-error", round=round_no)
 
 
-async def run_team_step(project_name: str, role: str, runner: str, assigned_runner: str, model: str, reasoning: str, project_path: Path, partner: str, override_prompt: str = "") -> dict[str, Any]:
+async def run_team_step(
+    project_name: str,
+    role: str,
+    runner: str,
+    assigned_runner: str,
+    model: str,
+    reasoning: str,
+    project_path: Path,
+    partner: str,
+    runner_pref: str,
+    task_id: str | None,
+    override_prompt: str = "",
+) -> dict[str, Any]:
     """Run one lead or teammate turn with an explicit runner (role decoupled from runner)."""
     if runner not in RUNNER_COMMANDS:
         runner = "codex"
     resolved_model = resolve_team_step_model(role, assigned_runner, runner, model)
-    return await run_agent_process(project_name, role, runner, resolved_model, clean_reasoning(reasoning), override_prompt, project_path, partner)
+    return await run_agent_process_with_auto_fallback(
+        project_name,
+        role,
+        runner,
+        resolved_model,
+        clean_reasoning(reasoning),
+        override_prompt,
+        project_path,
+        runner_pref,
+        partner,
+        task_id=task_id,
+    )
 
 
 def latest_review_section(project_path: Path, reviewer: str) -> str:
     label = SPECIALIST_REVIEWER_LABELS.get(reviewer, reviewer.replace("_", " ").title())
-    content = f"{read_agent_chat(project_path)}\n{read_limited_text(feedback_path(project_path))}"
     marker = f"### {label}".upper()
-    upper = content.upper()
-    index = upper.rfind(marker)
-    return content[index:] if index != -1 else content[-4000:]
+    for content in (read_agent_chat(project_path), read_limited_text(feedback_path(project_path))):
+        upper = content.upper()
+        index = upper.rfind(marker)
+        if index == -1:
+            continue
+        next_header = upper.find("\n### ", index + len(marker))
+        if next_header != -1:
+            return content[index:next_header]
+        return content[index:]
+    return read_limited_text(feedback_path(project_path), 4000)
 
 
 def specialist_review_verdict(project_path: Path, reviewer: str) -> tuple[str, str]:
-    verdict = SPECIALIST_REVIEWER_VERDICTS[reviewer]
+    marker = SPECIALIST_REVIEWER_VERDICTS[reviewer]
     section = latest_review_section(project_path, reviewer)
-    upper = section.upper()
-    if f"{verdict}: CHANGES REQUESTED" in upper:
+    verdict = extract_verdict(marker, section)
+    if verdict == "missing":
+        # The reviewer wrote prose but no verdict line — infer instead of
+        # demoting to changes_requested (which silently killed clean rounds).
+        inferred = infer_verdict_from_language(section)
+        note = "_(verdict inferred — the reviewer wrote no explicit verdict line)_"
+        if inferred == "negative":
+            return "changes_requested", f"{firstMeaningful_backend_line(section) or 'Changes requested.'} {note}"
+        return "approved", f"{firstMeaningful_backend_line(section) or 'Approved.'} {note}"
+    if verdict == "negative":
         return "changes_requested", firstMeaningful_backend_line(section) or "Changes requested."
-    if f"{verdict}: APPROVED" in upper:
-        if review_observation_count(section) < 2:
-            return "changes_requested", "Approval needs at least two concrete review observations."
-        return "approved", firstMeaningful_backend_line(section) or "Approved."
-    return "changes_requested", "Reviewer did not provide the required approval verdict."
+    summary = firstMeaningful_backend_line(section) or "Approved."
+    if review_observation_count(section) < 2:
+        # Advisory only — never flips an approval anymore.
+        summary = f"{summary} (light review — fewer than two concrete observations)"
+    return "approved", summary
 
 
 def firstMeaningful_backend_line(text: str) -> str:
@@ -5817,6 +7434,84 @@ def firstMeaningful_backend_line(text: str) -> str:
     return ""
 
 
+def package_scripts(project_path: Path) -> dict[str, str]:
+    path = project_path / "package.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+    scripts = data.get("scripts", {})
+    return {str(key): str(value) for key, value in scripts.items()} if isinstance(scripts, dict) else {}
+
+
+def deterministic_check_commands(project_path: Path) -> list[str]:
+    commands: list[str] = []
+    scripts = package_scripts(project_path)
+    for script in ("check", "test", "build"):
+        if script in scripts:
+            commands.append(f"npm run {script}")
+    if (project_path / "pyproject.toml").exists() or (project_path / "setup.py").exists():
+        commands.append("python -m compileall .")
+        if (project_path / "tests").exists():
+            commands.append("python -m pytest")
+    if (project_path / "Makefile").exists():
+        commands.append("make test")
+    return commands[:4]
+
+
+async def run_deterministic_tester(project_name: str, project_path: Path, task_id: str | None, round_no: int) -> tuple[bool, str]:
+    commands = deterministic_check_commands(project_path)
+    start_offset = agent_chat_size(project_path)
+    if not commands:
+        summary = "No package/build/test indicator files were found, so verification was skipped."
+        set_task_phase(task_id, "tester", "skipped", "local", summary)
+        append_agent_chat_section_if_missing(project_path, "Tester", start_offset, f"{summary}\n\nTESTER: PASSED")
+        feedback_path(project_path).write_text(f"### Tester - {utc_now()}\n\n{summary}\n\nTESTER: PASSED\n", encoding="utf-8")
+        publish_verdict(project_name, "tester", "approved", summary, round_no, synthesized=True)
+        return True, summary
+
+    output_lines: list[str] = []
+    for command in commands:
+        await set_team_state(project_name, project_path, "team_event", status="running", step="tester", round=round_no)
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                command,
+                cwd=project_path,
+                shell=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=300,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            summary = f"`{command}` timed out after 300 seconds."
+            feedback_path(project_path).write_text(f"### Tester - {utc_now()}\n\n{summary}\n\nTESTER: FAILED\n", encoding="utf-8")
+            append_agent_chat_section_if_missing(project_path, "Tester", start_offset, f"{summary}\n\nTESTER: FAILED")
+            publish_verdict(project_name, "tester", "changes_requested", summary, round_no, synthesized=True)
+            return False, summary
+        output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part and part.strip())
+        output_lines.append(f"$ {command}\nexit {result.returncode}\n{output[-3000:] if output else '(no output)'}")
+        if result.returncode != 0:
+            summary = f"`{command}` failed with exit code {result.returncode}."
+            body = f"{summary}\n\n```text\n{output[-4000:] if output else '(no output)'}\n```\n\nTESTER: FAILED"
+            feedback_path(project_path).write_text(f"### Tester - {utc_now()}\n\n{body}\n", encoding="utf-8")
+            append_agent_chat_section_if_missing(project_path, "Tester", start_offset, body)
+            publish_verdict(project_name, "tester", "changes_requested", summary, round_no, synthesized=True)
+            return False, summary
+
+    summary = "Deterministic checks passed: " + ", ".join(commands) + "."
+    body = f"{summary}\n\n```text\n{chr(10).join(output_lines)[-6000:]}\n```\n\nTESTER: PASSED"
+    feedback_path(project_path).write_text(f"### Tester - {utc_now()}\n\n{body}\n", encoding="utf-8")
+    append_agent_chat_section_if_missing(project_path, "Tester", start_offset, body)
+    publish_verdict(project_name, "tester", "approved", summary, round_no, synthesized=True)
+    return True, summary
+
+
 async def run_specialist_reviewers(
     project_name: str,
     project_path: Path,
@@ -5825,15 +7520,29 @@ async def run_specialist_reviewers(
     reasoning: str,
     task_id: str | None,
     round_no: int,
-) -> tuple[str, str, str]:
+    reviewers: list[str] | None = None,
+) -> tuple[str, str, str, str]:
+    selected_reviewers = [
+        reviewer
+        for reviewer in (reviewers if reviewers is not None else list(SPECIALIST_REVIEWERS))
+        if reviewer in SPECIALIST_REVIEWERS
+    ]
+    for skipped in SPECIALIST_REVIEWERS:
+        if skipped not in selected_reviewers:
+            reason = "Risk not triggered in lean mode." if reviewers is not None else "Skipped."
+            set_task_specialist_review(task_id, skipped, "skipped", "", reason)
+    if not selected_reviewers:
+        set_task_phase(task_id, "reviewer", "skipped", "", "No specialist risk triggers in lean mode.")
+        return "approved", "", "No specialist risk triggers.", ""
+
     def mark_remaining_skipped(after_index: int, reason: str) -> None:
         # When the chain stops early, the reviewers we never reached must not be
         # left at "pending" — the UI would render them as NOT CAPTURED. Mark them
         # "skipped" so the team room shows an honest "skipped this round".
-        for skipped in SPECIALIST_REVIEWERS[after_index + 1:]:
+        for skipped in selected_reviewers[after_index + 1:]:
             set_task_specialist_review(task_id, skipped, "skipped", "", reason)
 
-    for index, reviewer in enumerate(SPECIALIST_REVIEWERS):
+    for index, reviewer in enumerate(selected_reviewers):
         label = SPECIALIST_REVIEWER_LABELS[reviewer]
         reviewer_runner = role_runner_for_pref(runner_pref, reviewer)
         reviewer_model = resolve_runner_model(reviewer_runner, model)
@@ -5842,26 +7551,44 @@ async def run_specialist_reviewers(
         await set_team_state(project_name, project_path, "team_event", status="running", step=reviewer.replace("_", "-"), round=round_no)
 
         chat_start = agent_chat_size(project_path)
-        result = await run_agent_process(project_name, reviewer, reviewer_runner, reviewer_model, clean_reasoning(reasoning), "", project_path)
+        result = await run_agent_process_with_auto_fallback(
+            project_name,
+            reviewer,
+            reviewer_runner,
+            reviewer_model,
+            clean_reasoning(reasoning),
+            "",
+            project_path,
+            runner_pref,
+            task_id=task_id,
+        )
+        reviewer_runner = agent_result_runner(result, reviewer_runner)
         if agent_result_failed(result):
             error = agent_result_error(result)
             append_agent_chat_section_if_missing(project_path, label, chat_start, f"{error}\n\n{SPECIALIST_REVIEWER_VERDICTS[reviewer]}: CHANGES REQUESTED")
             set_task_specialist_review(task_id, reviewer, "failed", reviewer_runner, error)
             set_task_phase(task_id, "reviewer", "failed", reviewer_runner, error)
             mark_remaining_skipped(index, "Chain halted: earlier reviewer failed.")
-            return "failed", reviewer, error
+            return "failed", reviewer, error, reviewer_runner
 
         verdict, summary = specialist_review_verdict(project_path, reviewer)
         verdict_line = "APPROVED" if verdict == "approved" else "CHANGES REQUESTED"
         append_agent_chat_section_if_missing(project_path, label, chat_start, f"{summary or 'Review completed.'}\n\n{SPECIALIST_REVIEWER_VERDICTS[reviewer]}: {verdict_line}")
+        publish_verdict(project_name, reviewer, verdict, summary, round_no, synthesized="inferred" in summary)
+        reviewer_handoff = await process_step_handoff(project_name, project_path, reviewer, round_no, chat_start)
+        await maybe_bounce_question(
+            project_name, project_path, reviewer, reviewer_handoff,
+            role_runner_for_pref(runner_pref, "lead"), role_runner_for_pref(runner_pref, "lead"),
+            model, reasoning, "", runner_pref, task_id, round_no,
+        )
         set_task_specialist_review(task_id, reviewer, verdict, reviewer_runner, summary)
         if verdict != "approved":
             set_task_phase(task_id, "reviewer", "changes_requested", reviewer_runner, f"{label}: {summary}")
             mark_remaining_skipped(index, "Skipped: returning to Lead for changes.")
-            return "changes_requested", reviewer, summary
+            return "changes_requested", reviewer, summary, reviewer_runner
 
     set_task_phase(task_id, "reviewer", "specialists_approved", "", "Specialist review chain approved.")
-    return "approved", "", "Specialist review chain approved."
+    return "approved", "", "Specialist review chain approved.", ""
 
 
 def append_project_memory_fallback(project_path: Path, task: dict[str, Any] | None, status: str, detail: str) -> None:
@@ -5893,7 +7620,18 @@ async def summarize_project_memory(project_name: str, project_path: Path, task_i
     append_task_event(task_id, "system", "Summarizer started", "Updating PROJECT_MEMORY.md", "summarizer", "running")
     try:
         summarizer_reasoning = clean_reasoning(str(task.get("reasoning", "medium")) if task else "medium")
-        result = await run_agent_process(project_name, "summarizer", summarizer_runner, summarizer_model, summarizer_reasoning, "", project_path)
+        result = await run_agent_process_with_auto_fallback(
+            project_name,
+            "summarizer",
+            summarizer_runner,
+            summarizer_model,
+            summarizer_reasoning,
+            "",
+            project_path,
+            runner_pref,
+            task_id=task_id,
+        )
+        summarizer_runner = agent_result_runner(result, summarizer_runner)
         after = read_limited_text(project_memory_doc_path(project_path), limit=60_000)
         if agent_result_failed(result) or after == before:
             append_project_memory_fallback(project_path, task, status, detail)
@@ -5905,7 +7643,7 @@ async def summarize_project_memory(project_name: str, project_path: Path, task_i
         append_task_event(task_id, "system", "Project memory fallback", str(exc), "summarizer", "fallback")
 
 
-async def run_plan_then_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None, task_id: str | None = None) -> None:
+async def run_plan_then_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None, task_id: str | None = None, team_mode: str = "lean") -> None:
     """Plan-first workflow: planner writes PLAN.md, user approves, then team builds."""
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
 
@@ -5913,7 +7651,19 @@ async def run_plan_then_team(project_name: str, project_path: Path, runner_pref:
     architect_runner = role_runner_for_pref(runner_pref, "architect")
     architect_model = resolve_runner_model(architect_runner, model)
     set_task_phase(task_id, "architect", "running", architect_runner, "Writing ARCHITECTURE.md and DECISIONS.md")
-    architect_result = await run_agent_process(project_name, "architect", architect_runner, architect_model, clean_reasoning(reasoning), run_prompt, project_path, attachment_paths=attachment_paths)
+    architect_result = await run_agent_process_with_auto_fallback(
+        project_name,
+        "architect",
+        architect_runner,
+        architect_model,
+        clean_reasoning(reasoning),
+        run_prompt,
+        project_path,
+        runner_pref,
+        attachment_paths=attachment_paths,
+        task_id=task_id,
+    )
+    architect_runner = agent_result_runner(architect_result, architect_runner)
     if agent_result_failed(architect_result):
         set_task_phase(task_id, "architect", "failed", architect_runner, agent_result_error(architect_result))
         set_task_status(task_id, "failed", "architect", agent_result_error(architect_result))
@@ -5922,7 +7672,7 @@ async def run_plan_then_team(project_name: str, project_path: Path, runner_pref:
             project_path,
             f"### Circuit Breaker - {utc_now()}\n\n"
             f"Plan stopped because Architect via {RUNNER_COMMANDS[architect_runner]['label']} failed.\n\n"
-            f"{agent_result_error(architect_result)}\n\n"
+            f"{publish_run_failure(project_name, 'architect', architect_runner, agent_result_error(architect_result))}\n\n"
         )
         await broadcast("chat_event", record_event("ARCHITECT_FAILED", f"{relative_path(project_path)} :: architect failed"))
         return
@@ -5932,7 +7682,19 @@ async def run_plan_then_team(project_name: str, project_path: Path, runner_pref:
     planner_runner = role_runner_for_pref(runner_pref, "planner")
     planner_model = resolve_runner_model(planner_runner, model)
     set_task_phase(task_id, "planner", "running", planner_runner, "Writing PLAN.md")
-    planner_result = await run_agent_process(project_name, "planner", planner_runner, planner_model, clean_reasoning(reasoning), run_prompt, project_path, attachment_paths=attachment_paths)
+    planner_result = await run_agent_process_with_auto_fallback(
+        project_name,
+        "planner",
+        planner_runner,
+        planner_model,
+        clean_reasoning(reasoning),
+        run_prompt,
+        project_path,
+        runner_pref,
+        attachment_paths=attachment_paths,
+        task_id=task_id,
+    )
+    planner_runner = agent_result_runner(planner_result, planner_runner)
     if agent_result_failed(planner_result):
         set_task_phase(task_id, "planner", "failed", planner_runner, agent_result_error(planner_result))
         set_task_status(task_id, "failed", "planner", agent_result_error(planner_result))
@@ -5941,7 +7703,7 @@ async def run_plan_then_team(project_name: str, project_path: Path, runner_pref:
             project_path,
             f"### Circuit Breaker - {utc_now()}\n\n"
             f"Plan stopped because Planner via {RUNNER_COMMANDS[planner_runner]['label']} failed.\n\n"
-            f"{agent_result_error(planner_result)}\n\n"
+            f"{publish_run_failure(project_name, 'planner', planner_runner, agent_result_error(planner_result))}\n\n"
         )
         await broadcast("chat_event", record_event("PLAN_FAILED", f"{relative_path(project_path)} :: planner failed"))
         return
@@ -5978,7 +7740,18 @@ async def run_plan_then_team(project_name: str, project_path: Path, runner_pref:
             append_chat_history(project_path, f"### Plan Feedback - {utc_now()}\n\n{comment}\n\n")
         # One re-plan cycle
         set_task_phase(task_id, "planner", "running", planner_runner, "Revising PLAN.md")
-        planner_result2 = await run_agent_process(project_name, "planner", planner_runner, planner_model, clean_reasoning(reasoning), comment, project_path)
+        planner_result2 = await run_agent_process_with_auto_fallback(
+            project_name,
+            "planner",
+            planner_runner,
+            planner_model,
+            clean_reasoning(reasoning),
+            comment,
+            project_path,
+            runner_pref,
+            task_id=task_id,
+        )
+        planner_runner = agent_result_runner(planner_result2, planner_runner)
         if agent_result_failed(planner_result2):
             set_task_phase(task_id, "planner", "failed", planner_runner, agent_result_error(planner_result2))
             set_task_status(task_id, "failed", "planner", agent_result_error(planner_result2))
@@ -5987,7 +7760,7 @@ async def run_plan_then_team(project_name: str, project_path: Path, runner_pref:
                 project_path,
                 f"### Circuit Breaker - {utc_now()}\n\n"
                 f"Plan revision stopped because Planner via {RUNNER_COMMANDS[planner_runner]['label']} failed.\n\n"
-                f"{agent_result_error(planner_result2)}\n\n"
+                f"{publish_run_failure(project_name, 'planner', planner_runner, agent_result_error(planner_result2))}\n\n"
             )
             await broadcast("chat_event", record_event("PLAN_FAILED", f"{relative_path(project_path)} :: planner revision failed"))
             return
@@ -6018,10 +7791,10 @@ async def run_plan_then_team(project_name: str, project_path: Path, runner_pref:
             return
 
     # 5. Plan approved — run the team
-    await run_team(project_name, project_path, runner_pref, model, reasoning, run_prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id)
+    await run_team(project_name, project_path, runner_pref, model, reasoning, run_prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id, team_mode=team_mode)
 
 
-async def run_pm_then_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None, task_id: str | None = None) -> None:
+async def run_pm_then_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None, task_id: str | None = None, team_mode: str = "lean") -> None:
     """PM-clarify workflow: PM checks if request is clear, then team builds."""
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
 
@@ -6029,7 +7802,19 @@ async def run_pm_then_team(project_name: str, project_path: Path, runner_pref: s
     pm_runner = role_runner_for_pref(runner_pref, "pm")
     pm_model = resolve_runner_model(pm_runner, model)
     set_task_phase(task_id, "pm", "running", pm_runner, "Clarifying task scope.")
-    pm_result = await run_agent_process(project_name, "pm", pm_runner, pm_model, clean_reasoning(reasoning), run_prompt, project_path, attachment_paths=attachment_paths)
+    pm_result = await run_agent_process_with_auto_fallback(
+        project_name,
+        "pm",
+        pm_runner,
+        pm_model,
+        clean_reasoning(reasoning),
+        run_prompt,
+        project_path,
+        runner_pref,
+        attachment_paths=attachment_paths,
+        task_id=task_id,
+    )
+    pm_runner = agent_result_runner(pm_result, pm_runner)
     if agent_result_failed(pm_result):
         set_task_phase(task_id, "pm", "failed", pm_runner, agent_result_error(pm_result))
         set_task_status(task_id, "failed", "pm", agent_result_error(pm_result))
@@ -6038,7 +7823,7 @@ async def run_pm_then_team(project_name: str, project_path: Path, runner_pref: s
             project_path,
             f"### Circuit Breaker - {utc_now()}\n\n"
             f"Clarification stopped because PM via {RUNNER_COMMANDS[pm_runner]['label']} failed.\n\n"
-            f"{agent_result_error(pm_result)}\n\n"
+            f"{publish_run_failure(project_name, 'pm', pm_runner, agent_result_error(pm_result))}\n\n"
         )
         await broadcast("chat_event", record_event("PM_FAILED", f"{relative_path(project_path)} :: PM failed"))
         return
@@ -6066,10 +7851,11 @@ async def run_pm_then_team(project_name: str, project_path: Path, runner_pref: s
         set_task_status(task_id, "active", "pm", "User answered PM question.")
 
     # 3. PM is done (wrote spec or answered question) — start team
-    await run_team(project_name, project_path, runner_pref, model, reasoning, run_prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id)
+    await run_team(project_name, project_path, runner_pref, model, reasoning, run_prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id, team_mode=team_mode)
 
 
-async def run_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None, task_id: str | None = None) -> None:
+async def run_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None, task_id: str | None = None, team_mode: str = "lean") -> None:
+    team_mode = clean_team_mode(team_mode)
     lead, teammate, reason = team_runners(runner_pref)
     runner_mode = team_runner_mode(runner_pref, lead, teammate)
     team_resume_events[project_name] = asyncio.Event()
@@ -6082,22 +7868,25 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
         "lead_model": runner_default_model(lead),
         "teammate_model": runner_default_model(teammate),
         "runner_mode": runner_mode,
+        "team_mode": team_mode,
         "task_id": task_id or "",
     }
-    set_task_status(task_id, "active", "lead", "Team loop started.")
+    set_task_status(task_id, "active", "lead", f"{team_mode.title()} team loop started.")
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
-    log.info("team routed  project=%s mode=%s lead=%s teammate=%s reason=%s",
-             project_name, runner_mode, RUNNER_COMMANDS[lead]['label'], RUNNER_COMMANDS[teammate]['label'], reason)
-    record_event("TEAM_ROUTED", f"{relative_path(project_path)} :: {runner_mode} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason}")
+    log.info("team routed  project=%s mode=%s team_mode=%s lead=%s teammate=%s reason=%s",
+             project_name, runner_mode, team_mode, RUNNER_COMMANDS[lead]['label'], RUNNER_COMMANDS[teammate]['label'], reason)
+    record_event("TEAM_ROUTED", f"{relative_path(project_path)} :: {team_mode} :: {runner_mode} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason}")
 
     if run_prompt.strip():
         attach_names = [Path(p).name for p in (attachment_paths or []) if p and p.strip()]
         attach_line = f"\n\n_Attached: {', '.join(attach_names)}_" if attach_names else ""
         append_chat_history(project_path, f"### Team Kickoff - {utc_now()}\n\n{run_prompt.strip()}{attach_line}\n\n")
         if lead == teammate and is_manual_runner_pref(runner_pref):
-            routing_line = f"Mode: {runner_mode}"
+            routing_line = f"Mode: {team_mode} / {runner_mode}"
         else:
             routing_line = f"Lead: {RUNNER_COMMANDS[lead]['label']} · Teammate: {RUNNER_COMMANDS[teammate]['label']}"
+        if not routing_line.startswith("Mode:"):
+            routing_line = f"Mode: {team_mode} / {routing_line}"
         append_agent_chat(project_path, f"### Task - {utc_now()}\n\n{routing_line}\n\n{run_prompt.strip()}\n\n")
 
     def stopping() -> bool:
@@ -6136,7 +7925,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
             # declaring whether the task splits into parallel lanes. On failure or
             # single-domain output we fall through to the normal sequential Lead.
             lanes: list[dict[str, Any]] = []
-            if round_no == 1:
+            if team_mode == "full" and round_no == 1:
                 try:
                     decomposer_runner, _ = resolve_round_runner(teammate, lead)
                     decomposer_model = resolve_runner_model(decomposer_runner, model)
@@ -6145,7 +7934,18 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                     if decompose_file.exists():
                         decompose_file.unlink()
                     await set_team_state(project_name, project_path, "team_event", status="running", step="decomposer", round=round_no)
-                    decomposer_result = await run_agent_process(project_name, "decomposer", decomposer_runner, decomposer_model, "low", "", project_path)
+                    decomposer_result = await run_agent_process_with_auto_fallback(
+                        project_name,
+                        "decomposer",
+                        decomposer_runner,
+                        decomposer_model,
+                        "low",
+                        "",
+                        project_path,
+                        runner_pref,
+                        task_id=task_id,
+                    )
+                    decomposer_runner = agent_result_runner(decomposer_result, decomposer_runner)
                     if not agent_result_failed(decomposer_result):
                         lanes = parse_decomposer_file(project_path)
                         if len(lanes) >= 2:
@@ -6155,6 +7955,20 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                             record_event("DECOMPOSER_SPLIT", f"{relative_path(project_path)} :: {len(lanes)} lanes: {lane_labels}")
                         else:
                             lanes = []
+                            decompose_raw = ""
+                            decompose_path = project_path / "DECOMPOSE.json"
+                            if decompose_path.exists():
+                                decompose_raw = decompose_path.read_text(encoding="utf-8", errors="ignore")
+                            if decompose_raw.strip() and '"lanes"' not in decompose_raw:
+                                # The decomposer wrote something we couldn't parse —
+                                # say so instead of silently going sequential.
+                                event_bus.publish(
+                                    "phase",
+                                    project_name,
+                                    {"phase": "decompose", "status": "failed", "round": round_no,
+                                     "narration": narration_for("decompose", "failed")},
+                                )
+                                record_event("DECOMPOSER_UNREADABLE", f"{relative_path(project_path)} :: continuing with a single Lead")
                 except Exception:  # noqa: BLE001 — decomposer failure is non-fatal; fall through to sequential Lead
                     lanes = []
 
@@ -6187,12 +8001,30 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                     update_task_lane_progress(task_id, label, "running", 0)
                     # Use agent="lead" so agent_prompt resolves the lead template correctly;
                     # the lane context is injected via run_prompt (appended after the base prompt).
-                    result = await run_agent_process(project_name, "lead", lead_runner, lead_model, reasoning, lane_prompt, project_path, teammate)
+                    result = await run_agent_process_with_auto_fallback(
+                        project_name,
+                        "lead",
+                        lead_runner,
+                        lead_model,
+                        reasoning,
+                        lane_prompt,
+                        project_path,
+                        runner_pref,
+                        teammate,
+                        task_id=task_id,
+                    )
                     pct = 0 if agent_result_failed(result) else 100
                     update_task_lane_progress(task_id, label, "failed" if agent_result_failed(result) else "done", pct)
                     return result
 
                 lane_results = await asyncio.gather(*[run_lane(l) for l in lanes], return_exceptions=True)
+                for lane_result in lane_results:
+                    if isinstance(lane_result, dict):
+                        actual_lane_runner = agent_result_runner(lane_result, lead_runner)
+                        if actual_lane_runner != lead_runner:
+                            lead_runner = actual_lane_runner
+                            lead_model = resolve_team_step_model("lead", lead, lead_runner, model)
+                            break
 
                 # Check for lane failures.
                 lane_failed = False
@@ -6210,11 +8042,15 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                     for l in lanes:
                         update_task_lane_progress(task_id, l["lane"], "skipped", 0)
                     # Run a sequential Lead merge/repair pass.
-                    lead_result = await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate)
+                    lead_chat_start = agent_chat_size(project_path)
+                    lead_result = await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate, runner_pref, task_id)
+                    lead_runner = agent_result_runner(lead_result, lead_runner)
                     if agent_result_failed(lead_result):
                         set_task_phase(task_id, "lead", "failed", lead_runner, agent_result_error(lead_result))
                         await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, lead_result, round_no)
                         return
+                    if not agent_chat_section_added_since(project_path, "Lead", lead_chat_start):
+                        await repair_missing_chat_section(project_name, project_path, "Lead", "lead", lead_chat_start, lead_result, round_no)
                 else:
                     # All lanes succeeded — run a short Lead merge/reconcile pass.
                     merge_prompt = (
@@ -6225,18 +8061,26 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                         "4. Write your summary to AGENT_CHAT.md under a '### Lead' section.\n"
                         "Do NOT rewrite what the lanes already built unless there is an actual conflict.\n"
                     )
-                    merge_result = await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate, override_prompt=merge_prompt)
+                    lead_chat_start = agent_chat_size(project_path)
+                    merge_result = await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate, runner_pref, task_id, override_prompt=merge_prompt)
+                    lead_runner = agent_result_runner(merge_result, lead_runner)
                     if agent_result_failed(merge_result):
                         set_task_phase(task_id, "lead", "failed", lead_runner, agent_result_error(merge_result))
                         await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, merge_result, round_no)
                         return
+                    if not agent_chat_section_added_since(project_path, "Lead", lead_chat_start):
+                        await repair_missing_chat_section(project_name, project_path, "Lead", "lead", lead_chat_start, merge_result, round_no)
             else:
                 # Sequential Lead (single domain or decomposer skipped).
-                lead_result = await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate)
+                lead_chat_start = agent_chat_size(project_path)
+                lead_result = await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate, runner_pref, task_id)
+                lead_runner = agent_result_runner(lead_result, lead_runner)
                 if agent_result_failed(lead_result):
                     set_task_phase(task_id, "lead", "failed", lead_runner, agent_result_error(lead_result))
                     await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, lead_result, round_no)
                     return
+                if not agent_chat_section_added_since(project_path, "Lead", lead_chat_start):
+                    await repair_missing_chat_section(project_name, project_path, "Lead", "lead", lead_chat_start, lead_result, round_no)
 
             # Clean up the temp decomposer file now that lanes have run.
             decompose_cleanup = project_path / "DECOMPOSE.json"
@@ -6248,6 +8092,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
 
             update_task_ownership_from_git(task_id, project_path, "Lead")
             set_task_phase(task_id, "lead", "done", lead_runner, f"Round {round_no}")
+            await process_step_handoff(project_name, project_path, "lead", round_no, lead_chat_start)
 
             # Lead may have HALTed by writing a question — loop back to the gate.
             if parse_human_input(project_path)["blocked"]:
@@ -6261,24 +8106,70 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
             tester_run_files = ["package.json", "pyproject.toml", "Makefile", "setup.py", "setup.cfg"]
             should_test = any((project_path / f).exists() for f in tester_run_files)
             tester_passed = True
-            if should_test:
+            if should_test and team_mode == "lean":
+                tester_runner = "local"
+                set_task_phase(task_id, "tester", "running", tester_runner, f"Round {round_no}")
+                await set_team_state(project_name, project_path, "team_event", status="running", step="tester", round=round_no)
+                tester_passed, tester_summary = await run_deterministic_tester(project_name, project_path, task_id, round_no)
+                if not tester_passed:
+                    consecutive_test_failures += 1
+                    last_test_error = tester_summary
+                    if consecutive_test_failures >= 3:
+                        append_chat_history(
+                            project_path,
+                            f"### Circuit Breaker - {utc_now()}\n\n"
+                            f"The build hit {consecutive_test_failures} consecutive test failures. "
+                            f"Here's the last error:\n\n{last_test_error}\n\n"
+                            "Fix the underlying issue and try again.\n\n",
+                        )
+                        await broadcast("chat_event", record_event("CIRCUIT_BREAKER", f"{relative_path(project_path)} :: {consecutive_test_failures} consecutive test failures"))
+                        await set_team_state(project_name, project_path, "team_event", status="done", step="circuit-breaker", round=round_no)
+                        set_task_phase(task_id, "tester", "failed", tester_runner, "Circuit breaker after consecutive test failures.")
+                        return
+                    set_task_phase(task_id, "tester", "failed", tester_runner, "Checks failed; returning to Lead.")
+                    continue
+                consecutive_test_failures = 0
+                set_task_phase(task_id, "tester", "done", tester_runner, f"Round {round_no}")
+            elif should_test:
                 tester_runner = role_runner_for_pref(runner_pref, "tester")
                 set_task_phase(task_id, "tester", "running", tester_runner, f"Round {round_no}")
                 await set_team_state(project_name, project_path, "team_event", status="running", step="tester", round=round_no)
                 tester_model = resolve_runner_model(tester_runner, model)
                 tester_chat_start = agent_chat_size(project_path)
-                tester_result = await run_agent_process(project_name, "tester", tester_runner, tester_model, clean_reasoning(reasoning), "", project_path)
+                tester_result = await run_agent_process_with_auto_fallback(
+                    project_name,
+                    "tester",
+                    tester_runner,
+                    tester_model,
+                    clean_reasoning(reasoning),
+                    "",
+                    project_path,
+                    runner_pref,
+                    task_id=task_id,
+                )
+                tester_runner = agent_result_runner(tester_result, tester_runner)
                 if agent_result_failed(tester_result):
                     append_agent_chat_section_if_missing(project_path, "Tester", tester_chat_start, f"{agent_result_error(tester_result)}\n\nTESTER: FAILED")
                     set_task_phase(task_id, "tester", "failed", tester_runner, agent_result_error(tester_result))
                     await stop_team_after_failed_step(project_name, project_path, "tester", tester_runner, tester_result, round_no)
                     return
-                # Read FEEDBACK.md to check result
+                # Verdict: case-insensitive, FEEDBACK.md or the Tester's chat
+                # section; if the Tester wrote no verdict line at all, infer
+                # from its language instead of silently defaulting to FAILED.
                 feedback_path = project_path / "FEEDBACK.md"
                 feedback_content = feedback_path.read_text(encoding="utf-8", errors="ignore") if feedback_path.exists() else ""
-                tester_passed = "TESTER: PASSED" in feedback_content
+                tester_section = agent_chat_tail_since(project_path, tester_chat_start)
+                tester_verdict = extract_verdict("TESTER", feedback_content, tester_section)
+                verdict_inferred = tester_verdict == "missing"
+                if verdict_inferred:
+                    tester_verdict = infer_verdict_from_language(feedback_content or tester_section)
+                tester_passed = tester_verdict == "positive"
                 tester_summary = firstMeaningful_backend_line(feedback_content) or ("All checks passed." if tester_passed else "Tester reported a failing check.")
+                if verdict_inferred:
+                    tester_summary = f"{tester_summary} _(verdict inferred — the Tester wrote no explicit verdict line)_"
                 append_agent_chat_section_if_missing(project_path, "Tester", tester_chat_start, f"{tester_summary}\n\nTESTER: {'PASSED' if tester_passed else 'FAILED'}")
+                tester_handoff = await process_step_handoff(project_name, project_path, "tester", round_no, tester_chat_start)
+                publish_verdict(project_name, "tester", "approved" if tester_passed else "changes_requested", tester_summary, round_no, synthesized=verdict_inferred)
                 if not tester_passed:
                     consecutive_test_failures += 1
                     # Extract last error for circuit breaker message
@@ -6312,6 +8203,10 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 else:
                     consecutive_test_failures = 0
                     set_task_phase(task_id, "tester", "done", tester_runner, f"Round {round_no}")
+                    await maybe_bounce_question(
+                        project_name, project_path, "tester", tester_handoff,
+                        lead_runner, lead, model, reasoning, teammate, runner_pref, task_id, round_no,
+                    )
             else:
                 set_task_phase(task_id, "tester", "skipped", "", "No package/build/test indicator files found.")
                 append_agent_chat_section_if_missing(project_path, "Tester", agent_chat_size(project_path), "No package/build/test indicator files were found, so verification was skipped.\n\nTESTER: PASSED")
@@ -6320,7 +8215,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 await set_team_state(project_name, project_path, "team_event", status="stopped")
                 return
 
-            specialist_status, specialist_reviewer, specialist_summary = await run_specialist_reviewers(
+            specialist_status, specialist_reviewer, specialist_summary, specialist_runner = await run_specialist_reviewers(
                 project_name,
                 project_path,
                 runner_pref,
@@ -6328,9 +8223,10 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 reasoning,
                 task_id,
                 round_no,
+                risk_reviewers_for_task(run_prompt, project_path) if team_mode == "lean" else None,
             )
             if specialist_status == "failed":
-                await stop_team_after_failed_step(project_name, project_path, specialist_reviewer, role_runner_for_pref(runner_pref, specialist_reviewer), {"error": specialist_summary, "status": "error"}, round_no)
+                await stop_team_after_failed_step(project_name, project_path, specialist_reviewer, specialist_runner or role_runner_for_pref(runner_pref, specialist_reviewer), {"error": specialist_summary, "status": "error"}, round_no)
                 return
             if specialist_status == "changes_requested":
                 append_agent_chat(
@@ -6339,6 +8235,11 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                     f"{SPECIALIST_REVIEWER_LABELS.get(specialist_reviewer, specialist_reviewer)} requested changes: {specialist_summary}\n\n",
                 )
                 continue
+            if team_mode == "lean":
+                append_task_event(task_id, "review", "Lean team approved", "Lead completed, deterministic checks passed, and required specialist reviews cleared.", "reviewer", "approved")
+                publish_verdict(project_name, "teammate", "approved", "Lean team approved.", round_no, synthesized=True)
+                await set_team_state(project_name, project_path, "team_event", status="done", step="approved", round=round_no)
+                return
 
             # Teammate turn (reviews; read-only). The partner covers if the teammate's
             # runner is over its reserve this round.
@@ -6354,16 +8255,26 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
             teammate_model = resolve_team_step_model("teammate", teammate, teammate_runner, model)
             set_task_phase(task_id, "reviewer", "running", teammate_runner, f"Round {round_no}")
             await set_team_state(project_name, project_path, "team_event", status="running", step="teammate", round=round_no, teammate_model=teammate_model)
-            teammate_result = await run_team_step(project_name, "teammate", teammate_runner, teammate, model, reasoning, project_path, lead_runner)
+            teammate_chat_start = agent_chat_size(project_path)
+            teammate_result = await run_team_step(project_name, "teammate", teammate_runner, teammate, model, reasoning, project_path, lead_runner, runner_pref, task_id)
+            teammate_runner = agent_result_runner(teammate_result, teammate_runner)
             if agent_result_failed(teammate_result):
                 set_task_phase(task_id, "reviewer", "failed", teammate_runner, agent_result_error(teammate_result))
                 await stop_team_after_failed_step(project_name, project_path, "teammate", teammate_runner, teammate_result, round_no)
                 return
             set_task_phase(task_id, "reviewer", "done", teammate_runner, f"Round {round_no}")
+            teammate_handoff = await process_step_handoff(project_name, project_path, "teammate", round_no, teammate_chat_start)
+            await maybe_bounce_question(
+                project_name, project_path, "teammate", teammate_handoff,
+                lead_runner, lead, model, reasoning, teammate, runner_pref, task_id, round_no,
+            )
 
             if parse_human_input(project_path)["blocked"]:
                 continue
-            if parse_team_signoff(project_path):
+            team_approved = parse_team_signoff(project_path)
+            teammate_summary = firstMeaningful_backend_line(latest_review_section(project_path, "teammate")) or ("Approved." if team_approved else "Changes requested.")
+            publish_verdict(project_name, "teammate", "approved" if team_approved else "changes_requested", teammate_summary, round_no)
+            if team_approved:
                 # Emit an explicit final-reviewer event so the roster's Final Reviewer
                 # card reads "approved" rather than the last specialist's status (both
                 # share the "reviewer" role in the task event log).
@@ -6423,8 +8334,8 @@ def _purge_orphaned_runs() -> None:
         active_teams.pop(name, None)
 
 
-@app.on_event("startup")
 async def startup() -> None:
+    """Invoked from lifespan() — @app.on_event is inert when lifespan= is set."""
     global event_loop, observer
 
     ensure_dualith_store()
@@ -6432,14 +8343,15 @@ async def startup() -> None:
     recover_interrupted_tasks()
     await ensure_registered_project_files()
     event_loop = asyncio.get_running_loop()
+    event_bus.configure(event_loop, collect_snapshot)
     observer = Observer()
     watch_registered_projects()
     observer.start()
     record_event("SYSTEM_READY", f"projects root {display_path(PROJECTS_ROOT)}")
 
 
-@app.on_event("shutdown")
 async def shutdown() -> None:
+    """Invoked from lifespan() — @app.on_event is inert when lifespan= is set."""
     for project_name, state in list(active_dev_servers.items()):
         process = state.get("process")
         if process and process.poll() is None:
@@ -6620,9 +8532,199 @@ async def refine_spec(request: SpecRefineRequest) -> StreamingResponse:
     )
 
 
-@app.post("/api/projects", status_code=201)
-async def create_project(request: ProjectCreateRequest) -> dict[str, Any]:
-    project_name = request.name.strip()
+def normalized_tool_csv(raw_tools: str) -> str:
+    return ",".join(part for part in re.split(r"[,\s]+", raw_tools.strip()) if part)
+
+
+def with_codex_search(args: list[str]) -> list[str]:
+    if "--search" in args:
+        return args
+    return ["--search", *args]
+
+
+def claude_print_args() -> list[str]:
+    args = parse_shell_words(str(RUNNER_COMMANDS["claude"]["args"]))
+    if not any(arg in {"-p", "--print"} for arg in args):
+        args.insert(0, "-p")
+    return with_option_value(args, "--output-format", "text")
+
+
+def runner_prompt_process(runner: Literal["codex", "claude"], prompt: str, output_prefix: str) -> tuple[str, list[str], Path | None]:
+    if runner == "claude":
+        args = claude_print_args()
+        if output_prefix.startswith("idea-"):
+            tools = normalized_tool_csv(IDEA_CLAUDE_TOOLS)
+            if tools:
+                args.extend([f"--tools={tools}", f"--allowedTools={tools}"])
+        args.append(prompt)
+        return str(RUNNER_COMMANDS["claude"]["command"]), args, None
+
+    ensure_dualith_store()
+    output_path = DUALITH_DIR / f"{output_prefix}-{uuid4().hex}.txt"
+    config = RUNNER_COMMANDS["codex"]
+    model = DEFAULT_RUNNER_MODELS["codex"]
+    reasoning = runner_reasoning_arg("codex", DEFAULT_RUNNER_REASONING["codex"])
+    args = add_runner_args(
+        parse_agent_args(str(config["args"]), str(config["model_args"]), str(config["reasoning_args"]), model, reasoning, prompt),
+        "codex",
+        output_path,
+        "read-only",
+        None,
+    )
+    if output_prefix.startswith("idea-") and IDEA_CODEX_SEARCH_ENABLED:
+        args = with_codex_search(args)
+    return str(config["command"]), args, output_path
+
+
+def duration_seconds_label(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    rest = minutes % 60
+    return f"{hours}h {rest}m" if rest else f"{hours}h"
+
+
+def append_runner_partial_output(runner: Literal["codex", "claude"], output_path: Path | None, chunks: list[str]) -> bool:
+    if runner == "codex" and output_path and output_path.exists():
+        content = extract_result_content("codex", output_path, [])
+        if content:
+            chunks.append(content)
+            return True
+    return bool("".join(chunks).strip())
+
+
+async def stream_runner_prompt_sse(
+    runner: Literal["codex", "claude"],
+    prompt: str,
+    output_prefix: str,
+    chunks: list[str],
+    state: dict[str, Any],
+    timeout_seconds: int = SPEC_REFINE_TIMEOUT_SECONDS,
+    timeout_label: str = "Planning run",
+) -> AsyncGenerator[str, None]:
+    command, args, output_path = runner_prompt_process(runner, prompt, output_prefix)
+
+    async def timeout_event() -> AsyncGenerator[str, None]:
+        await terminate_process_tree(process, timeout=2)
+        stderr_hint = ""
+        if process.stderr:
+            try:
+                stderr_hint = (await asyncio.to_thread(process.stderr.read)).strip()
+            except Exception:
+                stderr_hint = ""
+        has_partial = append_runner_partial_output(runner, output_path, chunks)
+        if has_partial:
+            state["partial"] = True
+            if runner == "codex":
+                yield f"data: {json.dumps({'chunk': chunks[-1]})}\n\n"
+        state["error"] = (
+            f"{timeout_label} timed out after {duration_seconds_label(timeout_seconds)}"
+            + ("; partial output was captured." if has_partial else ".")
+        )
+        if stderr_hint:
+            state["error"] = f"{state['error']} Last runner error: {stderr_hint[:300]}"
+        yield f"data: {json.dumps({'error': state['error'], 'partial': has_partial, 'timeout_seconds': timeout_seconds})}\n\n"
+
+    if not Path(command).exists() and shutil.which(command) is None:
+        label = RUNNER_COMMANDS[runner]["label"]
+        state["error"] = f"{label} CLI not found - is it installed and on PATH?"
+        yield f"data: {json.dumps({'error': state['error']})}\n\n"
+        return
+
+    try:
+        process = await asyncio.to_thread(
+            subprocess.Popen,
+            [command, *args],
+            cwd=ROOT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=0,
+            shell=False,
+        )
+    except FileNotFoundError:
+        state["error"] = f"{RUNNER_COMMANDS[runner]['label']} CLI not found - is it installed and on PATH?"
+        yield f"data: {json.dumps({'error': state['error']})}\n\n"
+        return
+    except Exception as exc:
+        state["error"] = str(exc)
+        yield f"data: {json.dumps({'error': state['error']})}\n\n"
+        return
+
+    try:
+        if runner == "codex":
+            try:
+                stdout_out, stderr_out = await asyncio.wait_for(
+                    asyncio.to_thread(process.communicate),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                async for event in timeout_event():
+                    yield event
+                return
+
+            code = process.returncode
+            stdout_lines = stdout_out.splitlines() if stdout_out else []
+            if code != 0:
+                state["error"] = (stderr_out.strip() or stdout_out.strip() or f"codex exited with code {code}")[:500]
+                yield f"data: {json.dumps({'error': state['error']})}\n\n"
+                return
+
+            content = extract_result_content("codex", output_path or Path(), stdout_lines)
+            if content:
+                chunks.append(content)
+                yield f"data: {json.dumps({'chunk': content})}\n\n"
+            yield 'data: {"done": true}\n\n'
+            state["done"] = True
+            return
+
+        deadline = asyncio.get_event_loop().time() + timeout_seconds
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                async for event in timeout_event():
+                    yield event
+                return
+            try:
+                chunk = await asyncio.wait_for(asyncio.to_thread(process.stdout.read, 64), timeout=remaining)
+            except asyncio.TimeoutError:
+                async for event in timeout_event():
+                    yield event
+                return
+            if not chunk:
+                break
+            chunks.append(chunk)
+            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+
+        stderr_out = await asyncio.to_thread(process.stderr.read)
+        code = await asyncio.to_thread(process.wait)
+        if code != 0:
+            state["error"] = stderr_out.strip()[:500] if stderr_out else f"claude exited with code {code}"
+            yield f"data: {json.dumps({'error': state['error']})}\n\n"
+        else:
+            yield 'data: {"done": true}\n\n'
+            state["done"] = True
+    except Exception as exc:
+        try:
+            process.terminate()
+        except Exception:
+            pass
+        state["error"] = str(exc)
+        yield f"data: {json.dumps({'error': state['error']})}\n\n"
+    finally:
+        if output_path and output_path.exists():
+            try:
+                output_path.unlink()
+            except OSError:
+                pass
+
+
+async def create_project_from_spec(project_name: str, spec: str, source: str, stack_profile: str = "smart") -> Path:
     project_path = resolve_project_path(project_name)
     if registry_entry(project_name):
         raise HTTPException(status_code=409, detail="Project already exists in Dualith.")
@@ -6630,14 +8732,197 @@ async def create_project(request: ProjectCreateRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="Project already exists.")
 
     try:
-        await write_project_files(project_path, request.spec)
+        await write_project_files(project_path, spec, stack_profile)
     except FileExistsError:
         raise HTTPException(status_code=409, detail="Project already exists.") from None
 
-    register_project(project_name, project_path, "new")
+    register_project(project_name, project_path, source)
     watch_project(project_path)
-    entry = record_event("PROJECT_CREATED", project_path)
     asyncio.create_task(bootstrap_git(project_path))
+    return project_path
+
+
+@app.get("/api/ideas")
+async def get_ideas() -> dict[str, Any]:
+    return {"ideas": read_ideas()}
+
+
+@app.post("/api/ideas", status_code=201)
+async def create_idea(request: IdeaCreateRequest) -> dict[str, Any]:
+    raw_idea = request.raw_idea.strip()
+    if not raw_idea:
+        raise HTTPException(status_code=400, detail="Idea cannot be blank.")
+    title = request.title.strip() or idea_title_from_text(raw_idea)
+    now = utc_now()
+    idea = normalize_idea_record({
+        "id": uuid4().hex,
+        "title": title,
+        "raw_idea": raw_idea,
+        "status": "draft",
+        "messages": [],
+        "brief": "",
+        "suggested_name": suggested_project_name(title or raw_idea),
+        "promoted_project": "",
+        "created_at": now,
+        "updated_at": now,
+    })
+    ideas = [idea, *read_ideas()]
+    write_ideas(ideas)
+    entry = record_event("IDEA_CREATED", idea["title"])
+    schedule_broadcast("idea_event", entry)
+    return {"idea": idea, "ideas": read_ideas()}
+
+
+@app.patch("/api/ideas/{idea_id}")
+async def update_idea(idea_id: str, request: IdeaPatchRequest) -> dict[str, Any]:
+    def mutate(idea: dict[str, Any]) -> None:
+        if request.title is not None:
+            idea["title"] = request.title.strip() or idea_title_from_text(str(idea.get("raw_idea", "")))
+        if request.raw_idea is not None:
+            idea["raw_idea"] = request.raw_idea.strip()
+            if not str(idea.get("title", "")).strip():
+                idea["title"] = idea_title_from_text(idea["raw_idea"])
+        if request.status is not None and request.status.strip().lower() in {"draft", "planning", "briefed", "promoted"}:
+            idea["status"] = request.status.strip().lower()
+        if request.brief is not None:
+            idea["brief"] = request.brief
+            if request.status is None and str(idea.get("status", "")) != "promoted" and request.brief.strip():
+                idea["status"] = "briefed"
+        if request.suggested_name is not None:
+            idea["suggested_name"] = suggested_project_name(request.suggested_name)
+
+    idea = mutate_idea(idea_id, mutate)
+    entry = record_event("IDEA_UPDATED", idea["title"])
+    schedule_broadcast("idea_event", entry)
+    return {"idea": idea, "ideas": read_ideas()}
+
+
+@app.delete("/api/ideas/{idea_id}")
+async def delete_idea(idea_id: str) -> dict[str, Any]:
+    ideas = read_ideas()
+    next_ideas = [idea for idea in ideas if idea["id"] != idea_id]
+    if len(next_ideas) == len(ideas):
+        raise HTTPException(status_code=404, detail="Idea not found.")
+    write_ideas(next_ideas)
+    entry = record_event("IDEA_DELETED", idea_id)
+    schedule_broadcast("idea_event", entry)
+    return {"ideas": read_ideas()}
+
+
+@app.post("/api/ideas/{idea_id}/chat")
+async def chat_idea(idea_id: str, request: IdeaChatRequest) -> StreamingResponse:
+    prompt_text = request.prompt.strip()
+    if not prompt_text:
+        raise HTTPException(status_code=400, detail="Message cannot be blank.")
+    idea = append_idea_message(idea_id, "user", prompt_text, request.runner)
+    prompt = IDEA_CHAT_META_PROMPT.format(
+        title=idea["title"],
+        raw_idea=idea["raw_idea"],
+        conversation=idea_conversation_text(idea),
+        prompt=prompt_text,
+    )
+    chunks: list[str] = []
+    state: dict[str, Any] = {"done": False, "error": ""}
+
+    async def generate() -> AsyncGenerator[str, None]:
+        async for event in stream_runner_prompt_sse(
+            request.runner,
+            prompt,
+            "idea-chat",
+            chunks,
+            state,
+            timeout_seconds=IDEA_RUN_TIMEOUT_SECONDS,
+            timeout_label="Planning run",
+        ):
+            yield event
+        content = "".join(chunks).strip()
+        if content and (state.get("done") or state.get("partial")):
+            saved_content = content
+            if state.get("partial") and state.get("error"):
+                saved_content = f"{content}\n\n[Partial response: {state['error']}]"
+            updated = append_idea_message(idea_id, "assistant", saved_content, request.runner)
+            if updated.get("status") == "draft":
+                mutate_idea(idea_id, lambda item: item.update({"status": "planning"}))
+            entry = record_event("IDEA_CHAT", updated["title"])
+            schedule_broadcast("idea_event", entry)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/ideas/{idea_id}/brief")
+async def brief_idea(idea_id: str, request: IdeaBriefRequest) -> StreamingResponse:
+    idea = require_idea(idea_id)
+    prompt = IDEA_BRIEF_META_PROMPT.format(
+        title=idea["title"],
+        raw_idea=idea["raw_idea"],
+        conversation=idea_conversation_text(idea),
+        brief=str(idea.get("brief", "")),
+    )
+    chunks: list[str] = []
+    state: dict[str, Any] = {"done": False, "error": ""}
+
+    async def generate() -> AsyncGenerator[str, None]:
+        async for event in stream_runner_prompt_sse(
+            request.runner,
+            prompt,
+            "idea-brief",
+            chunks,
+            state,
+            timeout_seconds=IDEA_RUN_TIMEOUT_SECONDS,
+            timeout_label="Brief generation",
+        ):
+            yield event
+        content = "".join(chunks).strip()
+        if content and (state.get("done") or state.get("partial")):
+            def mutate(idea_record: dict[str, Any]) -> None:
+                idea_record["brief"] = content
+                if state.get("done"):
+                    idea_record["status"] = "promoted" if idea_record.get("status") == "promoted" else "briefed"
+                idea_record["suggested_name"] = suggested_project_name(str(idea_record.get("title", "")) or content)
+
+            updated = mutate_idea(idea_id, mutate)
+            label = f"{updated['title']} (partial)" if state.get("partial") else updated["title"]
+            entry = record_event("IDEA_BRIEF", label)
+            schedule_broadcast("idea_event", entry)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/ideas/{idea_id}/promote", status_code=201)
+async def promote_idea(idea_id: str, request: IdeaPromoteRequest) -> dict[str, Any]:
+    idea = require_idea(idea_id)
+    project_name = request.name.strip()
+    brief = request.brief.strip() or str(idea.get("brief", "")).strip()
+    if not brief:
+        raise HTTPException(status_code=400, detail="Generate or write a brief before creating a project.")
+
+    project_path = await create_project_from_spec(project_name, brief, "idea", request.stack_profile)
+
+    def mutate(idea_record: dict[str, Any]) -> None:
+        idea_record["brief"] = brief
+        idea_record["status"] = "promoted"
+        idea_record["promoted_project"] = project_name
+        idea_record["suggested_name"] = project_name
+
+    updated = mutate_idea(idea_id, mutate)
+    entry = record_event("IDEA_PROMOTED", f"{updated['title']} -> {project_name}")
+    schedule_broadcast("project_created", entry)
+    return await collect_snapshot()
+
+
+@app.post("/api/projects", status_code=201)
+async def create_project(request: ProjectCreateRequest) -> dict[str, Any]:
+    project_name = request.name.strip()
+    project_path = await create_project_from_spec(project_name, request.spec, "new", request.stack_profile)
+    entry = record_event("PROJECT_CREATED", project_path)
     schedule_broadcast("project_created", entry)
 
     return await collect_snapshot()
@@ -6840,6 +9125,8 @@ class UnifiedChatRequest(BaseModel):
     prompt: str = Field(default="", max_length=20_000)
     attachment_paths: list[str] = Field(default_factory=list, max_length=20)
     plan_mode: bool = Field(default=False)
+    route_mode: Literal["ask", "team", "auto"] = "ask"
+    team_mode: Literal["lean", "full"] = "lean"
 
 
 class PlanApprovalRequest(BaseModel):
@@ -6973,7 +9260,7 @@ def _build_project_context(project_path: Path) -> str:
         parts.append("project has a PLAN")
     if feedback_path.exists() and feedback_path.stat().st_size > 20:
         content = feedback_path.read_text(encoding="utf-8", errors="ignore")
-        parts.append("open audit feedback" if "AUDIT PASSED" not in content else "audit passed")
+        parts.append("open audit feedback" if not audit_passed(content) else "audit passed")
     return f"Project context: {', '.join(parts) or 'new project'}."
 
 
@@ -7033,7 +9320,7 @@ def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str,
     has_plan = plan_path.exists() and plan_path.stat().st_size > 40
     has_feedback = feedback_path.exists() and feedback_path.stat().st_size > 20
     feedback_content = feedback_path.read_text(encoding="utf-8", errors="ignore") if has_feedback else ""
-    audit_failed = has_feedback and "AUDIT PASSED" not in feedback_content
+    audit_failed = has_feedback and not audit_passed(feedback_content)
     # Project is "in progress" if it already has a spec or an active plan
     in_progress = has_spec or has_plan
 
@@ -7114,6 +9401,128 @@ def workflow_for_intent(intent: str) -> str:
     return "ask"
 
 
+def clean_team_mode(team_mode: str | None) -> str:
+    value = str(team_mode or "lean").strip().lower()
+    return value if value in TEAM_MODE_VALUES else "lean"
+
+
+def clean_route_mode(route_mode: str | None) -> str:
+    value = str(route_mode or "ask").strip().lower()
+    return value if value in ROUTE_MODE_VALUES else "ask"
+
+
+def risk_reviewers_for_task(prompt: str, project_path: Path) -> list[str]:
+    text = f"{prompt}\n{_build_project_context(project_path)}".lower()
+    reviewers: list[str] = []
+    risk_terms = {
+        "security_reviewer": (
+            "auth", "login", "password", "token", "secret", "permission", "role", "payment",
+            "stripe", "webhook", "upload", "file", "xss", "csrf", "sql", "injection", "privacy",
+        ),
+        "performance_reviewer": (
+            "performance", "slow", "latency", "cache", "scale", "stream", "large", "query",
+            "animation", "canvas", "three", "render", "memory", "bundle",
+        ),
+        "architecture_reviewer": (
+            "schema", "migration", "database", "api", "service", "architecture", "routing",
+            "state", "model", "contract", "integration", "multi-tenant", "tenant",
+        ),
+        "maintainability_reviewer": (
+            "refactor", "cleanup", "clean up", "strict", "typescript", "test", "coverage",
+            "duplication", "shared", "component", "types", "no any",
+        ),
+    }
+    for reviewer, terms in risk_terms.items():
+        if any(term in text for term in terms):
+            reviewers.append(reviewer)
+    return reviewers
+
+
+def planned_agents_for_task(workflow_id: str, team_mode: str, prompt: str, project_path: Path) -> list[str]:
+    workflow = ORCHESTRATION_WORKFLOWS.get(workflow_id, {})
+    kind = str(workflow.get("kind", ""))
+    if kind == "team" and clean_team_mode(team_mode) == "lean":
+        return ["preflight", "lead", "tester", *risk_reviewers_for_task(prompt, project_path)]
+    if kind in {"plan-team", "pm-team"} and clean_team_mode(team_mode) == "lean":
+        prefix = ["architect", "planner"] if kind == "plan-team" else ["pm"]
+        return [*prefix, "preflight", "lead", "tester", *risk_reviewers_for_task(prompt, project_path)]
+    agents = workflow.get("agents", [])
+    if isinstance(agents, list):
+        return [str(agent) for agent in agents if str(agent).strip()]
+    agent = str(workflow.get("agent", "")).strip()
+    return [agent] if agent else []
+
+
+def estimated_runner_calls_for_task(workflow_id: str, team_mode: str, prompt: str, project_path: Path) -> int:
+    workflow = ORCHESTRATION_WORKFLOWS.get(workflow_id, {})
+    kind = str(workflow.get("kind", ""))
+    if kind == "single":
+        return 1
+    if kind == "team" and clean_team_mode(team_mode) == "lean":
+        return 1 + len(risk_reviewers_for_task(prompt, project_path))
+    if kind in {"plan-team", "pm-team"} and clean_team_mode(team_mode) == "lean":
+        setup_calls = 2 if kind == "plan-team" else 1
+        return setup_calls + 1 + len(risk_reviewers_for_task(prompt, project_path))
+    return len(planned_agents_for_task(workflow_id, team_mode, prompt, project_path))
+
+
+def preflight_task(prompt: str, project_path: Path, team_mode: str, attachment_paths: list[str] | None = None) -> dict[str, Any]:
+    text = re.sub(r"\s+", " ", prompt.strip().lower())
+    words = re.findall(r"\b[\w'-]+\b", text)
+    broad_exact = {
+        "fix this",
+        "make it better",
+        "improve this",
+        "polish this",
+        "clean it up",
+        "do this",
+        "continue",
+        "fix",
+        "improve",
+        "update this",
+    }
+    broad_words = {"fix", "improve", "polish", "clean", "better", "update", "change", "enhance", "continue"}
+    target_words = {
+        "file", "page", "component", "api", "backend", "frontend", "button", "form", "route",
+        "test", "build", "error", "screenshot", "design", "status", "chat", "team", "project",
+    }
+    if not text:
+        ambiguous = True
+    elif text in broad_exact:
+        ambiguous = True
+    elif len(words) <= 4 and any(word in broad_words for word in words):
+        ambiguous = True
+    else:
+        ambiguous = any(word in broad_words for word in words) and not any(word in target_words for word in words) and not attachment_paths
+
+    if not ambiguous:
+        return {"status": "ready", "question": "", "options": [], "default_option": ""}
+
+    options = [
+        {
+            "id": "1",
+            "label": "UI/UX polish",
+            "description": "Spend the run on visible clarity, layout, copy, interaction states, and responsive polish.",
+        },
+        {
+            "id": "2",
+            "label": "Reliability pass",
+            "description": "Spend the run on build/test failures, confusing status semantics, and broken behavior.",
+        },
+        {
+            "id": "3",
+            "label": "Specific feature",
+            "description": "I will provide target files or acceptance criteria before the team starts.",
+        },
+    ]
+    return {
+        "status": "blocked",
+        "question": "What should the Team spend runner quota on before it starts?",
+        "options": options,
+        "default_option": "2" if "fix" in words else "1",
+    }
+
+
 def workflow_for_agent(agent: str) -> str:
     if agent == "team":
         return "auto-team"
@@ -7144,6 +9553,46 @@ def route_intent(prompt: str, project_path: Path) -> tuple[str, str]:
     return "ask", reason
 
 
+def chat_workflow_from_intent(intent: str, route_reason: str, prompt: str, plan_mode: bool) -> tuple[str, str]:
+    """Map an intent to the legacy workflow used while dynamic scheduling rolls out."""
+    if intent == "build" and is_direct_git_intent(prompt):
+        return "git-direct", "direct git operation"
+    if plan_mode and intent == "build":
+        return "plan-first", route_reason
+    if not plan_mode and intent == "ask":
+        text = prompt.strip().lower()
+        has_change_target = bool(re.search(r"\b(it|this|that|the app|the ui|the page|the design)\b", text))
+        is_question = "?" in text
+        if has_change_target and not is_question and len(text.split()) >= 3:
+            return "pm-clarify", "ambiguous change request -> PM clarify"
+    return workflow_for_intent(intent), route_reason
+
+
+def orchestration_payload(plan: OrchestrationPlan, validation: PlanValidationResult) -> dict[str, Any]:
+    validation_payload = validation.model_dump(exclude={"plan"})
+    return {
+        "mode": "dynamic-v1",
+        "plan": validation.plan.model_dump(),
+        "validation": validation_payload,
+        "node_summary": plan_node_summary(validation.plan),
+        "original_plan": plan.model_dump(),
+    }
+
+
+def dynamic_chat_workflow(prompt: str, plan_mode: bool) -> tuple[str, str, dict[str, Any] | None]:
+    plan = plan_from_prompt(prompt, plan_mode=plan_mode)
+    validation = validate_plan(plan)
+    if not validation.ok:
+        return "", f"dynamic planner invalid: {'; '.join(validation.errors)[:240]}", orchestration_payload(plan, validation)
+    workflow_id = validation.plan.legacy_workflow_id
+    if workflow_id not in ORCHESTRATION_WORKFLOWS:
+        return "", f"dynamic planner selected unknown legacy workflow: {workflow_id}", orchestration_payload(plan, validation)
+    route_reason = f"dynamic planner -> {validation.plan.request_type}: {validation.plan.route_reason}"
+    if validation.added_nodes:
+        route_reason = f"{route_reason}; added {'/'.join(validation.added_nodes)}"
+    return workflow_id, route_reason, orchestration_payload(plan, validation)
+
+
 async def start_orchestration(
     project_name: str,
     project_path: Path,
@@ -7154,6 +9603,7 @@ async def start_orchestration(
     prompt: str,
     attachment_paths: list[str] | None = None,
     task_id: str | None = None,
+    team_mode: str = "lean",
 ) -> None:
     workflow = ORCHESTRATION_WORKFLOWS.get(workflow_id)
     if not workflow:
@@ -7164,21 +9614,21 @@ async def start_orchestration(
         if project_name in active_teams:
             raise HTTPException(status_code=409, detail="Team is already running.")
         max_rounds = int(workflow.get("max_rounds", TEAM_MAX_ROUNDS) or TEAM_MAX_ROUNDS)
-        asyncio.create_task(run_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id))
+        asyncio.create_task(run_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id, team_mode=team_mode))
         return
 
     if kind == "plan-team":
         if project_name in active_teams:
             raise HTTPException(status_code=409, detail="Team is already running.")
         max_rounds = int(workflow.get("max_rounds", TEAM_MAX_ROUNDS) or TEAM_MAX_ROUNDS)
-        asyncio.create_task(run_plan_then_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id))
+        asyncio.create_task(run_plan_then_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id, team_mode=team_mode))
         return
 
     if kind == "pm-team":
         if project_name in active_teams:
             raise HTTPException(status_code=409, detail="Team is already running.")
         max_rounds = int(workflow.get("max_rounds", TEAM_MAX_ROUNDS) or TEAM_MAX_ROUNDS)
-        asyncio.create_task(run_pm_then_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id))
+        asyncio.create_task(run_pm_then_team(project_name, project_path, runner_pref, model, reasoning, prompt, max_rounds, attachment_paths=attachment_paths, task_id=task_id, team_mode=team_mode))
         return
 
     if kind == "pipeline":
@@ -7204,7 +9654,20 @@ async def start_orchestration(
         if runner not in RUNNER_COMMANDS:
             raise HTTPException(status_code=404, detail="Unknown runner.")
         resolved_model = resolve_runner_model(runner, model)
-        asyncio.create_task(run_agent_process(project_name, agent, runner, resolved_model, reasoning, prompt, project_path, attachment_paths=attachment_paths))
+        asyncio.create_task(
+            run_agent_process_with_auto_fallback(
+                project_name,
+                agent,
+                runner,
+                resolved_model,
+                reasoning,
+                prompt,
+                project_path,
+                runner_pref,
+                attachment_paths=attachment_paths,
+                task_id=task_id,
+            )
+        )
         return
 
     raise HTTPException(status_code=404, detail="Unknown workflow kind.")
@@ -7215,7 +9678,20 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
     project_path = tracked_project_path(name)
 
     runner = request.runner
-    intent, route_reason = await classify_orchestration_intent_async(request.prompt, project_path, runner)
+    route_mode = clean_route_mode(request.route_mode)
+    team_mode = clean_team_mode(request.team_mode)
+    orchestration_meta: dict[str, Any] | None = None
+    await ensure_dualith_files(project_path, "", overwrite_spec=False)
+    model = clean_model(request.model)
+    reasoning = clean_reasoning(request.reasoning)
+
+    if route_mode == "ask":
+        intent, route_reason = "ask", "chat route -> read-only ask"
+    elif route_mode == "team":
+        deterministic_intent, deterministic_reason = classify_orchestration_intent(request.prompt, project_path)
+        intent, route_reason = deterministic_intent, f"team dispatch -> {deterministic_reason}"
+    else:
+        intent, route_reason = await classify_orchestration_intent_async(request.prompt, project_path, runner)
 
     # Direct Git requests are single-runner operations, not build/test/review loops.
     if intent == "build" and is_direct_git_intent(request.prompt):
@@ -7238,21 +9714,89 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
             workflow_id = workflow_for_intent(intent)
     else:
         workflow_id = workflow_for_intent(intent)
+
+    if route_mode == "ask":
+        workflow_id = "ask"
+        route_reason = "chat route -> read-only ask"
+    elif route_mode == "team":
+        if is_direct_git_intent(request.prompt):
+            workflow_id = "git-direct"
+            route_reason = "team dispatch -> direct git operation"
+        elif request.plan_mode and intent == "build":
+            workflow_id = "plan-first"
+        elif intent == "review":
+            workflow_id = "review-only"
+        else:
+            workflow_id = "auto-team"
+
+    if DYNAMIC_ORCHESTRATION_ENABLED and route_mode == "auto":
+        dynamic_workflow_id, dynamic_route_reason, orchestration_meta = dynamic_chat_workflow(request.prompt, request.plan_mode)
+        if dynamic_workflow_id:
+            workflow_id = dynamic_workflow_id
+            route_reason = dynamic_route_reason
+        else:
+            route_reason = f"{route_reason}; {dynamic_route_reason}"
     workflow = ORCHESTRATION_WORKFLOWS[workflow_id]
 
-    await ensure_dualith_files(project_path, "", overwrite_spec=False)
-    model = clean_model(request.model)
-    reasoning = clean_reasoning(request.reasoning)
-
     is_taskable = taskable_workflow(workflow_id)
-    if project_has_active_orchestration(name) or active_task_for_project(name):
+    planned_agents = planned_agents_for_task(workflow_id, team_mode, request.prompt, project_path)
+    estimated_runner_calls = estimated_runner_calls_for_task(workflow_id, team_mode, request.prompt, project_path)
+    preflight = {"status": "ready", "question": "", "options": [], "default_option": ""}
+    has_active_work = project_has_active_orchestration(name) or active_task_for_project(name)
+    if route_mode == "team" and is_taskable and not has_active_work:
+        preflight = preflight_task(request.prompt, project_path, team_mode, request.attachment_paths)
+        if preflight.get("status") == "blocked":
+            write_human_question(
+                project_path,
+                str(preflight.get("question", "")),
+                [option for option in preflight.get("options", []) if isinstance(option, dict)],
+                str(preflight.get("default_option", "")),
+            )
+            task = create_task(
+                name,
+                workflow_id,
+                runner,
+                model,
+                reasoning,
+                request.prompt,
+                "preflight gate -> waiting for scope decision",
+                request.attachment_paths,
+                status="blocked",
+                orchestration=orchestration_meta,
+                route_mode=route_mode,
+                team_mode=team_mode,
+                estimated_runner_calls=estimated_runner_calls,
+                planned_agents=planned_agents,
+                preflight_status="blocked",
+            )
+            append_task_event(str(task.get("id", "")), "decision", "Preflight question", str(preflight.get("question", "")), "preflight", "blocked")
+            record_event("PREFLIGHT_BLOCKED", f"{relative_path(project_path)} :: {task.get('title', 'Task blocked')}")
+            schedule_broadcast("team_event")
+            return await collect_snapshot()
+    if has_active_work:
         if is_taskable:
-            task = create_task(name, workflow_id, runner, model, reasoning, request.prompt, route_reason, request.attachment_paths, status="pending")
+            task = create_task(
+                name,
+                workflow_id,
+                runner,
+                model,
+                reasoning,
+                request.prompt,
+                route_reason,
+                request.attachment_paths,
+                status="pending",
+                orchestration=orchestration_meta,
+                route_mode=route_mode,
+                team_mode=team_mode,
+                estimated_runner_calls=estimated_runner_calls,
+                planned_agents=planned_agents,
+                preflight_status=str(preflight.get("status", "ready")),
+            )
             append_task_event(str(task.get("id", "")), "queue_event", "Queued behind active task", "This request will start automatically when the active task finishes.", "queue", "pending")
+            append_team_dispatch_receipt(project_path, workflow_id, workflow, "queued behind active task", route_reason, runner, team_mode, estimated_runner_calls, planned_agents)
             entry = record_event("TASK_QUEUED", f"{relative_path(project_path)} :: {task.get('title', 'Task queued')}")
             schedule_broadcast("team_event", entry)
             return await collect_snapshot()
-        raise HTTPException(status_code=409, detail="An agent is already running.")
 
     log.info("→ chat routed  project=%s prompt=%r workflow=%s runner=%s reason=%s",
              name, request.prompt[:60], workflow_id, runner, route_reason)
@@ -7262,10 +9806,27 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
     )
     task_id = None
     if is_taskable:
-        task = create_task(name, workflow_id, runner, model, reasoning, request.prompt, route_reason, request.attachment_paths, status="active")
+        task = create_task(
+            name,
+            workflow_id,
+            runner,
+            model,
+            reasoning,
+            request.prompt,
+            route_reason,
+            request.attachment_paths,
+            status="active",
+            orchestration=orchestration_meta,
+            route_mode=route_mode,
+            team_mode=team_mode,
+            estimated_runner_calls=estimated_runner_calls,
+            planned_agents=planned_agents,
+            preflight_status=str(preflight.get("status", "ready")),
+        )
         task_id = str(task.get("id", ""))
         record_event("TASK_STARTED", f"{relative_path(project_path)} :: {task.get('title', 'Task started')}")
-    await start_orchestration(name, project_path, workflow_id, runner, model, reasoning, request.prompt, request.attachment_paths, task_id=task_id)
+        append_team_dispatch_receipt(project_path, workflow_id, workflow, "starting now", route_reason, runner, team_mode, estimated_runner_calls, planned_agents)
+    await start_orchestration(name, project_path, workflow_id, runner, model, reasoning, request.prompt, request.attachment_paths, task_id=task_id, team_mode=team_mode)
 
     return await collect_snapshot()
 
@@ -7376,7 +9937,7 @@ async def clear_chat(name: str) -> dict[str, Any]:
     """
     project_path = tracked_project_path(name)
     clear_chat_history(project_path)
-    clear_agent_chat(project_path)
+    clear_agent_chat(project_path, notify=False)
     clear_project_results(name)
     entry = record_event("CHAT_CLEARED", f"{relative_path(project_path)} :: chat + agent-chat + results cleared")
     schedule_broadcast("chat_event", entry)
@@ -7428,7 +9989,7 @@ async def start_team(name: str, request: TeamStartRequest = TeamStartRequest()) 
     lead, teammate, reason = team_runners(request.runner)
     runner_mode = team_runner_mode(request.runner, lead, teammate)
     asyncio.create_task(
-        run_team(name, project_path, request.runner, request.model, request.reasoning, request.prompt, max_rounds)
+        run_team(name, project_path, request.runner, request.model, request.reasoning, request.prompt, max_rounds, team_mode=request.team_mode)
     )
     entry = record_event("TEAM_STARTED", f"{relative_path(project_path)} :: {runner_mode} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason} :: max {max_rounds} rounds")
     schedule_broadcast("team_event", entry)
@@ -7472,6 +10033,26 @@ async def submit_human_input(name: str, request: HumanInputRequest) -> dict[str,
     write_human_answer(project_path, request.answer)
     if task:
         append_task_decision(str(task.get("id", "")), label, selected, reason, "human_input", "selected")
+        if str(task.get("preflight_status", "")) == "blocked" and str(task.get("status", "")) == "blocked":
+            task_id = str(task.get("id", ""))
+            workflow_id = str(task.get("workflow_id", "auto-team"))
+            runner = str(task.get("runner", "auto"))
+            model = str(task.get("model", ""))
+            reasoning_level = str(task.get("reasoning", "medium"))
+            team_mode = clean_team_mode(str(task.get("team_mode", "lean")))
+            attachment_paths = [str(path) for path in task.get("attachment_paths", []) if str(path).strip()]
+            base_prompt = str(task.get("prompt", ""))
+            resume_prompt = f"{base_prompt}\n\nPreflight decision: {selected}. {reason}".strip()
+
+            def mark_answered(item: dict[str, Any]) -> None:
+                item["preflight_status"] = "answered"
+                item["prompt"] = resume_prompt
+
+            update_task(task_id, mark_answered)
+            clear_human_input(project_path)
+            set_task_status(task_id, "active", "lead", "Preflight answered; team starting.")
+            append_agent_chat(project_path, f"### Preflight Decision - {utc_now()}\n\nSelected: {selected}\n\nReason: {reason or 'No extra detail provided.'}\n\n")
+            await start_orchestration(name, project_path, workflow_id, runner, model, reasoning_level, resume_prompt, attachment_paths, task_id=task_id, team_mode=team_mode)
     # Release whichever orchestrator is frozen on this project's HITL gate.
     for event in (pipeline_resume_events.get(name), team_resume_events.get(name)):
         if event:
@@ -7484,11 +10065,23 @@ async def submit_human_input(name: str, request: HumanInputRequest) -> dict[str,
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
-    websocket_clients.add(websocket)
-    await websocket.send_json({"type": "snapshot", "payload": await collect_snapshot()})
+    queue = event_bus.attach(websocket)
+    await websocket.send_json(await event_bus.snapshot_message())
+    pump_task = asyncio.create_task(event_bus.pump(websocket, queue))
 
     try:
         while True:
-            await websocket.receive_text()
+            raw = await websocket.receive_text()
+            try:
+                request = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(request, dict) and request.get("type") == "resync":
+                # Route through the queue so only the pump task writes to the socket.
+                await queue.put(await event_bus.snapshot_message())
     except WebSocketDisconnect:
-        websocket_clients.discard(websocket)
+        pass
+    finally:
+        pump_task.cancel()
+        await asyncio.gather(pump_task, return_exceptions=True)
+        event_bus.detach(websocket)
