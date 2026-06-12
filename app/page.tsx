@@ -4453,10 +4453,10 @@ function AttentionPanel({
     <section className={`dualith-attention-panel ${attention.status === "stale" ? "is-stale" : ""} ${collapsed ? "is-collapsed" : ""}`}>
       <div className="dualith-attention-panel__header">
         <div className="min-w-0">
-          <div className="dualith-workspace-band__label">{attention.status === "stale" ? "Review notes may be stale" : "AI notes need work"}</div>
-          <div className="dualith-workspace-band__body">{attention.summary || "AI notes need work."}</div>
+          <div className="dualith-workspace-band__label">{attention.status === "stale" ? "Review notes may be outdated" : "Feedback needs attention"}</div>
+          <div className="dualith-workspace-band__body">{attention.summary || "Some items in the project feedback file need to be addressed."}</div>
           <div className="dualith-workspace-band__meta">
-            {attention.source || "AI notes"}{attention.updated_at ? ` / ${timestampLabel(attention.updated_at)}` : ""} / {attentionCountLabel(attention)}
+            {attention.source || "FEEDBACK.md"}{attention.updated_at ? ` · ${timestampLabel(attention.updated_at)}` : ""} · {attentionCountLabel(attention)}
           </div>
         </div>
         <div className="dualith-attention-panel__actions">
@@ -4470,8 +4470,8 @@ function AttentionPanel({
             <span aria-hidden="true">{collapsed ? "+" : "-"}</span>
             <span>{collapsed ? "Expand" : "Minimize"}</span>
           </button>
-          <button type="button" disabled={!onAddressNotes || pending} onClick={() => void address()}>
-            {pending ? "Starting..." : addressActionLabel}
+          <button type="button" disabled={!onAddressNotes || pending} onClick={() => void address()} title="Dispatches an agent run to address the feedback items">
+            {pending ? "Dispatching…" : addressActionLabel}
           </button>
         </div>
       </div>
@@ -4888,13 +4888,13 @@ function FormattedTextBlock({ value }: { value: string }) {
   return <>{nodes}</>;
 }
 
-function FormattedAgentOutput({ content }: { content: string }) {
+const FormattedAgentOutput = React.memo(function FormattedAgentOutput({ content }: { content: string }) {
   const blocks = splitOutputBlocks(sanitizeRunnerOutput(content));
   return (
-    <div className="space-y-3 text-sm leading-6 text-text">
+    <div className="dualith-agent-prose space-y-3 text-sm leading-6 text-text">
       {blocks.map((block, index) => (
         block.kind === "code" ? (
-          <pre key={index} className="max-h-80 overflow-auto whitespace-pre-wrap break-words border border-line-hard bg-bg p-3 text-xs leading-5 text-text-muted">
+          <pre key={index} className="max-h-80 overflow-auto whitespace-pre-wrap break-words border border-line-hard bg-bg p-3 text-xs leading-5 text-text-muted" style={{ fontFamily: "var(--dualith-font-mono)" }}>
             {block.lang && <div className="mb-2 text-[10px] uppercase tracking-widest text-text-faint">{block.lang}</div>}
             <code>{block.value}</code>
           </pre>
@@ -4906,7 +4906,7 @@ function FormattedAgentOutput({ content }: { content: string }) {
       ))}
     </div>
   );
-}
+});
 
 type ChatMessage = {
   role: "user" | "agent" | "dispatch" | "plan" | "circuit-breaker";
@@ -5324,7 +5324,7 @@ function parseChatHistory(raw: string): ChatMessage[] {
   return messages;
 }
 
-function UserBubble({ message, projectName }: { message: ChatMessage; projectName: string }) {
+const UserBubble = React.memo(function UserBubble({ message, projectName }: { message: ChatMessage; projectName: string }) {
   return (
     <div className="dualith-msg dualith-msg--user">
       <span className="dualith-msg__role">{humanizeKickoffTitle(message.title)}{message.timestamp && ` · ${timestampLabel(message.timestamp)}`}</span>
@@ -5344,13 +5344,13 @@ function UserBubble({ message, projectName }: { message: ChatMessage; projectNam
       )}
     </div>
   );
-}
+});
 
 function DualithMascot({ size = 32 }: { size?: number }) {
   return <PixelAgentMascot config={DUALITH_PIXEL_MASCOT} size={size} label="Dualith mascot" />;
 }
 
-function AgentBubble({ runner, label, timestamp, children }: { runner?: RunnerId; label: string; timestamp?: string; children: ReactNode }) {
+const AgentBubble = React.memo(function AgentBubble({ runner, label, timestamp, children }: { runner?: RunnerId; label: string; timestamp?: string; children: ReactNode }) {
   return (
     <div className="agent-bubble">
       <DualithMascot />
@@ -5366,7 +5366,7 @@ function AgentBubble({ runner, label, timestamp, children }: { runner?: RunnerId
       </div>
     </div>
   );
-}
+});
 
 function DispatchReceipt({ message, onOpenTeam }: { message: ChatMessage; onOpenTeam?: () => void }) {
   const lines = message.body.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -5426,18 +5426,19 @@ function DirectConversation({
       ) : (
         <div className="dualith-thread dualith-thread--direct">
           {messages.map((message, index) => {
+            const stableKey = message.timestamp ? `${message.role}-${message.timestamp}` : `m-${index}`;
             if (message.role === "user") {
-              return <UserBubble key={`m-${index}`} message={message} projectName={project?.name ?? ""} />;
+              return <UserBubble key={stableKey} message={message} projectName={project?.name ?? ""} />;
             }
             if (message.role === "dispatch") {
-              return <DispatchReceipt key={`m-${index}`} message={message} />;
+              return <DispatchReceipt key={stableKey} message={message} />;
             }
             if (message.role === "plan") {
               const isPending = project?.plan_pending && index === messages.length - 1;
               return (
-                <div key={`m-${index}`} className="dualith-msg dualith-msg--agent">
+                <div key={stableKey} className="dualith-msg dualith-msg--agent">
                   <span className="dualith-msg__role text-accent">
-                    Plan{message.timestamp && ` Â· ${timestampLabel(message.timestamp)}`}
+                    Plan{message.timestamp && ` · ${timestampLabel(message.timestamp)}`}
                   </span>
                   <div className="dualith-msg__bubble bg-accent/5">
                     <FormattedAgentOutput content={message.body} />
@@ -5468,7 +5469,7 @@ function DirectConversation({
             }
             if (message.role === "circuit-breaker") {
               return (
-                <div key={`m-${index}`} className="dualith-msg dualith-msg--agent">
+                <div key={stableKey} className="dualith-msg dualith-msg--agent">
                   <span className="dualith-msg__role text-danger">{RUN_STOPPED_LABEL}</span>
                   <div className="dualith-msg__bubble text-sm">
                     <FormattedAgentOutput content={message.body} />
@@ -5477,7 +5478,7 @@ function DirectConversation({
               );
             }
             return (
-              <AgentBubble key={`m-${index}`} runner={latest?.runner} label={message.title} timestamp={message.timestamp}>
+              <AgentBubble key={stableKey} runner={latest?.runner} label={message.title} timestamp={message.timestamp}>
                 <FormattedAgentOutput content={message.body} />
               </AgentBubble>
             );
@@ -6076,7 +6077,17 @@ function ChatComposer({
           )}
           {runPrompt.trim() && !agenticChoice && !showDispatchChip && (
             <div className="dualith-composer-hint" aria-live="polite">
-              {activeTab === "chat" ? "route -> ask only" : `route -> ${likelyWorkflow(runPrompt, planMode)} / ${teamMode}`}
+              {activeTab === "chat"
+                ? "→ ask · 1 call"
+                : (() => {
+                    const wf = likelyWorkflow(runPrompt, planMode);
+                    if (wf === "ask") return "→ ask · 1 call";
+                    if (wf === "git-direct") return "→ git · 1 call";
+                    if (wf === "plan-first") return "→ plan-first · ~2 calls";
+                    if (wf === "review-only") return "→ review · ~2 calls";
+                    return `→ team · ${teamMode === "lean" ? "~3 calls" : "~6 calls"}`;
+                  })()
+              }
             </div>
           )}
           <div className="dualith-composer-toolbar flex flex-wrap items-center justify-between gap-2 px-1">
@@ -6883,17 +6894,18 @@ function missionActiveNode(project: ProjectRecord | null, task: DualithTask | nu
 function missionNarration(project: ProjectRecord, task: DualithTask | null, liveRuns: LiveRun[], failures: RunFailure[]) {
   const latestFailure = failures[failures.length - 1];
   if (latestFailure) return latestFailure.message;
-  if (project.human_input?.blocked) return project.human_input.question || "The team is waiting for your answer before it continues.";
-  if (project.plan_pending) return "The plan is ready and waiting for approval before implementation starts.";
+  if (project.human_input?.blocked) return project.human_input.question || "Waiting for your answer before continuing.";
+  if (project.plan_pending) return "Plan ready — approve or revise to start implementation.";
   const liveRun = liveRuns.find((run) => run.project === project.name);
   if (liveRun) return `${liveRun.roleLabel} (${runnerLabels[liveRun.runner as RunnerId] ?? liveRun.runner}) is ${liveRun.state === "starting" ? "starting" : "working"}.`;
-  if (project.team?.status === "done") return `Round ${project.team.round}: the team finished this run.`;
-  if (project.team?.status === "error") return `Round ${project.team.round}: the run stopped on an error.`;
-  if (project.team?.status === "stopped") return `Round ${project.team.round}: the run was stopped.`;
-  if (task?.status === "pending") return "This task is queued and waiting for the team.";
-  if (task?.status === "completed") return "The latest task is complete.";
-  if (task?.status === "failed") return "The latest task needs attention before it continues.";
-  return "Team is standing by.";
+  if (project.team?.status === "done") return `Round ${project.team.round}: team run complete.`;
+  if (project.team?.status === "error") return `Round ${project.team.round}: run stopped on error.`;
+  if (project.team?.status === "stopped") return `Round ${project.team.round}: run stopped.`;
+  if (task?.status === "pending") return "Task queued — team will pick it up shortly.";
+  if (task?.status === "completed") return "Latest task complete.";
+  if (task?.status === "failed") return "Task failed — needs attention before continuing.";
+  if (!task) return "No active task — brief the team below to begin.";
+  return "Standing by.";
 }
 
 function MissionControl({ project, liveRuns = [], failures = [], activeTab = "chat", onTabChange }: {
@@ -6913,12 +6925,10 @@ function MissionControl({ project, liveRuns = [], failures = [], activeTab = "ch
       <div className="mission-control__summary">
         <div className="mission-control__identity">
           <span className="mission-control__project">{project.name}</span>
-          <strong>{task ? task.title : "No active task"}</strong>
-          <em>
-            {task
-              ? `${humanizeWorkflow(task.workflow_id, taskWorkflowLabels[task.workflow_id] ?? task.workflow_id)} — ${humanizeStatus(task.status)}`
-              : "Send a task to begin"}
-          </em>
+          {task && <strong>{task.title}</strong>}
+          {task && (
+            <em>{humanizeWorkflow(task.workflow_id, taskWorkflowLabels[task.workflow_id] ?? task.workflow_id)} — {humanizeStatus(task.status)}</em>
+          )}
         </div>
         {task && (
           <div className="mission-control__meta">
@@ -7048,7 +7058,7 @@ function TeamRoomFull({
           ) : (
             chatMessages.map((message, index) => (
               <ChatFeedMessage
-                key={`chat-${index}`}
+                key={message.timestamp ? `chat-${message.role}-${message.timestamp}` : `chat-${index}`}
                 message={message}
                 project={project}
                 latest={latest}
@@ -8601,15 +8611,16 @@ function DualithApp() {
     onDelta: applyDelta,
   });
 
-  // Periodic heartbeat poll — re-syncs state every 30 s independent of WebSocket.
-  // Guards against silent socket drops, missed broadcasts, or any scenario where
-  // the backend resets in-memory state without the frontend receiving an event.
+  // Heartbeat poll: only fires when the socket is not live.
+  // While connected, the WS delivers all state changes — the poll is redundant.
+  // When disconnected/reconnecting, poll every 10s to recover missed snapshots.
   useEffect(() => {
+    if (socketStatus === "Live") return;
     const id = window.setInterval(() => {
       refreshProjects().catch(() => { /* ignore — connection error already shown in topbar */ });
-    }, 30_000);
+    }, 10_000);
     return () => window.clearInterval(id);
-  }, [refreshProjects]);
+  }, [socketStatus, refreshProjects]);
 
   const deleteProject = useCallback(async (name: string) => {
     const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(name)}`, { method: "DELETE" });
@@ -8904,6 +8915,11 @@ function DualithApp() {
 
       {/* Main full-bleed workspace */}
       <div className="dualith-workspace-b">
+        {socketStatus !== "Live" && !loading && (
+          <div className="dualith-stale-banner" role="status" aria-live="polite">
+            <span>{socketStatus === "Reconnecting..." ? "Reconnecting — displayed data may be stale" : "Connection error — live updates paused"}</span>
+          </div>
+        )}
         {selectedProject && (
           <MissionControl
             project={selectedProject}
