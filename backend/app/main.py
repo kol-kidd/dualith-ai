@@ -392,6 +392,14 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "sandbox": "read-only",
         "default_runner": "claude",
     },
+    "multi_reviewer": {
+        "label": "Reviewer",
+        "role": "specialist-review",
+        "capabilities": ["architecture-risk", "threat-review", "latency-review", "code-health"],
+        "prompt": "multi_reviewer",
+        "sandbox": "read-only",
+        "default_runner": "claude",
+    },
 }
 
 ORCHESTRATION_WORKFLOWS: dict[str, dict[str, Any]] = {
@@ -1101,6 +1109,28 @@ REVIEW_COST_CONTROL = """Review cost control:
 - Prefer targeted reads of changed files over full-file scans.
 - Read only the tail of AGENT_CHAT.md and FEEDBACK.md unless the diff needs older context.
 - Do not inspect unrelated project areas.
+"""
+
+MULTI_REVIEWER_PROMPT = f"""You are the Reviewer — a four-eyes check covering architecture, security, performance, and maintainability in a single pass.
+
+Do not edit source files. Read SPEC.md, PLAN.md, FEEDBACK.md, the tail of AGENT_CHAT.md, and the latest git diff. Cover:
+- Architecture: module boundaries, convention alignment, compatibility constraints.
+- Security: secrets, injection surfaces, unsafe shell/file ops, auth/trust boundary mistakes, data exposure.
+- Performance: avoidable blocking work, unbounded loops, large payloads, expensive renders, unnecessary serialization.
+- Maintainability: unclear ownership, duplicated logic, brittle parsing, confusing names, missing coverage on shared behavior.
+
+Append a `### Reviewer` section to AGENT_CHAT.md with concrete observations organised by the four areas above (skip any area with nothing to flag). Include at least two total findings or explicitly note what was checked if clean.
+
+Append a matching summary block to FEEDBACK.md.
+
+End with exactly ONE verdict line reflecting all four areas:
+REVIEW: APPROVED
+or
+REVIEW: CHANGES REQUESTED
+
+{HANDOFF_CONVENTION}
+
+{HITL_INSTRUCTION}
 """
 
 SUMMARIZER_PROMPT = f"""You are the Summarizer for the engineering workspace.
@@ -4292,11 +4322,33 @@ def read_chat_history(project_path: Path) -> str:
     return content[-CHAT_HISTORY_MAX_CHARS:] if len(content) > CHAT_HISTORY_MAX_CHARS else content
 
 
+_COMPACT_THRESHOLD = CHAT_HISTORY_MAX_CHARS * 2  # compact when file hits 2× the read cap
+
+
+def _compact_transcript(path: Path, archive_dir: Path, max_chars: int) -> None:
+    """Archive the head of a transcript file, keeping only the tail in the live file."""
+    content = path.read_text(encoding="utf-8", errors="replace")
+    if len(content) <= _COMPACT_THRESHOLD:
+        return
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive_path = archive_dir / f"{path.stem}-{stamp}.md"
+    keep = content[-max_chars:]
+    archived = content[: len(content) - len(keep)]
+    archive_path.write_text(archived, encoding="utf-8")
+    path.write_text(keep, encoding="utf-8")
+    log.debug("compacted %s archived=%d kept=%d", path.name, len(archived), len(keep))
+
+
 def append_chat_history(project_path: Path, text: str) -> None:
     path = chat_history_path(project_path)
     existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
     separator = "" if not existing or existing.endswith("\n") else "\n"
-    path.write_text(f"{existing}{separator}{text}", encoding="utf-8")
+    new_content = f"{existing}{separator}{text}"
+    path.write_text(new_content, encoding="utf-8")
+    # Compact at write-time so read_chat_history never reads stale megabytes.
+    if len(new_content) > _COMPACT_THRESHOLD:
+        _compact_transcript(path, project_path / ".dualith" / "archive", CHAT_HISTORY_MAX_CHARS)
     project_name = project_name_for_path(project_path)
     if project_name:
         event_bus.publish_threadsafe(
@@ -4367,7 +4419,11 @@ def append_agent_chat(project_path: Path, text: str) -> None:
     path = agent_chat_path(project_path)
     existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
     separator = "" if not existing or existing.endswith("\n") else "\n"
-    path.write_text(f"{existing}{separator}{text}", encoding="utf-8")
+    new_content = f"{existing}{separator}{text}"
+    path.write_text(new_content, encoding="utf-8")
+    # Compact at write-time so reviewers never have to read megabytes of old history.
+    if len(new_content) > _COMPACT_THRESHOLD:
+        _compact_transcript(path, project_path / ".dualith" / "archive", CHAT_HISTORY_MAX_CHARS)
     project_name = project_name_for_path(project_path)
     if project_name:
         # Carry the appended section inline so clients update the team room
@@ -6052,6 +6108,7 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
         "security_reviewer": SECURITY_REVIEWER_PROMPT,
         "performance_reviewer": PERFORMANCE_REVIEWER_PROMPT,
         "maintainability_reviewer": MAINTAINABILITY_REVIEWER_PROMPT,
+        "multi_reviewer": MULTI_REVIEWER_PROMPT,
         "summarizer": SUMMARIZER_PROMPT,
         "decomposer": DECOMPOSER_PROMPT,
     }
@@ -6063,14 +6120,18 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
     prompt = prompt_template.format(partner=partner_label) if "{partner}" in prompt_template else prompt_template
 
     is_review_agent = agent in REVIEW_AGENTS
+    # Roles that get the full chat history (conversational context matters for them).
+    _needs_chat_history = agent in {"lead", "ask", "pm", "architect", "planner"}
+    # Roles that need project memory / global memory (implementation-context agents).
+    _needs_memory = agent not in {"summarizer", "decomposer", *SPECIALIST_REVIEWERS}
+
     if project_path is not None:
         prompt = f"{project_runtime_prompt_block(project_path)}{prompt}"
-        if agent not in {"summarizer", "decomposer"} and not is_review_agent:
+        if _needs_memory and not is_review_agent:
             doc_block = project_memory_prompt_block(project_path)
             if doc_block:
                 prompt = f"{doc_block}{prompt}"
-                log.debug("project memory injected  agent=%s chars=%s", agent, len(doc_block))
-        if not is_review_agent:
+                log.debug("project memory injected agent=%s chars=%s", agent, len(doc_block))
             memory_block = memory_prompt_block(project_path)
             if memory_block:
                 prompt = f"{memory_block}{prompt}"
@@ -6078,7 +6139,16 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
     if is_review_agent:
         prompt = f"{prompt}\n\n{REVIEW_COST_CONTROL}"
 
-    if agent in {"lead", "tester", "teammate", "builder", "auditor", *SPECIALIST_REVIEWERS}:
+    # Only Lead, ask, pm, architect, planner need the full chat history tail.
+    # Reviewers, tester, teammate, summarizer read AGENT_CHAT.md directly; giving
+    # them CHAT_HISTORY too doubles their context for no benefit.
+    if project_path is not None and _needs_chat_history:
+        chat = read_chat_history(project_path)
+        if chat:
+            prompt = f"Recent conversation (CHAT_HISTORY.md tail):\n{chat}\n\n{prompt}"
+
+    # HANDOFF boilerplate only for agents that actually hand off to another agent.
+    if agent in {"lead", "tester", "teammate", "builder", "auditor"}:
         prompt = f"{prompt}{HANDOFF_PROMPT_TRAILER}"
 
     extra = run_prompt.strip()
@@ -6640,10 +6710,22 @@ def resolve_runner_model(runner: str, requested_model: str) -> str:
     return runner_default_model(runner)
 
 
+# Roles that can use a cheaper/faster model — they do focused single-pass work, not reasoning-heavy implementation.
+_CHEAP_MODEL_ROLES: dict[str, dict[str, str]] = {
+    "summarizer": {"claude": "claude-haiku-4-5-20251001", "codex": "codex-mini-latest"},
+    "multi_reviewer": {"claude": "claude-haiku-4-5-20251001", "codex": "codex-mini-latest"},
+    "tester": {"claude": "claude-haiku-4-5-20251001", "codex": "codex-mini-latest"},
+}
+
+
 def resolve_team_step_model(role: str, assigned_runner: str, executing_runner: str, requested_lead_model: str) -> str:
     """Resolve a Team step model without leaking one runner's model to another."""
     if executing_runner not in RUNNER_COMMANDS:
         executing_runner = "codex"
+    # Use a cheap/fast model for roles that don't require deep reasoning.
+    cheap = _CHEAP_MODEL_ROLES.get(role, {}).get(executing_runner)
+    if cheap:
+        return cheap
     return resolve_runner_model(executing_runner, requested_lead_model)
 
 
@@ -7544,6 +7626,56 @@ async def run_deterministic_tester(project_name: str, project_path: Path, task_i
     return True, summary
 
 
+async def _run_merged_reviewer(
+    project_name: str,
+    project_path: Path,
+    runner_pref: str,
+    model: str,
+    reasoning: str,
+    task_id: str | None,
+    round_no: int,
+) -> tuple[str, str, str, str]:
+    """Single multi-focus reviewer replacing the 4-specialist chain in lean mode."""
+    reviewer_runner = role_runner_for_pref(runner_pref, "multi_reviewer")
+    reviewer_model = resolve_runner_model(reviewer_runner, model)
+    set_task_phase(task_id, "reviewer", "running", reviewer_runner, f"Reviewer round {round_no}")
+    for skipped in SPECIALIST_REVIEWERS:
+        set_task_specialist_review(task_id, skipped, "skipped", "", "Merged reviewer mode (lean).")
+    await set_team_state(project_name, project_path, "team_event", status="running", step="reviewer", round=round_no)
+
+    chat_start = agent_chat_size(project_path)
+    result = await run_agent_process_with_auto_fallback(
+        project_name,
+        "multi_reviewer",
+        reviewer_runner,
+        reviewer_model,
+        clean_reasoning(reasoning),
+        "",
+        project_path,
+        runner_pref,
+        task_id=task_id,
+    )
+    reviewer_runner = agent_result_runner(result, reviewer_runner)
+    if agent_result_failed(result):
+        error = agent_result_error(result)
+        append_agent_chat_section_if_missing(project_path, "Reviewer", chat_start, f"{error}\n\nREVIEW: CHANGES REQUESTED")
+        set_task_phase(task_id, "reviewer", "failed", reviewer_runner, error)
+        return "failed", "multi_reviewer", error, reviewer_runner
+
+    # Parse REVIEW: APPROVED / REVIEW: CHANGES REQUESTED from agent chat
+    tail = read_agent_chat(project_path)
+    since = tail[max(0, len(tail) - (len(tail) - chat_start)):] if chat_start < len(tail) else tail
+    if re.search(r"\bREVIEW:\s*CHANGES\s+REQUESTED\b", since, re.IGNORECASE):
+        verdict, verdict_str = "changes_requested", "CHANGES REQUESTED"
+    else:
+        verdict, verdict_str = "approved", "APPROVED"
+    summary = f"Merged review: {verdict_str.lower()}."
+    append_agent_chat_section_if_missing(project_path, "Reviewer", chat_start, f"{summary}\n\nREVIEW: {verdict_str}")
+    publish_verdict(project_name, "multi_reviewer", verdict, summary, round_no, synthesized=False)
+    set_task_phase(task_id, "reviewer", verdict, reviewer_runner, summary)
+    return verdict, "multi_reviewer", summary, reviewer_runner
+
+
 async def run_specialist_reviewers(
     project_name: str,
     project_path: Path,
@@ -7553,7 +7685,14 @@ async def run_specialist_reviewers(
     task_id: str | None,
     round_no: int,
     reviewers: list[str] | None = None,
+    team_mode: str = "lean",
 ) -> tuple[str, str, str, str]:
+    # In lean mode (the default), use a single merged multi-focus reviewer instead of
+    # 4 sequential specialist subprocesses. This cuts review tokens ~70% and removes
+    # 3 extra subprocess spawns + sequential waits per round.
+    if clean_team_mode(team_mode) == "lean":
+        return await _run_merged_reviewer(project_name, project_path, runner_pref, model, reasoning, task_id, round_no)
+
     selected_reviewers = [
         reviewer
         for reviewer in (reviewers if reviewers is not None else list(SPECIALIST_REVIEWERS))
@@ -7567,60 +7706,51 @@ async def run_specialist_reviewers(
         set_task_phase(task_id, "reviewer", "skipped", "", "No specialist risk triggers in lean mode.")
         return "approved", "", "No specialist risk triggers.", ""
 
-    def mark_remaining_skipped(after_index: int, reason: str) -> None:
-        # When the chain stops early, the reviewers we never reached must not be
-        # left at "pending" — the UI would render them as NOT CAPTURED. Mark them
-        # "skipped" so the team room shows an honest "skipped this round".
-        for skipped in selected_reviewers[after_index + 1:]:
-            set_task_specialist_review(task_id, skipped, "skipped", "", reason)
-
-    for index, reviewer in enumerate(selected_reviewers):
+    async def _run_one_reviewer(reviewer: str) -> tuple[str, str, str, str]:
+        """Run a single specialist reviewer; return (verdict, reviewer, summary, runner)."""
         label = SPECIALIST_REVIEWER_LABELS[reviewer]
-        reviewer_runner = role_runner_for_pref(runner_pref, reviewer)
-        reviewer_model = resolve_runner_model(reviewer_runner, model)
-        set_task_phase(task_id, "reviewer", "running", reviewer_runner, f"{label} round {round_no}")
-        set_task_specialist_review(task_id, reviewer, "running", reviewer_runner, f"Round {round_no}")
+        r_runner = role_runner_for_pref(runner_pref, reviewer)
+        r_model = resolve_runner_model(r_runner, model)
+        set_task_specialist_review(task_id, reviewer, "running", r_runner, f"Round {round_no}")
         await set_team_state(project_name, project_path, "team_event", status="running", step=reviewer.replace("_", "-"), round=round_no)
-
         chat_start = agent_chat_size(project_path)
         result = await run_agent_process_with_auto_fallback(
-            project_name,
-            reviewer,
-            reviewer_runner,
-            reviewer_model,
-            clean_reasoning(reasoning),
-            "",
-            project_path,
-            runner_pref,
-            task_id=task_id,
+            project_name, reviewer, r_runner, r_model, clean_reasoning(reasoning), "", project_path, runner_pref, task_id=task_id,
         )
-        reviewer_runner = agent_result_runner(result, reviewer_runner)
+        r_runner = agent_result_runner(result, r_runner)
         if agent_result_failed(result):
             error = agent_result_error(result)
             append_agent_chat_section_if_missing(project_path, label, chat_start, f"{error}\n\n{SPECIALIST_REVIEWER_VERDICTS[reviewer]}: CHANGES REQUESTED")
-            set_task_specialist_review(task_id, reviewer, "failed", reviewer_runner, error)
-            set_task_phase(task_id, "reviewer", "failed", reviewer_runner, error)
-            mark_remaining_skipped(index, "Chain halted: earlier reviewer failed.")
-            return "failed", reviewer, error, reviewer_runner
-
+            set_task_specialist_review(task_id, reviewer, "failed", r_runner, error)
+            return "failed", reviewer, error, r_runner
         verdict, summary = specialist_review_verdict(project_path, reviewer)
         verdict_line = "APPROVED" if verdict == "approved" else "CHANGES REQUESTED"
         append_agent_chat_section_if_missing(project_path, label, chat_start, f"{summary or 'Review completed.'}\n\n{SPECIALIST_REVIEWER_VERDICTS[reviewer]}: {verdict_line}")
         publish_verdict(project_name, reviewer, verdict, summary, round_no, synthesized="inferred" in summary)
-        reviewer_handoff = await process_step_handoff(project_name, project_path, reviewer, round_no, chat_start)
-        await maybe_bounce_question(
-            project_name, project_path, reviewer, reviewer_handoff,
-            role_runner_for_pref(runner_pref, "lead"), role_runner_for_pref(runner_pref, "lead"),
-            model, reasoning, "", runner_pref, task_id, round_no,
-        )
-        set_task_specialist_review(task_id, reviewer, verdict, reviewer_runner, summary)
-        if verdict != "approved":
-            set_task_phase(task_id, "reviewer", "changes_requested", reviewer_runner, f"{label}: {summary}")
-            mark_remaining_skipped(index, "Skipped: returning to Lead for changes.")
-            return "changes_requested", reviewer, summary, reviewer_runner
+        set_task_specialist_review(task_id, reviewer, verdict, r_runner, summary)
+        return verdict, reviewer, summary, r_runner
 
-    set_task_phase(task_id, "reviewer", "specialists_approved", "", "Specialist review chain approved.")
-    return "approved", "", "Specialist review chain approved.", ""
+    # Run all selected reviewers in parallel — they read the same diff independently.
+    set_task_phase(task_id, "reviewer", "running", runner_pref, f"Parallel specialist review round {round_no}")
+    results = await asyncio.gather(*[_run_one_reviewer(r) for r in selected_reviewers])
+
+    # Aggregate: any failure or changes_requested stops the team.
+    failed_results = [(v, r, s, rn) for v, r, s, rn in results if v == "failed"]
+    if failed_results:
+        v, r, s, rn = failed_results[0]
+        set_task_phase(task_id, "reviewer", "failed", rn, s)
+        return "failed", r, s, rn
+
+    change_results = [(v, r, s, rn) for v, r, s, rn in results if v == "changes_requested"]
+    if change_results:
+        # Combine all change summaries into one so Lead gets full context in one pass.
+        combined = "; ".join(f"{SPECIALIST_REVIEWER_LABELS.get(r, r)}: {s}" for _, r, s, _ in change_results)
+        _, _, _, rn = change_results[0]
+        set_task_phase(task_id, "reviewer", "changes_requested", rn, combined)
+        return "changes_requested", change_results[0][1], combined, rn
+
+    set_task_phase(task_id, "reviewer", "specialists_approved", "", "Parallel specialist review approved.")
+    return "approved", "", "Parallel specialist review approved.", ""
 
 
 def append_project_memory_fallback(project_path: Path, task: dict[str, Any] | None, status: str, detail: str) -> None:
@@ -7639,7 +7769,7 @@ def append_project_memory_fallback(project_path: Path, task: dict[str, Any] | No
     path.write_text(f"{existing}{separator}{section}", encoding="utf-8")
 
 
-async def summarize_project_memory(project_name: str, project_path: Path, task_id: str | None, status: str, detail: str) -> None:
+async def summarize_project_memory(project_name: str, project_path: Path, task_id: str | None, status: str, detail: str, agent_chat_start_offset: int = 0) -> None:
     if not task_id:
         return
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
@@ -7652,13 +7782,24 @@ async def summarize_project_memory(project_name: str, project_path: Path, task_i
     append_task_event(task_id, "system", "Summarizer started", "Updating PROJECT_MEMORY.md", "summarizer", "running")
     try:
         summarizer_reasoning = clean_reasoning(str(task.get("reasoning", "medium")) if task else "medium")
+        # Incremental summary: pass only the agent-chat delta since task start + current memory.
+        # This avoids re-reading the full chat history (can be 32KB+) on every task end.
+        agent_chat_delta = agent_chat_tail_since(project_path, agent_chat_start_offset)
+        current_memory = read_limited_text(project_memory_doc_path(project_path), limit=3500)
+        incremental_run_prompt = (
+            f"Task outcome: {status}. {detail}\n\n"
+            f"Current PROJECT_MEMORY.md:\n{current_memory or '(empty)'}\n\n"
+            f"New agent activity since task start (AGENT_CHAT.md delta):\n{agent_chat_delta or '(none)'}\n\n"
+            "Update PROJECT_MEMORY.md by merging the new activity into the existing memory. "
+            "Keep it concise — prefer stable facts, omit play-by-play transcript recap."
+        )
         result = await run_agent_process_with_auto_fallback(
             project_name,
             "summarizer",
             summarizer_runner,
             summarizer_model,
             summarizer_reasoning,
-            "",
+            incremental_run_prompt,
             project_path,
             runner_pref,
             task_id=task_id,
@@ -8163,6 +8304,28 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 consecutive_test_failures = 0
                 set_task_phase(task_id, "tester", "done", tester_runner, f"Round {round_no}")
             elif should_test:
+                # Pre-tester gate: run a cheap deterministic build/lint check before the
+                # agentic Tester subprocess. If the build already fails, skip the agentic Tester
+                # and return directly to Lead with the captured output — saves a full CLI spawn.
+                pre_passed, pre_summary = await run_deterministic_tester(project_name, project_path, task_id, round_no)
+                if not pre_passed:
+                    consecutive_test_failures += 1
+                    last_test_error = pre_summary
+                    if consecutive_test_failures >= 3:
+                        append_chat_history(
+                            project_path,
+                            f"### Circuit Breaker - {utc_now()}\n\n"
+                            f"The build hit {consecutive_test_failures} consecutive failures. "
+                            f"Last error:\n\n{last_test_error}\n\nFix the underlying issue and try again.\n\n",
+                        )
+                        await broadcast("chat_event", record_event("CIRCUIT_BREAKER", f"{relative_path(project_path)} :: {consecutive_test_failures} consecutive test failures"))
+                        await set_team_state(project_name, project_path, "team_event", status="done", step="circuit-breaker", round=round_no)
+                        set_task_phase(task_id, "tester", "failed", "local", "Circuit breaker after consecutive test failures.")
+                        return
+                    set_task_phase(task_id, "tester", "failed", "local", f"Pre-check failed; returning to Lead. {pre_summary}")
+                    tester_passed = False
+                    continue
+
                 tester_runner = role_runner_for_pref(runner_pref, "tester")
                 set_task_phase(task_id, "tester", "running", tester_runner, f"Round {round_no}")
                 await set_team_state(project_name, project_path, "team_event", status="running", step="tester", round=round_no)
@@ -8256,6 +8419,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 task_id,
                 round_no,
                 risk_reviewers_for_task(run_prompt, project_path) if team_mode == "lean" else None,
+                team_mode=team_mode,
             )
             if specialist_status == "failed":
                 await stop_team_after_failed_step(project_name, project_path, specialist_reviewer, specialist_runner or role_runner_for_pref(runner_pref, specialist_reviewer), {"error": specialist_summary, "status": "error"}, round_no)
@@ -9184,13 +9348,14 @@ async def classify_intent_llm(prompt: str, project_context: str, runner: str = "
     """Ask the active runner to classify intent as ask/build/review.
     Runner 'auto' tries claude first, then codex. Returns None on failure/timeout."""
 
+    # Strip examples from the prompt so the regex can't match them in the runner's echoed output.
     classification_prompt = (
         f"{project_context}\n\n"
         "Classify the user message below as exactly one of: ask, build, review.\n"
         "- ask: a question, discussion, or request for information/advice\n"
         "- build: a request to create, change, fix, redesign, improve, or otherwise modify code or UI\n"
         "- review: a request to audit, check, test, or verify something\n\n"
-        'Respond with ONLY this JSON and nothing else: {"intent": "ask"} or {"intent": "build"} or {"intent": "review"}\n\n'
+        'Output ONLY a JSON object on a single line with the key "intent" and no other text.\n\n'
         f'User message: "{prompt}"'
     )
 
@@ -9218,10 +9383,11 @@ async def _run_classifier_subprocess(cmd: str, runner: str, classification_promp
     """Run a single-shot classifier subprocess for the given runner. Returns intent or None."""
     try:
         if runner == "claude":
-            argv = [cmd, "-p", "--output-format", "json", classification_prompt]
+            # Use the smallest/fastest model for classification — just JSON routing, no reasoning needed.
+            argv = [cmd, "-p", "--output-format", "json", "--model", "claude-haiku-4-5-20251001", classification_prompt]
         else:
-            # Codex: codex exec <prompt> — plain text output, no JSON format flag
-            argv = [cmd, "exec", classification_prompt]
+            # Codex: use mini model for routing if available; falls back to default on unknown model.
+            argv = [cmd, "exec", "--model", "codex-mini-latest", classification_prompt]
 
         result = await asyncio.to_thread(
             subprocess.run,
@@ -9274,10 +9440,11 @@ async def _run_classifier_subprocess(cmd: str, runner: str, classification_promp
         if match:
             return match.group(1)
 
-        # Fallback: look for a bare word answer (Codex may just say "build")
-        bare = re.search(r'\b(ask|build|review)\b', str(inner_text).lower())
-        if bare:
-            return bare.group(1)
+        # Fallback: only accept if the entire stripped output IS the intent word (≤3 tokens).
+        # Avoids false matches when the runner echoes the prompt or explains its reasoning.
+        stripped = str(inner_text).strip().lower()
+        if stripped in ("ask", "build", "review"):
+            return stripped
 
         return None
     except Exception:
@@ -9332,16 +9499,56 @@ def is_direct_git_intent(prompt: str) -> bool:
     return any(re.search(pattern, text) for pattern in GIT_DIRECT_PATTERNS)
 
 
+_INTERROGATIVES = re.compile(
+    r"^(what|how|why|where|when|who|which|is|are|does|do|can|should|could|would|will|has|have|did)\b",
+    re.IGNORECASE,
+)
+_BUILD_VERBS = re.compile(
+    r"\b(build|make|implement|create|add|write|code|develop|scaffold|fix|refactor|update|change|edit|modify|"
+    r"rename|delete|remove|install|migrate|setup|configure|deploy|generate|connect|integrate|redesign|redo|"
+    r"rework|rewrite|rebuild|replace|overhaul|restyle|revamp|restructure|convert|transform|move|simplify|"
+    r"clean|improve|enhance|polish|commit|push|merge|branch|stash|rebase|tag|release)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_obvious_question(text: str) -> bool:
+    """Return True for messages that are clearly informational (no LLM needed)."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    # Ends with ? and contains no build verbs → unambiguous ask
+    if stripped.endswith("?") and not _BUILD_VERBS.search(stripped):
+        return True
+    # Starts with an interrogative and has no build verbs → unambiguous ask
+    if _INTERROGATIVES.match(stripped) and not _BUILD_VERBS.search(stripped):
+        return True
+    return False
+
+
 async def classify_orchestration_intent_async(prompt: str, project_path: Path, runner: str = "auto") -> tuple[str, str]:
-    """Async version: LLM classifier with keyword fallback."""
+    """Async version: deterministic fast-path → keyword fallback → LLM classifier."""
+    # Fast-path: obvious questions never need an LLM subprocess.
+    if _is_obvious_question(prompt):
+        log.debug("intent=ask (question fast-path) prompt=%r", prompt[:80])
+        return "ask", "question fast-path (interrogative/no build verb)"
+
+    # Keyword classifier first — cheap, no subprocess.
+    kw_intent, kw_reason = classify_orchestration_intent(prompt, project_path)
+    # Only call the LLM when keywords returned "ask" but the message is ambiguous
+    # (no ? and no interrogative start) — the only case where the LLM adds value.
+    if kw_intent != "ask":
+        log.debug("intent=%s (keywords) prompt=%r", kw_intent, prompt[:80])
+        return kw_intent, f"keywords → {kw_reason}"
+
     project_context = _build_project_context(project_path)
     llm_intent = await classify_intent_llm(prompt, project_context, runner)
     if llm_intent in ("ask", "build", "review"):
         log.debug("llm_intent=%s runner=%s prompt=%r", llm_intent, runner, prompt[:80])
         return llm_intent, f"llm classifier ({runner}) → {llm_intent}"
-    # Fallback: keyword router
-    log.debug("llm_intent failed (runner=%s), falling back to keywords for prompt=%r", runner, prompt[:80])
-    return classify_orchestration_intent(prompt, project_path)
+    # Final fallback: keyword result
+    log.debug("llm_intent failed (runner=%s), using keyword result for prompt=%r", runner, prompt[:80])
+    return kw_intent, kw_reason
 
 
 def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str, str]:
@@ -9374,14 +9581,17 @@ def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str,
 
     if is_action_confirm and in_progress:
         prior = last_session_intent(project_path)
+        # Route to "ask" so the frontend can show a confirm prompt ("Resume prior build?")
+        # rather than silently launching the full team from a bare "ok" / "go" / "push".
+        # The ask-mode response should surface what will be resumed and offer one-tap dispatch.
         if prior == "build":
-            return "build", "action confirmation — resuming prior build"
+            return "ask", "action confirmation — ask to confirm resuming prior build"
         if prior == "review":
-            return "review", "action confirmation — resuming prior review"
+            return "ask", "action confirmation — ask to confirm resuming prior review"
         if prior == "ask":
             return "ask", "action confirmation — resuming prior conversation"
-        # No history but project exists — bias toward build
-        return "build", "action confirmation with active project"
+        # No prior session recorded — ask what they want
+        return "ask", "action confirmation with no session history"
 
     # Intent keywords
     build_words = {"build", "make", "implement", "create", "add", "write", "code", "develop", "scaffold",
@@ -9762,6 +9972,11 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
             workflow_id = "plan-first"
         elif intent == "review":
             workflow_id = "review-only"
+        elif intent == "ask":
+            # Never escalate a question to the full team — answer via ask workflow.
+            # User can always explicitly re-dispatch if they want team involvement.
+            workflow_id = "ask"
+            route_reason = f"team dispatch -> question detected, routed to ask ({route_reason})"
         else:
             workflow_id = "auto-team"
 
