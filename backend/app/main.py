@@ -154,15 +154,15 @@ DEFAULT_QUOTA_SETTINGS = {
 RUNNER_POLICIES = {
     "auto": {
         "label": "Auto",
-        "description": "Use the agent registry defaults: implementation prefers Codex, review prefers Claude.",
+        "description": "Use the default implementation runner with the configured review runner.",
     },
     "codex-heavy": {
         "label": "Codex-heavy",
-        "description": "Use Codex as the main implementation runner and Claude as reviewer when available.",
+        "description": "Use Codex as the main implementation runner and the configured review runner.",
     },
     "claude-heavy": {
         "label": "Claude-heavy",
-        "description": "Use Claude as the main implementation runner and Codex as reviewer when available.",
+        "description": "Use Claude as the main implementation runner and the configured review runner.",
     },
     "balanced": {
         "label": "Balanced",
@@ -624,6 +624,9 @@ SPEC_REFINE_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_SPEC_REFINE_TIMEOUT", 
 IDEA_RUN_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_IDEA_RUN_TIMEOUT", "300"))
 IDEA_CLAUDE_TOOLS = os.environ.get("DUALITH_IDEA_CLAUDE_TOOLS", "WebSearch,WebFetch")
 IDEA_CODEX_SEARCH_ENABLED = os.environ.get("DUALITH_IDEA_CODEX_SEARCH", "1").lower() not in {"0", "false", "no", "off"}
+DUALITH_REVIEW_RUNNER = os.environ.get("DUALITH_REVIEW_RUNNER", "codex").strip().lower()
+if DUALITH_REVIEW_RUNNER not in {"codex", "claude", "auto"}:
+    DUALITH_REVIEW_RUNNER = "codex"
 
 SPEC_REFINE_META_PROMPT = """\
 You are a software spec writer. The user has described a rough project idea in the app's Goal field. Turn it into a structured SPEC.md for an AI builder agent.
@@ -1091,6 +1094,13 @@ MAINTAINABILITY REVIEW: CHANGES REQUESTED
 {HANDOFF_CONVENTION}
 
 {HITL_INSTRUCTION}
+"""
+
+REVIEW_COST_CONTROL = """Review cost control:
+- Start with git diff --stat and the latest diff.
+- Prefer targeted reads of changed files over full-file scans.
+- Read only the tail of AGENT_CHAT.md and FEEDBACK.md unless the diff needs older context.
+- Do not inspect unrelated project areas.
 """
 
 SUMMARIZER_PROMPT = f"""You are the Summarizer for the engineering workspace.
@@ -6052,16 +6062,21 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
         raise HTTPException(status_code=404, detail="Unknown agent.")
     prompt = prompt_template.format(partner=partner_label) if "{partner}" in prompt_template else prompt_template
 
+    is_review_agent = agent in REVIEW_AGENTS
     if project_path is not None:
         prompt = f"{project_runtime_prompt_block(project_path)}{prompt}"
-        if agent not in {"summarizer", "decomposer"}:
+        if agent not in {"summarizer", "decomposer"} and not is_review_agent:
             doc_block = project_memory_prompt_block(project_path)
             if doc_block:
                 prompt = f"{doc_block}{prompt}"
                 log.debug("project memory injected  agent=%s chars=%s", agent, len(doc_block))
-        memory_block = memory_prompt_block(project_path)
-        if memory_block:
-            prompt = f"{memory_block}{prompt}"
+        if not is_review_agent:
+            memory_block = memory_prompt_block(project_path)
+            if memory_block:
+                prompt = f"{memory_block}{prompt}"
+
+    if is_review_agent:
+        prompt = f"{prompt}\n\n{REVIEW_COST_CONTROL}"
 
     if agent in {"lead", "tester", "teammate", "builder", "auditor", *SPECIALIST_REVIEWERS}:
         prompt = f"{prompt}{HANDOFF_PROMPT_TRAILER}"
@@ -6488,13 +6503,24 @@ def resolve_preferred_runner(preferred: str, quota: dict[str, Any], reason: str)
     raise HTTPException(status_code=429, detail="Both Codex and Claude are over their configured quota reserve. Adjust your quota settings in the System panel or wait for the limit to reset.")
 
 
+def configured_review_runner(agent: str) -> tuple[str, str]:
+    if DUALITH_REVIEW_RUNNER == "claude":
+        return "claude", "configured Claude review runner"
+    if DUALITH_REVIEW_RUNNER == "auto":
+        return registry_preferred_runner(agent), "registry default review runner"
+    return "codex", "cost-aware Codex review runner"
+
+
 def policy_preferred_runner(agent: str, policy: str) -> tuple[str, str]:
+    if agent in REVIEW_AGENTS:
+        if policy in {"auto", "codex-heavy", "claude-heavy"}:
+            return configured_review_runner(agent)
     if policy == "auto":
         return registry_preferred_runner(agent), "registry default"
     if policy == "claude-heavy":
-        return ("codex", "claude-heavy review policy") if agent in REVIEW_AGENTS else ("claude", "claude-heavy policy")
+        return "claude", "claude-heavy policy"
     if policy == "codex-heavy":
-        return ("claude", "codex-heavy review policy") if agent in REVIEW_AGENTS else ("codex", "codex-heavy policy")
+        return "codex", "codex-heavy policy"
     return registry_preferred_runner(agent), "registry default"
 
 
@@ -6515,7 +6541,9 @@ def team_pair_for_policy(policy: str, quota: dict[str, Any]) -> tuple[str, str, 
     lead = "claude" if policy == "claude-heavy" else "codex"
     reason = "registry default" if policy == "auto" else f"{policy} policy"
     runner, route_reason = resolve_preferred_runner(lead, quota, reason)
-    return runner, paired_runner(runner), route_reason
+    review_preferred, review_reason = configured_review_runner("teammate")
+    teammate, teammate_reason = resolve_preferred_runner(review_preferred, quota, review_reason)
+    return runner, teammate, f"{route_reason}; review {teammate_reason}"
 
 
 def auto_runner_for_agent(agent: str) -> tuple[str, str]:
@@ -6552,8 +6580,12 @@ def team_runner_mode(runner_pref: str, lead: str, teammate: str) -> str:
 def role_runner_for_pref(runner_pref: str, role: str) -> str:
     if is_manual_runner_pref(runner_pref):
         return runner_pref
-    if role in {"architect", "planner", "pm", "tester", "summarizer", *SPECIALIST_REVIEWERS}:
+    if role in {"architect", "planner", "pm", "tester", "summarizer"}:
         return "claude"
+    if role in REVIEW_AGENTS:
+        preferred, reason = configured_review_runner(role)
+        runner, _ = resolve_preferred_runner(preferred, quota_snapshot(), reason)
+        return runner
     runner, _ = auto_runner_for_agent(role)
     return runner
 
@@ -8250,8 +8282,12 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 record_event("TEAM_TAKEOVER", f"{relative_path(project_path)} :: {RUNNER_COMMANDS[teammate_runner]['label']} covers REVIEW (over reserve: {RUNNER_COMMANDS[teammate]['label']})")
             if self_review:
                 # Honesty marker in the relay: one runner is reviewing its own work this round.
-                over_runner = lead if lead_covered else teammate
-                append_agent_chat(project_path, f"### Note - {utc_now()}\n\n{RUNNER_COMMANDS[teammate_runner]['label']} is performing a self-review this round because {RUNNER_COMMANDS[over_runner]['label']} is over quota reserve. Independence is reduced.\n\n")
+                if teammate_covered or lead_covered:
+                    over_runner = lead if lead_covered else teammate
+                    reason_note = f"because {RUNNER_COMMANDS[over_runner]['label']} is over quota reserve"
+                else:
+                    reason_note = "because the configured review runner matches the lead runner to reduce Claude usage"
+                append_agent_chat(project_path, f"### Note - {utc_now()}\n\n{RUNNER_COMMANDS[teammate_runner]['label']} is performing a self-review this round {reason_note}. Independence is reduced.\n\n")
             teammate_model = resolve_team_step_model("teammate", teammate, teammate_runner, model)
             set_task_phase(task_id, "reviewer", "running", teammate_runner, f"Round {round_no}")
             await set_team_state(project_name, project_path, "team_event", status="running", step="teammate", round=round_no, teammate_model=teammate_model)

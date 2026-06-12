@@ -17,7 +17,7 @@ Dualith is a local AI workspace that orchestrates Codex and Claude as a multi-ag
 - **Git operations** — commit, push, merge, tag, stash. Say it in the chat and the Lead handles it. Dualith also creates automatic checkpoint commits after successful build runs.
 - **HITL gate** — any agent can pause mid-run and ask a question. You answer in the chat thread; the run continues.
 - **Usage tracking** — token counts, cost, quota reserves, and runner health visible in the System panel.
-- **Auto runner routing** — Codex-heavy, Claude-heavy, Balanced, or Registry auto. Falls back to the other runner when the preferred one is over its reserve.
+- **Auto runner routing** — Codex-heavy, Claude-heavy, Balanced, or Registry auto. Review defaults to the configured review runner and falls back when the preferred runner is over its reserve.
 
 ## Agent Pipeline
 
@@ -63,7 +63,7 @@ The frontend and backend communicate over HTTP (actions) and WebSocket (live sna
 - Node.js with npm
 - Python 3
 - Codex CLI (`codex`) — for the Codex runner
-- Claude CLI (`claude`) — for the Claude runner, Planner, PM, Tester, and Teammate
+- Claude CLI (`claude`) — for the Claude runner, Planner, PM, Summarizer, and non-lean Tester runs
 
 ## Installation
 
@@ -106,6 +106,7 @@ Edit `.env.local` after copying the example.
 | `DUALITH_CLAUDE_REASONING_ARGS` | Reasoning arg format string for Claude. |
 | `DUALITH_CLAUDE_STATUS_COMMAND` | Command for Claude status refresh. |
 | `DUALITH_CLAUDE_STATUS_ARGS` | Args for Claude status refresh. |
+| `DUALITH_REVIEW_RUNNER` | Default runner for review roles in auto routing. Defaults to `codex`; set `claude` for Claude review or `auto` for registry defaults. |
 | `DUALITH_STATUS_TIMEOUT_SECONDS` | Timeout for status refresh commands. |
 | `DUALITH_AGENT_IDLE_TIMEOUT_SECONDS` | Idle watchdog in seconds for agent runs with no output. Defaults to `600`; set `0` to disable. |
 | `DUALITH_IDEA_RUN_TIMEOUT` | Timeout in seconds for Ideas planning chat and brief generation. Defaults to `300`. |
