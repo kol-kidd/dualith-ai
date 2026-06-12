@@ -746,6 +746,45 @@ function appendTranscriptChunk(current: string, chunk: string) {
   return current.endsWith(chunk) ? current : `${current}${chunk}`;
 }
 
+// Incremental transcript parse cache. When the raw string grows by appended
+// content (the normal delta case), we parse only the new tail and concat onto
+// the previous result instead of re-splitting the full string.
+function makeTranscriptCache<T>(parse: (raw: string) => T[]): (raw: string) => T[] {
+  let cachedRaw = "";
+  let cachedResult: T[] = [];
+  return (raw: string): T[] => {
+    if (raw === cachedRaw) return cachedResult;
+    if (raw.startsWith(cachedRaw) && cachedRaw.length > 0) {
+      // Re-parse from the last complete ### boundary before the cached end so
+      // an in-progress section that grew mid-delta gets replaced cleanly.
+      const lastBoundary = cachedRaw.lastIndexOf("\n### ");
+      const safeBase = lastBoundary >= 0 ? cachedRaw.slice(0, lastBoundary) : "";
+      const safeMessages = safeBase ? parse(safeBase) : [];
+      const tail = raw.slice(safeBase.length);
+      const tailMessages = parse(tail);
+      cachedRaw = raw;
+      cachedResult = [...safeMessages, ...tailMessages];
+      return cachedResult;
+    }
+    // Full re-parse for snapshot reconcile, clear, or non-append edits.
+    cachedRaw = raw;
+    cachedResult = parse(raw);
+    return cachedResult;
+  };
+}
+
+// Per-component hooks using the cache. Each call site gets its own cache
+// instance via useRef so the cache is stable across re-renders.
+function useIncrementalChatHistory(raw: string): ChatMessage[] {
+  const cache = useRef(makeTranscriptCache(parseChatHistory));
+  return useMemo(() => cache.current(raw), [raw]);
+}
+
+function useIncrementalAgentChat(raw: string): TeamMessage[] {
+  const cache = useRef(makeTranscriptCache(parseAgentChat));
+  return useMemo(() => cache.current(raw), [raw]);
+}
+
 function normalizeChatRunSettings(value: unknown): ChatRunSettings {
   const fallback: ChatRunSettings = {
     runner: "auto",
@@ -5418,7 +5457,7 @@ function DirectConversation({
   onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const messages = useMemo(() => parseChatHistory(project?.chat_history ?? ""), [project?.chat_history]);
+  const messages = useIncrementalChatHistory(project?.chat_history ?? "");
   const latest = useMemo(() => latestResultForProject(project, results), [project, results]);
   const latestRunMessage = latest && latest.mode !== "ask" && latest.status !== "stopped" ? latest : null;
   const statusBubbleVisible = Boolean(latest?.status === "stopped" || (latest?.status === "error" && latest.mode === "ask"));
@@ -5548,8 +5587,8 @@ function ConversationThread({
   onAddressNotes?: (projectName: string) => Promise<void>;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const messages = useMemo(() => parseChatHistory(project?.chat_history ?? ""), [project?.chat_history]);
-  const teamMessages = useMemo(() => parseAgentChat(project?.agent_chat ?? ""), [project?.agent_chat]);
+  const messages = useIncrementalChatHistory(project?.chat_history ?? "");
+  const teamMessages = useIncrementalAgentChat(project?.agent_chat ?? "");
   const latest = useMemo(() => latestResultForProject(project, results), [project, results]);
   const activeRun = newestActiveRun(project);
   // Surface real build/audit answers as agent messages. Stopped runs stay in the
@@ -7126,8 +7165,8 @@ function TeamRoomFull({
 }) {
   const project = rawProject as ProjectRecord & { team: TeamState };
   const task = selectedTask(project) as DualithTask;
-  const teamMessages = useMemo(() => parseAgentChat(project.agent_chat ?? ""), [project.agent_chat]);
-  const chatMessages = useMemo(() => parseChatHistory(project.chat_history ?? ""), [project.chat_history]);
+  const teamMessages = useIncrementalAgentChat(project.agent_chat ?? "");
+  const chatMessages = useIncrementalChatHistory(project.chat_history ?? "");
   const latest = latestResultForProject(project, results);
   const latestPlanIndex = chatMessages
     .map((m, i) => m.role === "plan" ? i : -1)
@@ -7200,7 +7239,7 @@ function WorkspaceColumn({
   const blocked = Boolean(project?.human_input?.blocked);
   const team = project?.team ?? null;
   const hasAgentChat = Boolean(project?.agent_chat?.trim());
-  const teamMessages = useMemo(() => parseAgentChat(project?.agent_chat ?? ""), [project?.agent_chat]);
+  const teamMessages = useIncrementalAgentChat(project?.agent_chat ?? "");
   const teamBadge = team ? `${humanizeStatus(team.status)}${team.round > 1 ? ` — attempt ${team.round}` : ""}` : "";
   const addressNotes = useCallback(async (projectName: string) => {
     await onSendChat(projectName, {
