@@ -3896,6 +3896,7 @@ def read_limited_text(path: Path, limit: int = 12_000) -> str:
 
 def project_artifacts(project_path: Path) -> dict[str, str]:
     return {
+        "spec": read_limited_text(project_path / "SPEC.md"),
         "architecture": read_limited_text(architecture_path(project_path)),
         "decisions": read_limited_text(decisions_path(project_path)),
         "lessons": read_limited_text(lessons_path(project_path)),
@@ -8686,6 +8687,28 @@ async def get_attachment(name: str, filename: str) -> FileResponse:
     if not file_path.exists() or file_path.suffix.lower() not in ATTACHMENT_EXTENSIONS:
         raise HTTPException(status_code=404, detail="Attachment not found.")
     return FileResponse(file_path)
+
+
+@app.get("/api/projects/{name}/route-preview")
+async def route_preview(name: str, message: str = "") -> dict[str, Any]:
+    """Deterministic-only intent classification for composer route hints.
+
+    Never spawns an LLM subprocess — uses the fast-path and keyword classifier only.
+    Returns intent, workflow_id, and estimated_calls for the UI hint.
+    """
+    if not message.strip():
+        return {"intent": "ask", "workflow": "ask", "estimated_calls": 1}
+    project_path = tracked_project_path(name)
+    # Use synchronous keyword classifier (no LLM, no subprocess)
+    intent, reason = classify_orchestration_intent(message, project_path)
+    if _is_obvious_question(message):
+        intent = "ask"
+        reason = "question fast-path"
+    workflow_id = workflow_for_intent(intent)
+    # Default team_mode for preview (lean is the common default)
+    team_mode = "lean"
+    calls = estimated_runner_calls_for_task(workflow_id, team_mode, message, project_path)
+    return {"intent": intent, "workflow": workflow_id, "estimated_calls": calls, "reason": reason}
 
 
 @app.post("/api/projects/import", status_code=201)

@@ -58,6 +58,7 @@ type ChatRunSettings = {
   reasoning: ReasoningLevel;
   teamMode: TeamMode;
 };
+type ComposerDraft = { text: string; nonce: number };
 type Attachment = { id: string; name: string; previewUrl: string; file: File };
 type DevServerAction = "start" | "stop" | "restart";
 type ReasoningLevel = "low" | "medium" | "high" | "extra-high";
@@ -162,6 +163,7 @@ type DualithTask = {
 };
 type TaskCounts = Record<TaskStatus, number>;
 type ArtifactSnapshot = {
+  spec?: string;
   architecture: string;
   decisions: string;
   lessons: string;
@@ -1225,6 +1227,16 @@ function projectTaskCounts(project: ProjectRecord | null): TaskCounts {
 function selectedTask(project: ProjectRecord | null): DualithTask | null {
   if (!project) return null;
   return project.active_task ?? project.tasks?.find((task) => ["active", "blocked", "pending"].includes(task.status)) ?? project.tasks?.[0] ?? null;
+}
+
+function activeTaskForProject(project: ProjectRecord | null): DualithTask | null {
+  if (!project) return null;
+  return project.active_task ?? project.tasks?.find((task) => ["active", "blocked", "pending"].includes(task.status)) ?? null;
+}
+
+function projectHasActiveWork(project: ProjectRecord | null) {
+  if (!project) return false;
+  return Boolean(activeTaskForProject(project) || project.pipeline || project.team || (project.active_runs ?? []).length);
 }
 
 function RunnerMascot({ runner, size = 18 }: { runner: RunnerId; size?: number }) {
@@ -5809,7 +5821,7 @@ function likelyWorkflow(prompt: string, planMode: boolean): string {
 }
 
 function ChatComposer({
-  project, runSettings, onRunSettingsChange, onSendChat, onStopChat, runnerHealth, activeTab, onTabChange, onClearChat,
+  project, runSettings, onRunSettingsChange, onSendChat, onStopChat, runnerHealth, activeTab, onTabChange, onClearChat, fillPrompt,
 }: {
   project: ProjectRecord | null;
   runSettings: ChatRunSettings;
@@ -5820,6 +5832,7 @@ function ChatComposer({
   activeTab: "chat" | "team";
   onTabChange: (tab: "chat" | "team") => void;
   onClearChat?: (projectName: string) => Promise<void>;
+  fillPrompt?: string;
 }) {
   const runner = runSettings.runner;
   const modelChoice = runSettings.model;
@@ -5850,6 +5863,27 @@ function ChatComposer({
   useEffect(() => {
     setAgenticChoice(null);
   }, [project?.name]);
+
+  // Fill composer from external suggestion (idle digest prompt buttons)
+  useEffect(() => {
+    if (fillPrompt) setRunPrompt(fillPrompt);
+  }, [fillPrompt]);
+
+  // Route preview hint — debounced deterministic classify
+  const [routeHint, setRouteHint] = useState<{ intent: string; calls: number } | null>(null);
+  useEffect(() => {
+    if (!project || runPrompt.trim().length < 4) { setRouteHint(null); return; }
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/projects/${encodeURIComponent(project.name)}/route-preview?message=${encodeURIComponent(runPrompt.trim())}`);
+        if (res.ok) {
+          const data = await res.json() as { intent: string; workflow: string; estimated_calls: number };
+          setRouteHint({ intent: data.intent, calls: data.estimated_calls });
+        }
+      } catch { /* best-effort */ }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [runPrompt, project]);
 
   const addFiles = useCallback((files: FileList | File[]) => {
     const images = Array.from(files).filter((f) => f.type.startsWith("image/"));
@@ -6220,6 +6254,13 @@ function ChatComposer({
             <>{activeTab === "team" ? "Enter dispatches the Team - Shift+Enter for newline" : "Enter sends Chat only - Shift+Enter for newline"}</>
           )}
         </div>
+        {routeHint && !isRunning && runPrompt.trim().length >= 4 && (
+          <div className="dualith-route-hint">
+            <span className={`dualith-route-hint__badge${routeHint.calls > 2 ? "--warn" : ""}`}>
+              → {routeHint.intent} · {routeHint.calls === 1 ? "1 call" : `~${routeHint.calls} runs`}
+            </span>
+          </div>
+        )}
       </div>
     </section>
   );
@@ -7000,6 +7041,62 @@ function DeprecatedSubagentLaneStrip({ task }: { task: DualithTask | null }) {
   );
 }
 
+function IdleDigest({ project, results, onSuggestPrompt }: {
+  project: ProjectRecord;
+  results: AgentResult[];
+  onSuggestPrompt?: (prompt: string) => void;
+}) {
+  const latest = latestResultForProject(project, results);
+  const attention = attentionState(project);
+  const artifacts = project.artifacts;
+  const artifactList = [
+    artifacts?.plan ? "PLAN.md" : null,
+    artifacts?.feedback ? "FEEDBACK.md" : null,
+    artifacts?.architecture ? "ARCHITECTURE.md" : null,
+    artifacts?.lessons ? "LESSONS.md" : null,
+  ].filter(Boolean) as string[];
+
+  const suggestions = [
+    attention.status === "attention" ? "Review and address the feedback items in FEEDBACK.md" : null,
+    artifacts?.plan ? "Continue building from where we left off" : "Create a plan before we start building",
+    "What is the current state of the project?",
+  ].filter(Boolean) as string[];
+
+  return (
+    <div className="dualith-idle-digest">
+      <div className="dualith-idle-digest__row">
+        <span className="dualith-idle-digest__key">last run</span>
+        <span className={`dualith-idle-digest__val${latest ? "" : "--muted"}`}>
+          {latest ? `${latest.mode} · ${latest.status}` : "No runs yet"}
+        </span>
+      </div>
+      {attention.status === "attention" && (
+        <div className="dualith-idle-digest__row">
+          <span className="dualith-idle-digest__key">feedback</span>
+          <span className="dualith-idle-digest__val" style={{ color: "var(--warn)" }}>
+            {attention.items.length > 0 ? `${attention.items.length} item${attention.items.length > 1 ? "s" : ""} need attention` : "Feedback needs review"}
+          </span>
+        </div>
+      )}
+      {artifactList.length > 0 && (
+        <div className="dualith-idle-digest__row">
+          <span className="dualith-idle-digest__key">artifacts</span>
+          <span className="dualith-idle-digest__val">{artifactList.join(" · ")}</span>
+        </div>
+      )}
+      {onSuggestPrompt && (
+        <div className="dualith-idle-digest__prompts">
+          {suggestions.map((s) => (
+            <button key={s} type="button" className="dualith-idle-digest__prompt-btn" onClick={() => onSuggestPrompt(s)}>
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TeamRoomFull({
   project: rawProject,
   projectEvents,
@@ -7012,6 +7109,7 @@ function TeamRoomFull({
   addressActionLabel,
   activeTab = "chat",
   onTabChange,
+  onSuggestPrompt,
 }: {
   project: ProjectRecord;
   projectEvents: ConsoleEntry[];
@@ -7024,6 +7122,7 @@ function TeamRoomFull({
   addressActionLabel?: string;
   activeTab?: "chat" | "team";
   onTabChange?: (tab: "chat" | "team") => void;
+  onSuggestPrompt?: (prompt: string) => void;
 }) {
   const project = rawProject as ProjectRecord & { team: TeamState };
   const task = selectedTask(project) as DualithTask;
@@ -7052,9 +7151,7 @@ function TeamRoomFull({
       {activeTab === "chat" && (
         <div className="room-chat-thread dualith-thread-measure">
           {chatMessages.length === 0 ? (
-            <div className="room-chat-empty">
-              <span>No conversation yet — send a message or brief the team below.</span>
-            </div>
+            <IdleDigest project={project} results={results} onSuggestPrompt={onSuggestPrompt} />
           ) : (
             chatMessages.map((message, index) => (
               <ChatFeedMessage
@@ -8808,6 +8905,7 @@ function DualithApp() {
   const [projectsOpen, setProjectsOpen] = useState(false);
   const [drawerTab, setDrawerTab] = useState<WorkspaceRightTab | null>(null);
   const [roomTab, setRoomTab] = useState<"chat" | "team">("chat");
+  const [composerFill, setComposerFill] = useState("");
 
   return (
     <div className="dualith-app-shell h-screen w-screen overflow-hidden bg-bg text-zinc-300">
@@ -8925,8 +9023,6 @@ function DualithApp() {
             project={selectedProject}
             liveRuns={Object.values(liveRuns).filter((run) => run.project === selectedProject.name)}
             failures={runFailures[selectedProject.name] ?? []}
-            activeTab={roomTab}
-            onTabChange={setRoomTab}
           />
         )}
 
@@ -8954,6 +9050,7 @@ function DualithApp() {
               addressActionLabel={addressNotesActionLabel}
               activeTab={roomTab}
               onTabChange={setRoomTab}
+              onSuggestPrompt={setComposerFill}
             />
           ) : (
             <div className="dualith-room-empty">
@@ -8962,9 +9059,32 @@ function DualithApp() {
           )}
         </div>
 
-        {/* Bottom bar: composer + tab pills */}
+        {/* Bottom bar: unified tab row + composer */}
         <div className="dualith-bottom-bar border-t border-line">
-          <div className="dualith-bottom-tabs">
+          <div className="dualith-bottom-tabs" role="tablist" aria-label="Workspace view">
+            {/* View tabs: Chat / Team */}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={roomTab === "chat"}
+              onClick={() => setRoomTab("chat")}
+              className={`dualith-bottom-tab${roomTab === "chat" ? " is-active" : ""}`}
+            >Chat</button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={roomTab === "team"}
+              onClick={() => setRoomTab("team")}
+              className={`dualith-bottom-tab${roomTab === "team" ? " is-active" : ""}`}
+            >
+              Team
+              {Object.values(liveRuns).some((r) => r.project === selectedProject?.name) && (
+                <span className="room-tab__dot" aria-hidden="true" />
+              )}
+            </button>
+            {/* Separator */}
+            <span className="dualith-bottom-tab-sep" aria-hidden="true" />
+            {/* Drawer tabs: Artifacts / Logs / Quota / Preview */}
             {([
               { id: "artifacts" as WorkspaceRightTab, label: "Artifacts", badge: artifactReadyCount(selectedProject) || undefined },
               { id: "logs" as WorkspaceRightTab, label: "Logs", badge: consoleEntries.length || undefined },
@@ -8974,8 +9094,10 @@ function DualithApp() {
               <button
                 key={t.id}
                 type="button"
+                role="tab"
+                aria-selected={drawerTab === t.id}
                 onClick={() => setDrawerTab((v) => v === t.id ? null : t.id)}
-                className={`dualith-bottom-tab ${drawerTab === t.id ? "is-active" : ""}`}
+                className={`dualith-bottom-tab${drawerTab === t.id ? " is-active" : ""}`}
               >
                 {t.label}
                 {t.badge ? <em>{t.badge}</em> : null}
@@ -8993,6 +9115,7 @@ function DualithApp() {
               activeTab={roomTab}
               onTabChange={setRoomTab}
               onClearChat={clearChatHistory}
+              fillPrompt={composerFill}
             />
           </div>
         </div>

@@ -4391,6 +4391,15 @@ details summary {
   font-size: 9px;
 }
 
+.dualith-bottom-tab-sep {
+  display: block;
+  width: 1px;
+  align-self: stretch;
+  background: var(--dualith-line);
+  margin: 4px 6px;
+  flex-shrink: 0;
+}
+
 .dualith-bottom-composer {
   padding: 8px 12px;
 }
@@ -5638,6 +5647,105 @@ button:not(:disabled),
 .dualith-stale-banner span::before {
   content: "● ";
   font-size: 9px;
+}
+
+/* ── Prose line-length guard (72ch) ─────────────────────────────── */
+/* Agent prose paragraphs should never run past readable measure.    */
+.dualith-agent-prose p,
+.dualith-agent-prose li,
+.dualith-agent-prose > div,
+.dualith-agent-prose > blockquote {
+  max-width: 72ch;
+}
+
+/* ── Route preview hint in composer ────────────────────────────── */
+.dualith-route-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 4px;
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  color: var(--dualith-text-muted);
+  letter-spacing: 0.03em;
+  border-top: 1px solid var(--dualith-line);
+  background: transparent;
+  user-select: none;
+}
+.dualith-route-hint__badge {
+  color: var(--ok);
+}
+.dualith-route-hint__badge--warn {
+  color: var(--warn);
+}
+
+/* ── Idle digest (empty chat state) ────────────────────────────── */
+.dualith-idle-digest {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 1.5rem 1rem 1rem;
+  max-width: var(--dualith-chat-max);
+  margin-inline: auto;
+  width: 100%;
+}
+.dualith-idle-digest__row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--dualith-line);
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  color: var(--dualith-text-muted);
+}
+.dualith-idle-digest__row:last-child { border-bottom: none; }
+.dualith-idle-digest__key {
+  flex-shrink: 0;
+  width: 9ch;
+  color: var(--dualith-text-faint);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-size: 9px;
+}
+.dualith-idle-digest__val {
+  flex: 1;
+  min-width: 0;
+  color: var(--dualith-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dualith-idle-digest__val--muted { color: var(--dualith-text-muted); }
+.dualith-idle-digest__prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0.5rem 0 0;
+}
+.dualith-idle-digest__prompt-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 4px 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  color: var(--dualith-text-muted);
+  cursor: pointer;
+  transition: color 0.1s, border-color 0.1s;
+}
+.dualith-idle-digest__prompt-btn::before { content: "→ "; color: var(--dualith-text-faint); }
+.dualith-idle-digest__prompt-btn:hover {
+  color: var(--dualith-text);
+  border-bottom-color: var(--dualith-line);
+}
+.dualith-idle-digest__prompt-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 /* ── prefers-reduced-motion ─────────────────────────────────────── */
