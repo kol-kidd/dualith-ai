@@ -3,3 +3,4 @@ uvicorn[standard]==0.34.2
 watchdog==6.0.0
 pydantic==2.11.5
 python-multipart==0.0.20
+httpx==0.28.1

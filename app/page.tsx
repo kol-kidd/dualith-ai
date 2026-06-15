@@ -6,6 +6,7 @@ import type { ChangeEvent, FormEvent, InputHTMLAttributes, ReactNode } from "rea
 import { useDualithSocket } from "../lib/useDualithSocket";
 import type { DualithDeltaEvent } from "../lib/useDualithSocket";
 import { RUN_STOPPED_LABEL, humanizeKickoffTitle, humanizeRoleKind, humanizeStatus, humanizeWorkflow } from "../lib/humanize";
+import { SetupWizard } from "./components/SetupWizard";
 
 type AgentState = "IDLE" | "BUILDER_ACTIVE";
 type AuditState = "PENDING" | "CLEAN" | "ATTENTION";
@@ -8313,16 +8314,38 @@ function QuotaPanel({
   quota,
   onQuotaSave,
   onStatusRefresh,
+  onReconfigure,
 }: {
   usage: UsageSnapshot;
   quota: QuotaSnapshot;
   onQuotaSave: (settings: QuotaSettings) => Promise<void>;
   onStatusRefresh: (force?: boolean) => Promise<StatusRefreshState | void>;
+  onReconfigure?: () => void;
 }) {
   return (
     <div className="dualith-quota-panel">
       <UsageStatusTab usage={usage} quota={quota} onStatusRefresh={onStatusRefresh} />
       <ConfigTab quota={quota} onQuotaSave={onQuotaSave} />
+      {onReconfigure && (
+        <div style={{ padding: "12px 16px", borderTop: "1px solid var(--dualith-line)" }}>
+          <button
+            onClick={onReconfigure}
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              borderRadius: 7,
+              border: "1.5px solid var(--dualith-line)",
+              background: "transparent",
+              color: "var(--dualith-text-muted)",
+              fontSize: 12,
+              cursor: "pointer",
+              textAlign: "left",
+            }}
+          >
+            ⚙ Reconfigure AI providers…
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -8343,6 +8366,7 @@ function WorkspaceRightPanel({
   onDevServerAction,
   onQuotaSave,
   onStatusRefresh,
+  onReconfigure,
   runnerHealth,
   initialTab,
   onClose,
@@ -8362,6 +8386,7 @@ function WorkspaceRightPanel({
   onDevServerAction: (projectName: string, action: DevServerAction) => Promise<void>;
   onQuotaSave: (settings: QuotaSettings) => Promise<void>;
   onStatusRefresh: (force?: boolean) => Promise<StatusRefreshState | void>;
+  onReconfigure?: () => void;
   runnerHealth: RunnerHealth;
   initialTab?: WorkspaceRightTab;
   onClose?: () => void;
@@ -8412,7 +8437,7 @@ function WorkspaceRightPanel({
           </div>
         )}
         {tab === "logs" && <LogTab entries={entries} commits={commits} />}
-        {tab === "quota" && <QuotaPanel usage={usage} quota={quota} onQuotaSave={onQuotaSave} onStatusRefresh={onStatusRefresh} />}
+        {tab === "quota" && <QuotaPanel usage={usage} quota={quota} onQuotaSave={onQuotaSave} onStatusRefresh={onStatusRefresh} onReconfigure={onReconfigure} />}
         {tab === "preview" && (
           <div className="dualith-right-stack">
             <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive={mobileView === "details"} />
@@ -8547,6 +8572,8 @@ function DualithApp() {
   const [liveRuns, setLiveRuns] = useState<Record<string, LiveRun>>({});
   const [runFailures, setRunFailures] = useState<Record<string, RunFailure[]>>({});
   const { theme, setTheme, density, setDensity } = useAppearance();
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [setupChecked, setSetupChecked] = useState(false);
 
   useEffect(() => {
     try {
@@ -8601,6 +8628,16 @@ function DualithApp() {
     if (!response.ok) throw new Error(await readErrorMessage(response));
     applySnapshot(await response.json(), preferredName);
   }, [applySnapshot]);
+
+  // First-run gate: check if provider config exists before loading the app.
+  useEffect(() => {
+    fetch(`${apiBase}/api/setup/status`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => { if (!d.configured) setWizardOpen(true); })
+      .catch(() => { /* backend not ready — let the normal load error surface */ })
+      .finally(() => setSetupChecked(true));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -9037,6 +9074,10 @@ function DualithApp() {
   const [roomTab, setRoomTab] = useState<"chat" | "team">("chat");
   const [composerFill, setComposerFill] = useState("");
 
+  if (!setupChecked || wizardOpen) {
+    return <SetupWizard onComplete={() => { setWizardOpen(false); refreshProjects().catch(() => {}); }} />;
+  }
+
   return (
     <div className="dualith-app-shell h-screen w-screen overflow-hidden bg-bg text-zinc-300">
       <header className="dualith-topbar-b border-b border-line">
@@ -9223,6 +9264,10 @@ function DualithApp() {
             onDevServerAction={runDevServerAction}
             onQuotaSave={saveQuota}
             onStatusRefresh={refreshStatus}
+            onReconfigure={async () => {
+              await fetch(`${apiBase}/api/setup/config`, { method: "DELETE" });
+              setWizardOpen(true);
+            }}
             runnerHealth={runnerHealth}
             initialTab="artifacts"
           />

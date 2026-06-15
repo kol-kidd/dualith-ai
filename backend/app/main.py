@@ -209,6 +209,17 @@ from .routing import (
     dynamic_chat_workflow,
 )
 from .runners import codex_fallback_path, RUNNER_COMMANDS
+from .providers import (
+    ProviderConfig,
+    ProviderSlotConfig,
+    apply_provider_config,
+    delete_provider_config,
+    load_provider_config,
+    provider_config_exists,
+    save_provider_config,
+    test_provider_slot,
+    PROVIDERS,
+)
 TASK_STATUSES = {"pending", "active", "blocked", "completed", "failed"}
 TASK_PHASES = ("pm", "architect", "planner", "lead", "tester", "reviewer")
 TASK_EVENT_TYPES = {"conversation", "agent_activity", "decision", "system", "review", "queue_event"}
@@ -536,6 +547,22 @@ from .prompts import (
 
 async def check_runner_health() -> None:
     for runner_id, config in RUNNER_COMMANDS.items():
+        if config.get("use_http"):
+            # API-key mode: probe the provider endpoint instead of the CLI binary
+            slot = ProviderSlotConfig(
+                provider=config.get("provider") or "openai",
+                mode="api_key",
+                api_key=config.get("api_key"),
+                model=config.get("api_model"),
+                base_url=config.get("api_base"),
+            )
+            result = await test_provider_slot(slot)
+            runner_health[runner_id] = {
+                "ready": result["ok"],
+                "version": result["message"] if result["ok"] else "",
+                "error": result["message"] if not result["ok"] else "",
+            }
+            continue
         cmd = str(config["command"])
         try:
             result = await asyncio.to_thread(
@@ -717,6 +744,10 @@ def tasks_path() -> Path:
 
 def ideas_path() -> Path:
     return DUALITH_DIR / "ideas.json"
+
+
+def provider_config_path() -> Path:
+    return DUALITH_DIR / "provider-config.json"
 
 
 def central_memory_path() -> Path:
@@ -6213,6 +6244,27 @@ def publish_verdict(project_name: str, agent: str, verdict: str, summary: str, r
 
 async def run_agent_process(project_name: str, agent: str, runner: str, model: str, reasoning: str, run_prompt: str, project_path: Path, partner: str = "", attachment_paths: list[str] | None = None) -> dict[str, Any]:
     config = RUNNER_COMMANDS[runner]
+
+    # API-key mode: dispatch to HTTP adapter instead of CLI subprocess
+    if config.get("use_http"):
+        from .providers import run_agent_via_api
+        prompt = agent_prompt(agent, run_prompt, project_path, partner, attachment_paths)
+        usage_record = new_usage_record(project_name, agent, runner, model, reasoning, prompt)
+        usage_record["user_prompt"] = run_prompt.strip()
+        output_path = result_file_path(project_path, str(usage_record["id"]))
+        return await run_agent_via_api(
+            project_name=project_name,
+            agent=agent,
+            runner=runner,
+            model=model or str(config.get("api_model") or ""),
+            run_prompt=prompt,
+            usage_record=usage_record,
+            publish_output_fn=event_bus.publish_output,
+            publish_status_fn=publish_agent_status,
+            finish_usage_fn=finish_usage_record,
+            result_file_path=output_path,
+        )
+
     key = agent_run_key(project_name, agent)
     prompt = agent_prompt(agent, run_prompt, project_path, partner, attachment_paths)
     command = str(config["command"])
@@ -7865,6 +7917,12 @@ async def startup() -> None:
     _purge_orphaned_runs()
     recover_interrupted_tasks()
     await ensure_registered_project_files()
+    _provider_cfg = load_provider_config()
+    if _provider_cfg:
+        apply_provider_config(_provider_cfg)
+        log.info("Provider config loaded: runner_a=%s/%s runner_b=%s/%s",
+                 _provider_cfg.runner_a.provider, _provider_cfg.runner_a.mode,
+                 _provider_cfg.runner_b.provider, _provider_cfg.runner_b.mode)
     event_loop = asyncio.get_running_loop()
     event_bus.configure(event_loop, collect_snapshot)
     observer = Observer()
@@ -7898,6 +7956,57 @@ async def health() -> dict[str, Any]:
         "features": APP_FEATURES,
         **app_status_snapshot(),
     }
+
+
+@app.get("/api/setup/status")
+async def setup_status() -> dict[str, Any]:
+    return {"configured": provider_config_exists()}
+
+
+class SetupTestRequest(BaseModel):
+    runner_a: ProviderSlotConfig
+    runner_b: ProviderSlotConfig
+
+
+@app.post("/api/setup/test")
+async def setup_test(request: SetupTestRequest) -> dict[str, Any]:
+    runner_a_result, runner_b_result = await asyncio.gather(
+        test_provider_slot(request.runner_a),
+        test_provider_slot(request.runner_b),
+    )
+    return {"runner_a": runner_a_result, "runner_b": runner_b_result}
+
+
+class SetupSaveRequest(BaseModel):
+    runner_a: ProviderSlotConfig
+    runner_b: ProviderSlotConfig
+
+
+@app.post("/api/setup/save")
+async def setup_save(request: SetupSaveRequest) -> dict[str, Any]:
+    config = ProviderConfig(
+        runner_a=request.runner_a,
+        runner_b=request.runner_b,
+        configured_at=utc_now(),
+    )
+    save_provider_config(config)
+    apply_provider_config(config)
+    log.info("Provider config saved and applied: runner_a=%s/%s runner_b=%s/%s",
+             config.runner_a.provider, config.runner_a.mode,
+             config.runner_b.provider, config.runner_b.mode)
+    return {"ok": True}
+
+
+@app.delete("/api/setup/config")
+async def setup_delete_config() -> dict[str, Any]:
+    delete_provider_config()
+    log.info("Provider config deleted — wizard will re-run on next load")
+    return {"ok": True}
+
+
+@app.get("/api/setup/providers")
+async def setup_providers() -> dict[str, Any]:
+    return {"providers": PROVIDERS}
 
 
 @app.get("/api/orchestration/manifest")

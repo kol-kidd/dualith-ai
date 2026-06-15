@@ -67,6 +67,14 @@ RUNNER_COMMANDS: dict[str, dict] = {
         "log_action": "CODEX_LOG",
         "error_action": "CODEX_ERR",
         "exit_action": "CODEX_EXIT",
+        # Provider fields — populated by apply_provider_config() at startup
+        "use_http": False,
+        "provider": None,
+        "api_key": None,
+        "api_model": None,
+        "api_base": None,
+        "api_extra_headers": {},
+        "mode": "subscription",
     },
     "claude": {
         "label": "Claude",
@@ -80,5 +88,13 @@ RUNNER_COMMANDS: dict[str, dict] = {
         "log_action": "CLAUDE_LOG",
         "error_action": "CLAUDE_ERR",
         "exit_action": "CLAUDE_EXIT",
+        # Provider fields — populated by apply_provider_config() at startup
+        "use_http": False,
+        "provider": None,
+        "api_key": None,
+        "api_model": None,
+        "api_base": None,
+        "api_extra_headers": {},
+        "mode": "subscription",
     },
 }
