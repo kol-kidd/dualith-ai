@@ -2,22 +2,48 @@
 
 # Dualith
 
-Dualith is a local AI workspace that orchestrates Codex and Claude as a multi-agent engineering team inside your real project folders. You describe the outcome; the agents plan, implement, test, and review it — while you watch the conversation unfold in a single chat interface.
+Dualith is a local AI workspace that runs Codex and Claude as a real multi-agent engineering team inside your project folders. You describe the outcome; the agents plan, implement, test, and review — while you watch the team conversation unfold in a CI-style feed.
 
 ## What It Does
 
-- **Chat or Build** — two modes. Chat answers questions about your project. Build routes to the multi-agent team.
-- **Multi-agent pipeline** — Lead implements, Tester runs your build/lint/test commands, Teammate reviews. Loops until approved or the circuit breaker trips.
-- **Plan toggle** — turn Plan on and the Planner writes a step-by-step spec for you to approve before any code is written. Turn it off and the agents decide autonomously: ask one clarifying question if the request is ambiguous, or go straight to building if it's clear.
-- **PM clarification** — when a request is ambiguous and Plan is off, the PM agent asks one focused question via the HITL gate before the team starts.
-- **Visible agent dialogue** — Lead and Teammate updates appear as readable chat bubbles, written for a person watching over their shoulder, not as internal reports.
-- **Subagent permission** — Lead and Builder agents can spawn parallel subagents for large or naturally parallel tasks.
-- **Circuit breaker** — if the Tester reports three consecutive failures, the run stops and the error is surfaced in the chat thread.
-- **Image attachments** — paste, drag-drop, or pick images; they land in `.dualith/attachments/` and are injected into the agent prompt as disk paths.
-- **Git operations** — commit, push, merge, tag, stash. Say it in the chat and the Lead handles it. Dualith also creates automatic checkpoint commits after successful build runs.
-- **HITL gate** — any agent can pause mid-run and ask a question. You answer in the chat thread; the run continues.
-- **Usage tracking** — token counts, cost, quota reserves, and runner health visible in the System panel.
-- **Auto runner routing** — Codex-heavy, Claude-heavy, Balanced, or Registry auto. Review defaults to the configured review runner and falls back when the preferred runner is over its reserve.
+- **Chat or Build** — two modes. Chat answers questions about your project. Build routes to the full agent team.
+- **Lean or Full team** — Lean runs Preflight → Lead → Tester and fires specialist reviewers only when the output triggers a risk signal. Full runs the entire chain unconditionally: PM/Architect/Planner → Lead → Tester → four specialist reviewers → Final Reviewer → Summarizer.
+- **Plan toggle** — Plan on: Planner writes a step-by-step spec you approve before any code is written. Plan off: PM asks one clarifying question if the request is ambiguous, then the team goes straight to building.
+- **Specialist reviewers** — Security, Architecture, Performance, and Maintainability reviewers each provide a verdict with observations. All run in Full mode; only risk-triggered ones run in Lean.
+- **Live agent feed** — agent turns stream into a chronological story timeline with role-tagged prose, `@mention` handoffs, `re:` quoted replies, and bracket verdict tags (`[✓]` / `[!]`).
+- **Pipeline crew strip** — a header row shows every agent in scope for the current run, their status, and a green top-rule on the active stage.
+- **HITL gate** — any agent can pause and ask a question. You answer in the chat thread; the run resumes.
+- **Contract repair** — missing agent sections are synthesised from the final answer rather than killing the run; verdicts are parsed case-insensitively; observation-count gates are advisory.
+- **Subagent parallelism** — Lead and Builder agents can spawn parallel subagents for large or naturally parallel tasks.
+- **Circuit breaker** — three consecutive Tester failures stop the run and surface the error.
+- **Image attachments** — paste, drag-drop, or pick images; injected into agent prompts as `.dualith/attachments/` disk paths.
+- **Git operations** — commit, push, merge, tag, stash — say it in chat and the Lead handles it, with automatic checkpoint commits after successful runs.
+- **Usage tracking** — token counts, cost, quota reserves, and runner health in the always-visible Artifacts / Quota panel.
+- **Auto runner routing** — Codex-heavy, Claude-heavy, Balanced, or Registry auto; falls back when a runner is over its quota reserve.
+
+## UI Layout
+
+The workspace is a three-column shell:
+
+```
+┌─────────────┬────────────────────────────────┬──────────────┐
+│  Sidebar    │  Feed                          │  Right panel │
+│             │  ┌──────────────────────────┐  │              │
+│  Projects   │  │  Session header          │  │  Artifacts   │
+│  Agent      │  │  (title · status badge)  │  │  Logs        │
+│  roster     │  ├──────────────────────────┤  │  Quota       │
+│             │  │  Crew strip (pipeline)   │  │  Preview     │
+│             │  ├──────────────────────────┤  │              │
+│             │  │  Story timeline          │  │              │
+│             │  │  (agent turns, live run) │  │              │
+│             │  ├──────────────────────────┤  │              │
+│             │  │  Chat / Team tabs        │  │              │
+│             │  │  Composer                │  │              │
+│             │  └──────────────────────────┘  │              │
+└─────────────┴────────────────────────────────┴──────────────┘
+```
+
+Agent turns carry a role-coloured left border (cyan = Lead/Builder, green = Reviewers, amber = PM/Architect/Planner) and switch to full accent colour when active.
 
 ## Agent Pipeline
 
@@ -26,14 +52,17 @@ User message
   ↓
 Intent classifier (LLM → keyword fallback)
   ↓
-┌──────────────┬──────────────────────────────────┐
-│  Chat        │  Ask agent (read-only)            │
-├──────────────┼──────────────────────────────────┤
-│  Build       │  Lead → Tester → Teammate (loop)  │
-│  Plan ON     │  Planner → [user approves] → Team │
-│  Ambiguous   │  PM → [HITL if needed] → Team     │
-│  Audit       │  Auditor (read-only review)       │
-└──────────────┴──────────────────────────────────┘
+┌──────────────┬──────────────────────────────────────────────────────┐
+│  Chat        │  Ask agent (read-only)                               │
+├──────────────┼──────────────────────────────────────────────────────┤
+│  Build Lean  │  Lead → Tester → risk-triggered specialist reviewers │
+│  Build Full  │  PM/Architect/Planner → Lead → Tester               │
+│              │    → Security/Architecture/Performance/              │
+│              │       Maintainability reviewers → Final → Summarizer │
+│  Plan ON     │  Planner → [user approves] → Team                   │
+│  Ambiguous   │  PM → [HITL if needed] → Team                       │
+│  Audit       │  Auditor (read-only review)                         │
+└──────────────┴──────────────────────────────────────────────────────┘
 ```
 
 **Agents:**
@@ -41,22 +70,30 @@ Intent classifier (LLM → keyword fallback)
 |---|---|---|
 | Ask | Read-only conversation | read-only |
 | PM | Clarify ambiguous requests, write SPEC.md | read-only |
+| Architect | High-level design and constraints | read-only |
 | Planner | Write PLAN.md for user approval | read-only |
 | Lead | Implement against spec, update PLAN.md | full-auto |
 | Tester | Run build/lint/test commands, write FEEDBACK.md | full-auto |
-| Teammate | Review lead's work, approve or request changes | read-only |
+| Security Reviewer | Audit for vulnerabilities and secrets | read-only |
+| Architecture Reviewer | Audit structure and coupling | read-only |
+| Performance Reviewer | Audit for bottlenecks and regressions | read-only |
+| Maintainability Reviewer | Audit for clarity and tech debt | read-only |
+| Final Reviewer | Synthesise specialist verdicts | read-only |
+| Summarizer | Write human-readable run summary | read-only |
 | Builder | Single-pass implementation (pipeline mode) | full-auto |
 | Auditor | Single-pass review, write FEEDBACK.md | read-only |
 
 ## Architecture
 
 - **Frontend:** Next.js 15 App Router in `app/`, served on `http://localhost:3200`.
-- **Backend:** FastAPI in `backend/app/main.py`, served on `http://127.0.0.1:4200`.
-- **Agent runners:** Codex CLI and Claude CLI launched as subprocesses; output streamed over WebSocket.
+- **Backend:** FastAPI in `backend/app/` (`main.py`, `routing.py`, `runners.py`), served on `http://127.0.0.1:4200`.
+- **Real-time:** typed WebSocket event bus (`events.py`) with per-client queues, 250 ms-coalesced delta frames (`agent_output_delta`, `agent_status`, `phase`, `handoff`, `verdict`, `run_error`, `chat`). Snapshot only on connect/resync.
+- **Streaming:** Codex `exec --json` JSONL + Claude `--output-format stream-json --verbose`, normalised per-runner; live turn tails in the feed via `LiveTail`.
+- **Agent runners:** Codex CLI and Claude CLI as subprocesses with quota-aware dual-runner takeover.
 - **Local state:** `.dualith/` stores project registry, usage history, quota settings, attachments, and status cache.
 - **Project files:** each workspace gets `SPEC.md`, `PLAN.md`, `FEEDBACK.md`, `AGENT_CHAT.md`, `CHAT_HISTORY.md`, `HUMAN_INPUT.md`, `PRODUCT.md`, `DESIGN.md`, `CLAUDE.md`.
 
-The frontend and backend communicate over HTTP (actions) and WebSocket (live snapshots). The backend watches registered project folders with Watchdog, records filesystem/Git events, manages agent subprocess lifecycles, and broadcasts state on every change.
+The frontend and backend communicate over HTTP (actions) and WebSocket (live events + snapshots). The backend watches registered project folders with Watchdog, records filesystem/Git events, manages agent subprocess lifecycles, and broadcasts state on every change.
 
 ## Prerequisites
 
@@ -153,12 +190,14 @@ If Task Scheduler registration is blocked (non-admin shell), use the Startup fol
 
 ## Usage
 
-1. **Create or import a project.** Dualith registers the workspace and creates agent-facing files.
-2. **Chat** — ask questions, check status, or get explanations. The Ask agent reads the project and responds conversationally.
-3. **Build** — describe the outcome. With Plan off, the team starts immediately (or PM asks one clarifying question if the request is ambiguous). With Plan on, the Planner writes a spec first — approve it to start building.
-4. **Watch the conversation.** Lead updates and Teammate reviews appear as readable bubbles in the chat thread.
-5. **Answer questions.** If an agent hits a blocking ambiguity it pauses and asks you directly. Type your answer and the run continues.
-6. **Git operations.** Say "commit the changes", "push to main", "tag v1.0" — Lead handles it.
+1. **Create or import a project.** Dualith registers the workspace and creates agent-facing files. Your projects appear in the left sidebar.
+2. **Select a project.** The sidebar shows the project list and a live agent roster with status dots for the current run.
+3. **Chat** — ask questions, check status, or get explanations. The Ask agent reads the project and responds conversationally.
+4. **Build** — describe the outcome in the composer and choose Lean or Full team mode. With Plan off the team starts immediately (PM asks one clarifying question if the request is ambiguous). With Plan on the Planner writes a spec first — approve it to start building.
+5. **Watch the feed.** Agent turns stream into the story timeline in order. Each turn shows the agent's role, prose, `@mention` handoffs, quoted replies, and a verdict tag at the end. The crew strip at the top tracks which stage is active.
+6. **Answer questions.** If an agent hits a blocking ambiguity it pauses and asks you in the chat thread. Type your answer and the run continues.
+7. **Check the right panel.** Artifacts, logs, quota, and preview are always visible in the right column — no drawer needed.
+8. **Git operations.** Say "commit the changes", "push to main", "tag v1.0" — Lead handles it.
 
 ## Build And Production
 
