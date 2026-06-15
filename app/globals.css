@@ -5753,3 +5753,381 @@ button:not(:disabled),
   .dualith-stale-banner span::before { content: "· "; }
   * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   STITCH LAYOUT — persistent sidebar + right panel + session header
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Shell body: 3-column layout below the topbar */
+.dualith-shell-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Left sidebar ──────────────────────────────────────────────── */
+.dualith-sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 220px;
+  flex-shrink: 0;
+  min-height: 0;
+  border-right: 1px solid var(--dualith-line);
+  background: color-mix(in srgb, var(--dualith-surface) 72%, var(--dualith-bg));
+  overflow: hidden;
+}
+
+.dualith-sidebar__section {
+  padding: 10px 12px 6px;
+  border-bottom: 1px solid var(--dualith-line);
+}
+
+.dualith-sidebar__label {
+  font-family: var(--dualith-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dualith-text-faint);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dualith-sidebar__label button {
+  font-family: var(--dualith-font-mono);
+  font-size: 9px;
+  color: var(--dualith-text-faint);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  transition: color 0.12s;
+}
+.dualith-sidebar__label button:hover { color: var(--ok); }
+
+.dualith-sidebar__projects {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.dualith-sidebar__projects::-webkit-scrollbar { width: 3px; }
+.dualith-sidebar__projects::-webkit-scrollbar-track { background: transparent; }
+.dualith-sidebar__projects::-webkit-scrollbar-thumb { background: var(--dualith-line-hard); border-radius: 2px; }
+
+.dualith-sidebar__project-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 12px;
+  font-family: var(--dualith-font-mono);
+  font-size: 11.5px;
+  color: var(--dualith-text-muted);
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  min-width: 0;
+}
+.dualith-sidebar__project-item:hover {
+  background: color-mix(in srgb, var(--ok) 6%, var(--dualith-bg));
+  color: var(--dualith-text-strong);
+}
+.dualith-sidebar__project-item.is-active {
+  background: color-mix(in srgb, var(--ok) 10%, var(--dualith-surface));
+  color: var(--ok);
+}
+.dualith-sidebar__project-item .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--dualith-muted);
+  flex-shrink: 0;
+  transition: background 0.1s;
+}
+.dualith-sidebar__project-item.is-active .dot { background: var(--ok); }
+.dualith-sidebar__project-item .name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+/* Agent roster in sidebar */
+.dualith-sidebar__roster {
+  padding: 6px 0 4px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  flex-shrink: 0;
+  max-height: 220px;
+}
+
+.dualith-sidebar__agent-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 12px;
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  color: var(--dualith-text-muted);
+  min-width: 0;
+}
+
+.dualith-sidebar__agent-item .agent-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+.dualith-sidebar__agent-item .agent-name .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--dualith-line-hard);
+}
+.dualith-sidebar__agent-item .agent-name .dot.is-active {
+  background: var(--ok);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 42%, transparent);
+  animation: sidebar-agent-pulse 1.8s ease-out infinite;
+}
+.dualith-sidebar__agent-item .agent-name .dot.is-warn { background: var(--warn); }
+.dualith-sidebar__agent-item .agent-name .dot.is-err  { background: var(--danger); }
+.dualith-sidebar__agent-item .agent-name span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dualith-sidebar__agent-item .status-label {
+  font-size: 9.5px;
+  color: var(--dualith-text-faint);
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.dualith-sidebar__agent-item .status-label.is-active { color: var(--ok); }
+
+.dualith-sidebar__footer {
+  margin-top: auto;
+  padding: 10px 12px;
+  border-top: 1px solid var(--dualith-line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dualith-sidebar__footer-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 8px;
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  color: var(--dualith-text-faint);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  border-radius: 3px;
+  transition: background 0.1s, color 0.1s;
+}
+.dualith-sidebar__footer-btn:hover {
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+  color: var(--ok);
+}
+.dualith-sidebar__footer-btn svg { flex-shrink: 0; }
+
+@keyframes sidebar-agent-pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 42%, transparent); }
+  70%  { box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* ── Center feed (takes the remaining space) ───────────────────── */
+.dualith-feed-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Inline right panel (always visible, not a drawer) ─────────── */
+.dualith-right-panel-inline {
+  display: flex;
+  flex-direction: column;
+  width: 300px;
+  flex-shrink: 0;
+  min-height: 0;
+  border-left: 1px solid var(--dualith-line);
+  background: color-mix(in srgb, var(--dualith-surface) 72%, var(--dualith-bg));
+  overflow: hidden;
+}
+
+.dualith-right-panel-inline .dualith-right-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: none;
+}
+
+/* ── Session header (MissionControl restyle) ───────────────────── */
+.mission-control--session {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
+  height: 44px;
+  border-bottom: 1px solid var(--dualith-line);
+  background: color-mix(in srgb, var(--dualith-surface) 88%, var(--dualith-bg));
+}
+
+.mission-control--session .session-title {
+  font-family: var(--dualith-font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--dualith-text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.mission-control--session .session-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.session-badge {
+  font-family: var(--dualith-font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+.session-badge--active { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 55%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.session-badge--blocked { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.session-badge--idle { color: var(--dualith-text-faint); border-color: var(--dualith-line-hard); }
+.session-badge--error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, transparent); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+
+.session-participants {
+  font-family: var(--dualith-font-mono);
+  font-size: 10px;
+  color: var(--dualith-text-faint);
+  flex-shrink: 0;
+}
+.session-more-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  color: var(--dualith-text-faint);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  border-radius: 3px;
+  transition: background 0.1s, color 0.1s;
+  flex-shrink: 0;
+}
+.session-more-btn:hover { background: var(--dualith-surface-hover); color: var(--dualith-text-strong); }
+
+/* ── Agent turn: role-colored left border ──────────────────────── */
+.team-turn {
+  border-left: 3px solid transparent;
+  padding-left: 12px;
+  transition: border-color 0.15s;
+}
+
+/* Role color map: cyan = lead/builder, green = reviewer/auditor, amber = pm/planner/architect, faint = tester/summarizer */
+.team-turn--lead,
+.team-turn--builder,
+.team-turn--decomposer {
+  border-left-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.team-turn--lead.is-active,
+.team-turn--builder.is-active,
+.team-turn--decomposer.is-active {
+  border-left-color: var(--accent);
+}
+
+.team-turn--architecture_reviewer,
+.team-turn--security_reviewer,
+.team-turn--performance_reviewer,
+.team-turn--maintainability_reviewer,
+.team-turn--final_reviewer,
+.team-turn--auditor {
+  border-left-color: color-mix(in srgb, var(--ok) 55%, transparent);
+}
+.team-turn--architecture_reviewer.is-active,
+.team-turn--security_reviewer.is-active,
+.team-turn--performance_reviewer.is-active,
+.team-turn--maintainability_reviewer.is-active,
+.team-turn--final_reviewer.is-active,
+.team-turn--auditor.is-active {
+  border-left-color: var(--ok);
+}
+
+.team-turn--pm,
+.team-turn--architect,
+.team-turn--planner {
+  border-left-color: color-mix(in srgb, var(--warn) 55%, transparent);
+}
+.team-turn--pm.is-active,
+.team-turn--architect.is-active,
+.team-turn--planner.is-active {
+  border-left-color: var(--warn);
+}
+
+.team-turn--tester,
+.team-turn--summarizer,
+.team-turn--teammate {
+  border-left-color: color-mix(in srgb, var(--dualith-text-faint) 35%, transparent);
+}
+
+/* Glass surface on turns (light tint, more visual weight) */
+.team-turn {
+  background: color-mix(in srgb, var(--dualith-surface) 60%, transparent);
+  border-radius: 0 4px 4px 0;
+  margin-bottom: 2px;
+}
+
+.team-turn.is-active {
+  background: color-mix(in srgb, var(--dualith-surface) 88%, var(--dualith-bg));
+}
+
+/* Hide the drawer-based project nav now that sidebar is persistent */
+@media (min-width: 861px) {
+  .dualith-sidebar-hidden { display: none !important; }
+}
+
+/* Collapse sidebar + right panel on small screens */
+@media (max-width: 860px) {
+  .dualith-shell-body { display: contents; }
+  .dualith-sidebar { display: none; }
+  .dualith-feed-column { display: contents; }
+  .dualith-right-panel-inline { display: none; }
+}

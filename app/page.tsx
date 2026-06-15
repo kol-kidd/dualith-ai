@@ -2412,6 +2412,116 @@ function RegistryColumn({
   );
 }
 
+function SidebarColumn({
+  projects,
+  selectedName,
+  selectedProject,
+  loading,
+  onSelect,
+  onOpenSetup,
+  onOpenIdeas,
+  ideasCount,
+}: {
+  projects: ProjectRecord[];
+  selectedName: string | null;
+  selectedProject: ProjectRecord | null;
+  loading: boolean;
+  onSelect: (name: string) => void;
+  onOpenSetup: () => void;
+  onOpenIdeas: () => void;
+  ideasCount: number;
+}) {
+  const task = selectedProject ? selectedTask(selectedProject) : null;
+  const agents = rosterAgentsForTask(task as DualithTask | null);
+
+  function agentDotClass(status: string) {
+    if (status === "running" || status === "active") return "is-active";
+    if (status === "blocked" || status === "changes_requested") return "is-warn";
+    if (status === "failed" || status === "error") return "is-err";
+    return "";
+  }
+
+  return (
+    <aside className="dualith-sidebar">
+      {/* Workspace section */}
+      <div className="dualith-sidebar__section">
+        <div className="dualith-sidebar__label">
+          <span>Workspace</span>
+          <button type="button" onClick={onOpenSetup} title="New project">+</button>
+        </div>
+      </div>
+
+      {/* Project list */}
+      <div className="dualith-sidebar__projects">
+        {loading && projects.length === 0 ? (
+          <div style={{ padding: "10px 12px", color: "var(--dualith-text-faint)", fontSize: "11px" }}>Loading…</div>
+        ) : projects.length === 0 ? (
+          <div style={{ padding: "10px 12px" }}>
+            <button type="button" className="dualith-sidebar__footer-btn" onClick={onOpenSetup}>+ New project</button>
+          </div>
+        ) : (
+          projects.map((project) => {
+            const active = selectedName === project.name;
+            const live = isRecent(project.last_event_at);
+            return (
+              <button
+                key={project.name}
+                type="button"
+                className={`dualith-sidebar__project-item${active ? " is-active" : ""}`}
+                onClick={() => onSelect(project.name)}
+              >
+                <span className={`dot${live && !active ? " is-active" : ""}`} aria-hidden="true" />
+                <span className="name">{project.name}</span>
+              </button>
+            );
+          })
+        )}
+      </div>
+
+      {/* Agent Squads section */}
+      {agents.length > 0 && (
+        <>
+          <div className="dualith-sidebar__section">
+            <div className="dualith-sidebar__label">
+              <span>Agent Squads</span>
+            </div>
+          </div>
+          <div className="dualith-sidebar__roster">
+            {agents.map((agent) => {
+              const status = rosterAgentStatus(task as DualithTask, agent);
+              const dotClass = agentDotClass(status);
+              const isRunning = dotClass === "is-active";
+              return (
+                <div key={agent.id} className="dualith-sidebar__agent-item">
+                  <div className="agent-name">
+                    <span className={`dot${dotClass ? ` ${dotClass}` : ""}`} aria-hidden="true" />
+                    <span>{agent.label}</span>
+                  </div>
+                  <span className={`status-label${isRunning ? " is-active" : ""}`}>
+                    {rosterStatusLabel(status)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* Footer actions */}
+      <div className="dualith-sidebar__footer">
+        <button type="button" className="dualith-sidebar__footer-btn" onClick={onOpenIdeas}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Ideas{ideasCount ? ` (${ideasCount})` : ""}
+        </button>
+        <button type="button" className="dualith-sidebar__footer-btn" onClick={onOpenSetup}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 0-14.14 0"/><path d="M4.93 19.07a10 10 0 0 0 14.14 0"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/></svg>
+          New Agent
+        </button>
+      </div>
+    </aside>
+  );
+}
+
 // Center column: workspace panes
 
 function resultTimeValue(result: AgentResult) {
@@ -3265,6 +3375,7 @@ function TeamTurn({ message, isLast, lanes, synthetic, runner, acks, source = "c
   const { lead: bodyLead, rest: bodyRest } = splitLongBody(body);
   const className = [
     "team-turn",
+    message.role ? `team-turn--${message.role}` : "",
     active ? "is-active" : "",
     synthetic ? "is-synthetic" : "",
     source === "relay" ? "is-relay" : "",
@@ -7000,54 +7111,35 @@ function MissionControl({ project, liveRuns = [], failures = [], activeTab = "ch
   const activeRuns = liveRuns.filter((run) => run.project === project.name);
   const hasLive = activeRuns.length > 0;
 
+  const sessionTitle = task?.title || project.name;
+  const teamStatus = project.team?.status;
+  const badgeClass = hasLive
+    ? "session-badge--active"
+    : teamStatus === "blocked"
+      ? "session-badge--blocked"
+      : teamStatus === "error"
+        ? "session-badge--error"
+        : "session-badge--idle";
+  const badgeLabel = hasLive
+    ? "Active"
+    : teamStatus
+      ? humanizeStatus(teamStatus)
+      : "Idle";
+  const participantCount = task?.planned_agents?.length
+    ?? (project.team ? 3 : 0);
+
   return (
-    <section className="mission-control" aria-label="Mission control">
-      <div className="mission-control__summary">
-        <div className="mission-control__identity">
-          <span className="mission-control__project">{project.name}</span>
-          {task && <strong>{task.title}</strong>}
-          {task && (
-            <em>{humanizeWorkflow(task.workflow_id, taskWorkflowLabels[task.workflow_id] ?? task.workflow_id)} — {humanizeStatus(task.status)}</em>
-          )}
-        </div>
-        {task && (
-          <div className="mission-control__meta">
-            {task.route_mode && <span>{task.route_mode}</span>}
-            {task.team_mode && <span>{task.team_mode} team</span>}
-            {typeof task.estimated_runner_calls === "number" && task.estimated_runner_calls > 0 && <span>{task.estimated_runner_calls} calls est.</span>}
-            {task.preflight_status && task.preflight_status !== "ready" && <span>preflight {task.preflight_status}</span>}
-            {task.planned_agents?.length ? (
-              <span title={task.planned_agents.map((agent) => agent.replace(/_/g, " ")).join(" / ")}>
-                {task.planned_agents.length} agents
-              </span>
-            ) : null}
-            {project.team && project.team.round > 1 && <span>attempt {project.team.round}</span>}
-          </div>
+    <section className="mission-control mission-control--session" aria-label="Build session">
+      <span className="session-title" title={sessionTitle}>
+        {task ? `Build Session: ${sessionTitle}` : project.name}
+      </span>
+      <div className="session-badges">
+        <span className={`session-badge ${badgeClass}`}>{badgeLabel}</span>
+        {participantCount > 0 && (
+          <span className="session-participants">Participants: {participantCount} Agent{participantCount !== 1 ? "s" : ""}</span>
         )}
+        <button type="button" className="session-more-btn" aria-label="More options">⋯</button>
       </div>
-
-      <div className="mission-control__narration">
-        <span aria-hidden="true" className={activeRuns.length ? "is-live" : ""} />
-        <p>{narration}</p>
-      </div>
-
-      {onTabChange && (
-        <div className="mission-control__tabs">
-          <button
-            type="button"
-            className={`room-tab${activeTab === "chat" ? " is-active" : ""}`}
-            onClick={() => onTabChange("chat")}
-          >Chat</button>
-          <button
-            type="button"
-            className={`room-tab${activeTab === "team" ? " is-active" : ""}`}
-            onClick={() => onTabChange("team")}
-          >
-            Team
-            {hasLive && <span className="room-tab__dot" aria-hidden="true" />}
-          </button>
-        </div>
-      )}
     </section>
   );
 }
@@ -8942,7 +9034,6 @@ function DualithApp() {
   const errored = socketStatus === "Connection error";
 
   const [projectsOpen, setProjectsOpen] = useState(false);
-  const [drawerTab, setDrawerTab] = useState<WorkspaceRightTab | null>(null);
   const [roomTab, setRoomTab] = useState<"chat" | "team">("chat");
   const [composerFill, setComposerFill] = useState("");
 
@@ -8970,27 +9061,15 @@ function DualithApp() {
             <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${live ? "bg-ok" : errored ? "bg-danger" : "bg-warn"} ${live ? "animate-pulse-glow" : ""}`} />
             <span>{socketStatus}</span>
           </div>
-          <button
-            type="button"
-            onClick={() => openSetup("new")}
-            className="dualith-topbar-b__new border border-line-hard px-2 py-1 text-[10px] uppercase tracking-widest text-muted outline-none transition-colors hover:text-text focus-visible:ring-1 focus-visible:ring-accent/60"
-          >New</button>
-          <button
-            type="button"
-            onClick={() => { setIdeasOpen(true); setSetupOpen(false); setProjectsOpen(false); }}
-            className="dualith-topbar-b__ideas border border-line-hard px-2 py-1 text-[10px] uppercase tracking-widest text-muted outline-none transition-colors hover:text-text focus-visible:ring-1 focus-visible:ring-accent/60"
-          >
-            Ideas{ideas.length ? <em>{ideas.length}</em> : null}
-          </button>
           <SettingsMenu theme={theme} setTheme={setTheme} density={density} setDensity={setDensity} />
         </div>
       </header>
 
-      {/* Projects dropdown drawer */}
+      {/* Projects dropdown drawer — mobile / small-screen only */}
       {projectsOpen && (
         <>
           <button type="button" aria-label="Close projects" className="dualith-drawer-backdrop" onClick={() => setProjectsOpen(false)} />
-          <div className="dualith-projects-dropdown">
+          <div className="dualith-projects-dropdown dualith-sidebar-hidden">
             <RegistryColumn
               projects={projects}
               selectedName={selectedName}
@@ -9021,87 +9100,73 @@ function DualithApp() {
         </>
       )}
 
-      {/* Right drawer (Direct / Artifacts / Logs / Quota / Preview) */}
-      {drawerTab && (
-        <>
-          <button type="button" aria-label="Close panel" className="dualith-drawer-backdrop" onClick={() => setDrawerTab(null)} />
-          <div className="dualith-right-drawer">
-            <WorkspaceRightPanel
-              project={selectedProject}
-              results={results}
-              entries={consoleEntries}
-              commits={globalCommits}
-              usage={usage}
-              quota={quota}
-              appStatus={appStatus}
-              mobileView={mobileView}
-              onSendChat={sendChat}
-              onStopChat={stopChat}
-              onHumanAnswer={submitHumanAnswer}
-              onApprovePlan={approvePlan}
-              onDevServerAction={runDevServerAction}
-              onQuotaSave={saveQuota}
-              onStatusRefresh={refreshStatus}
-              runnerHealth={runnerHealth}
-              initialTab={drawerTab}
-              onClose={() => setDrawerTab(null)}
-            />
-          </div>
-        </>
-      )}
+      {/* 3-column shell */}
+      <div className="dualith-shell-body">
+        {/* Left sidebar: projects + agent roster */}
+        <SidebarColumn
+          projects={projects}
+          selectedName={selectedName}
+          selectedProject={selectedProject}
+          loading={loading}
+          onSelect={(name) => setSelectedName(name)}
+          onOpenSetup={() => openSetup("new")}
+          onOpenIdeas={() => { setIdeasOpen(true); setSetupOpen(false); setProjectsOpen(false); }}
+          ideasCount={ideas.length}
+        />
 
-      {/* Main full-bleed workspace */}
-      <div className="dualith-workspace-b">
-        {socketStatus !== "Live" && !loading && (
-          <div className="dualith-stale-banner" role="status" aria-live="polite">
-            <span>{socketStatus === "Reconnecting..." ? "Reconnecting — displayed data may be stale" : "Connection error — live updates paused"}</span>
-          </div>
-        )}
-        {selectedProject && (
-          <MissionControl
-            project={selectedProject}
-            liveRuns={Object.values(liveRuns).filter((run) => run.project === selectedProject.name)}
-            failures={runFailures[selectedProject.name] ?? []}
-          />
-        )}
+        {/* Center feed */}
+        <div className="dualith-feed-column">
+          {/* Main full-bleed workspace */}
+          <div className="dualith-workspace-b">
+            {socketStatus !== "Live" && !loading && (
+              <div className="dualith-stale-banner" role="status" aria-live="polite">
+                <span>{socketStatus === "Reconnecting..." ? "Reconnecting — displayed data may be stale" : "Connection error — live updates paused"}</span>
+              </div>
+            )}
+            {selectedProject && (
+              <MissionControl
+                project={selectedProject}
+                liveRuns={Object.values(liveRuns).filter((run) => run.project === selectedProject.name)}
+                failures={runFailures[selectedProject.name] ?? []}
+              />
+            )}
 
-        {/* Team room — scrollable */}
-        <div className="dualith-room-scroll" ref={null}>
-          {selectedProject ? (
-            <TeamRoomFull
-              project={selectedProject}
-              projectEvents={projectEvents}
-              results={results}
-              liveRuns={Object.values(liveRuns).filter((run) => run.project === selectedProject.name)}
-              failures={runFailures[selectedProject.name] ?? []}
-              onHumanAnswer={submitHumanAnswer}
-              onApprovePlan={approvePlan}
-              onAddressNotes={async (name) => {
-                await sendChat(name, {
-                  ...chatRunSettings,
-                  prompt: addressNotesPrompt,
-                  attachmentPaths: [],
-                  planMode: false,
-                  routeMode: "team",
-                  teamMode: chatRunSettings.teamMode,
-                });
-              }}
-              addressActionLabel={addressNotesActionLabel}
-              activeTab={roomTab}
-              onTabChange={setRoomTab}
-              onSuggestPrompt={setComposerFill}
-            />
-          ) : (
-            <div className="dualith-room-empty">
-              <span className="text-muted">No project selected — create or import one to start.</span>
+            {/* Team room — scrollable */}
+            <div className="dualith-room-scroll" ref={null}>
+              {selectedProject ? (
+                <TeamRoomFull
+                  project={selectedProject}
+                  projectEvents={projectEvents}
+                  results={results}
+                  liveRuns={Object.values(liveRuns).filter((run) => run.project === selectedProject.name)}
+                  failures={runFailures[selectedProject.name] ?? []}
+                  onHumanAnswer={submitHumanAnswer}
+                  onApprovePlan={approvePlan}
+                  onAddressNotes={async (name) => {
+                    await sendChat(name, {
+                      ...chatRunSettings,
+                      prompt: addressNotesPrompt,
+                      attachmentPaths: [],
+                      planMode: false,
+                      routeMode: "team",
+                      teamMode: chatRunSettings.teamMode,
+                    });
+                  }}
+                  addressActionLabel={addressNotesActionLabel}
+                  activeTab={roomTab}
+                  onTabChange={setRoomTab}
+                  onSuggestPrompt={setComposerFill}
+                />
+              ) : (
+                <div className="dualith-room-empty">
+                  <span className="text-muted">No project selected — create or import one to start.</span>
+                </div>
+              )}
             </div>
-          )}
-        </div>
 
-        {/* Bottom bar: unified tab row + composer */}
-        <div className="dualith-bottom-bar border-t border-line">
+            {/* Bottom bar: Chat / Team tabs + composer */}
+            <div className="dualith-bottom-bar border-t border-line">
           <div className="dualith-bottom-tabs" role="tablist" aria-label="Workspace view">
-            {/* View tabs: Chat / Team */}
             <button
               type="button"
               role="tab"
@@ -9121,27 +9186,6 @@ function DualithApp() {
                 <span className="room-tab__dot" aria-hidden="true" />
               )}
             </button>
-            {/* Separator */}
-            <span className="dualith-bottom-tab-sep" aria-hidden="true" />
-            {/* Drawer tabs: Artifacts / Logs / Quota / Preview */}
-            {([
-              { id: "artifacts" as WorkspaceRightTab, label: "Artifacts", badge: artifactReadyCount(selectedProject) || undefined },
-              { id: "logs" as WorkspaceRightTab, label: "Logs", badge: consoleEntries.length || undefined },
-              { id: "quota" as WorkspaceRightTab, label: "Quota", badge: (usage.active?.length) || undefined },
-              { id: "preview" as WorkspaceRightTab, label: "Preview" },
-            ] as { id: WorkspaceRightTab; label: string; badge?: number }[]).map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                role="tab"
-                aria-selected={drawerTab === t.id}
-                onClick={() => setDrawerTab((v) => v === t.id ? null : t.id)}
-                className={`dualith-bottom-tab${drawerTab === t.id ? " is-active" : ""}`}
-              >
-                {t.label}
-                {t.badge ? <em>{t.badge}</em> : null}
-              </button>
-            ))}
           </div>
           <div className="dualith-bottom-composer">
             <ChatComposer
@@ -9158,25 +9202,32 @@ function DualithApp() {
             />
           </div>
         </div>
-      </div>
+      </div>{/* end dualith-workspace-b */}
+        </div>{/* end dualith-feed-column */}
 
-      {/* Hidden old layout — keep for mobile fallback */}
-      <div className="dualith-legacy-grid hidden">
-        <div className={`dualith-rail-slot dualith-project-slot ${mobilePanel === "projects" ? "is-open" : ""}`}>
-          <RegistryColumn
-            projects={projects}
-            selectedName={selectedName}
-            loading={loading}
-            loadError={loadError}
-            socketStatus={socketStatus}
-            onRetry={refreshProjects}
-            onSelect={(name) => { setSelectedName(name); openMobileView("team"); }}
-            onOpenSetup={() => openSetup("new")}
-            onDelete={deleteProject}
-            onCloseMobile={() => openMobileView("team")}
+        {/* Right panel — always visible, no drawer */}
+        <div className="dualith-right-panel-inline">
+          <WorkspaceRightPanel
+            project={selectedProject}
+            results={results}
+            entries={consoleEntries}
+            commits={globalCommits}
+            usage={usage}
+            quota={quota}
+            appStatus={appStatus}
+            mobileView={mobileView}
+            onSendChat={sendChat}
+            onStopChat={stopChat}
+            onHumanAnswer={submitHumanAnswer}
+            onApprovePlan={approvePlan}
+            onDevServerAction={runDevServerAction}
+            onQuotaSave={saveQuota}
+            onStatusRefresh={refreshStatus}
+            runnerHealth={runnerHealth}
+            initialTab="artifacts"
           />
         </div>
-      </div>
+      </div>{/* end dualith-shell-body */}
 
       <ProjectSetupModal
         open={setupOpen}
