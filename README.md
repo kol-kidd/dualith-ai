@@ -18,7 +18,7 @@ Dualith is a local AI workspace that runs Codex and Claude as a real multi-agent
 - **Image attachments** — paste, drag-drop, or pick images; injected into agent prompts as `.dualith/attachments/` disk paths.
 - **Git operations** — commit, push, merge, tag, stash — say it in chat and the Lead handles it, with automatic checkpoint commits after successful runs.
 - **Usage tracking** — token counts, cost, quota reserves, and runner health in the always-visible Artifacts / Quota panel.
-- **Auto runner routing** — Codex-heavy, Claude-heavy, Balanced, or Registry auto; falls back when a runner is over its quota reserve.
+- **Auto runner routing** — Codex-heavy, Claude-heavy, Balanced, Eco, or Registry auto; falls back when a runner is over its quota reserve. Eco policy routes heavy reasoning roles (lead, architect, planner) to the pricier slot and light roles (tester, summarizer, reviewers) to the cheaper one — ranked by live or static price, with subscription-CLI vs API mode as a tiebreaker.
 - **Provider setup wizard** — first-run gate lets you pick your AI providers per runner slot. Mix Claude/OpenAI subscriptions (CLI-auth) with direct API keys from Anthropic, OpenAI, OpenRouter, or Gemini. API keys are stored in the OS keyring (not plaintext).
 - **Ideas drawer** — flesh out raw ideas into project briefs with an AI planning chat before promoting them to full projects.
 
