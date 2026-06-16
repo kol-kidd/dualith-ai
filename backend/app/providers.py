@@ -19,6 +19,11 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, field_validator, model_validator
 
+try:
+    import keyring
+except Exception:  # pragma: no cover - keyring optional at import time
+    keyring = None  # type: ignore[assignment]
+
 log = logging.getLogger("dualith")
 
 
@@ -110,6 +115,7 @@ class ProviderSlotConfig(BaseModel):
     api_key: str | None = None
     model: str | None = None
     base_url: str | None = None  # only valid when provider == "custom"
+    secret_in_keyring: bool = False  # True once api_key lives in the OS keyring, not on disk
 
     @model_validator(mode="after")
     def validate_base_url_scope(self) -> "ProviderSlotConfig":
@@ -126,7 +132,76 @@ class ProviderConfig(BaseModel):
     runner_a: ProviderSlotConfig
     runner_b: ProviderSlotConfig
     configured_at: str
-    version: int = 1
+    version: int = 2
+
+
+# ── Secret store (OS keyring) ─────────────────────────────────────────────────
+
+_KEYRING_SERVICE = "dualith-ai"
+_SLOT_NAMES = ("runner_a", "runner_b")
+_keyring_probe: bool | None = None  # cached availability probe
+
+
+def _keyring_available() -> bool:
+    """Probe the OS keyring once with a sentinel round-trip; cache the result.
+
+    Returns False if the `keyring` package is missing or its backend is broken
+    (headless Linux without Secret Service, locked keychain, etc.). Callers fall
+    back to plaintext-on-disk when this is False.
+    """
+    global _keyring_probe
+    if _keyring_probe is not None:
+        return _keyring_probe
+    if keyring is None:
+        _keyring_probe = False
+        return False
+    try:
+        keyring.set_password(_KEYRING_SERVICE, "__probe__", "1")
+        ok = keyring.get_password(_KEYRING_SERVICE, "__probe__") == "1"
+        keyring.delete_password(_KEYRING_SERVICE, "__probe__")
+        _keyring_probe = bool(ok)
+    except Exception as exc:
+        log.warning("OS keyring unavailable (%s) — API keys will fall back to plaintext", exc)
+        _keyring_probe = False
+    return _keyring_probe
+
+
+def set_slot_secret(slot_name: str, api_key: str | None) -> bool:
+    """Store a slot's API key in the OS keyring. Returns True on success.
+
+    A return of False means the caller must fall back to persisting the key in
+    provider-config.json (plaintext) to avoid breaking setup.
+    """
+    if not api_key:
+        delete_slot_secret(slot_name)
+        return True
+    if not _keyring_available():
+        return False
+    try:
+        keyring.set_password(_KEYRING_SERVICE, slot_name, api_key)
+        return True
+    except Exception as exc:
+        log.warning("keyring write failed for %s (%s) — falling back to plaintext", slot_name, exc)
+        return False
+
+
+def get_slot_secret(slot_name: str) -> str | None:
+    if not _keyring_available():
+        return None
+    try:
+        return keyring.get_password(_KEYRING_SERVICE, slot_name)
+    except Exception as exc:
+        log.warning("keyring read failed for %s (%s)", slot_name, exc)
+        return None
+
+
+def delete_slot_secret(slot_name: str) -> None:
+    if keyring is None:
+        return
+    try:
+        keyring.delete_password(_KEYRING_SERVICE, slot_name)
+    except Exception:
+        pass  # not found / backend unavailable — nothing to clean up
 
 
 # ── Config persistence ────────────────────────────────────────────────────────
@@ -141,21 +216,66 @@ def load_provider_config() -> ProviderConfig | None:
     if not path.exists():
         return None
     try:
-        return ProviderConfig.model_validate_json(path.read_text(encoding="utf-8"))
+        config = ProviderConfig.model_validate_json(path.read_text(encoding="utf-8"))
     except Exception as exc:
         log.warning("provider-config.json unreadable (%s) — wizard will re-run", exc)
         return None
 
+    rewrite_needed = False
+    for slot_name in _SLOT_NAMES:
+        slot: ProviderSlotConfig = getattr(config, slot_name)
+        if slot.mode != "api_key":
+            continue
+        if slot.secret_in_keyring:
+            # Hydrate the in-memory key from the keyring for downstream callers.
+            slot.api_key = get_slot_secret(slot_name)
+        elif slot.api_key:
+            # v1 plaintext key on disk — auto-migrate into the keyring.
+            if set_slot_secret(slot_name, slot.api_key):
+                slot.secret_in_keyring = True
+                rewrite_needed = True
+                log.info("Migrated %s API key from plaintext to OS keyring", slot_name)
+
+    if rewrite_needed:
+        config.version = ProviderConfig.model_fields["version"].default
+        save_provider_config(config)
+    return config
+
 
 def save_provider_config(config: ProviderConfig) -> None:
+    """Persist config, storing API keys in the OS keyring when available.
+
+    Mutates the passed config's slots so `secret_in_keyring` reflects what was
+    actually written, then serializes to disk with secrets stripped (keyring
+    path) or retained (plaintext fallback).
+    """
+    for slot_name in _SLOT_NAMES:
+        slot: ProviderSlotConfig = getattr(config, slot_name)
+        if slot.mode == "api_key" and slot.api_key:
+            slot.secret_in_keyring = set_slot_secret(slot_name, slot.api_key)
+            if not slot.secret_in_keyring:
+                log.warning(
+                    "Storing %s API key as plaintext in provider-config.json "
+                    "(OS keyring unavailable)", slot_name,
+                )
+        else:
+            slot.secret_in_keyring = False
+            delete_slot_secret(slot_name)
+
     path = _provider_config_path()
-    path.write_text(config.model_dump_json(indent=2), encoding="utf-8")
+    payload = config.model_dump()
+    for slot_name in _SLOT_NAMES:
+        if payload[slot_name].get("secret_in_keyring"):
+            payload[slot_name]["api_key"] = None  # secret lives only in the keyring
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def delete_provider_config() -> None:
     path = _provider_config_path()
     if path.exists():
         path.unlink()
+    for slot_name in _SLOT_NAMES:
+        delete_slot_secret(slot_name)
 
 
 def provider_config_exists() -> bool:
