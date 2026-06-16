@@ -232,6 +232,7 @@ from .providers import (
     provider_config_exists,
     save_provider_config,
     test_provider_slot,
+    list_provider_models,
     PROVIDERS,
 )
 TASK_STATUSES = {"pending", "active", "blocked", "completed", "failed"}
@@ -8018,6 +8019,15 @@ async def setup_delete_config() -> dict[str, Any]:
     delete_provider_config()
     log.info("Provider config deleted — wizard will re-run on next load")
     return {"ok": True}
+
+
+class SetupModelsRequest(BaseModel):
+    slot: ProviderSlotConfig
+
+
+@app.post("/api/setup/models", dependencies=[Depends(_require_setup_token)])
+async def setup_models(request: SetupModelsRequest) -> dict[str, Any]:
+    return await list_provider_models(request.slot)
 
 
 @app.get("/api/setup/providers")

@@ -342,6 +342,22 @@ async def _test_cli(provider: str) -> dict[str, Any]:
         return {"ok": False, "message": str(exc)}
 
 
+def _http_error_message(status: int) -> str:
+    """Translate a provider HTTP status into actionable guidance."""
+    if status in (401, 403):
+        return f"HTTP {status} — API key rejected. Check the key is correct and active."
+    if status == 404:
+        return f"HTTP {status} — model not found. Pick a different model for this provider."
+    if status == 429:
+        return (
+            "HTTP 429 — rate limited. Wait a moment and retry; for OpenRouter "
+            "free models, you may also need credits on your account."
+        )
+    if 500 <= status < 600:
+        return f"HTTP {status} — provider server error. Try again shortly."
+    return f"HTTP {status} from provider"
+
+
 async def _test_api_key(slot: ProviderSlotConfig) -> dict[str, Any]:
     pinfo = PROVIDERS.get(slot.provider, {})
     api_base = slot.base_url or pinfo.get("api_base", "")
@@ -366,13 +382,59 @@ async def _test_api_key(slot: ProviderSlotConfig) -> dict[str, Any]:
             resp = await client.post(f"{api_base}/chat/completions", headers=headers, json=payload)
         if resp.status_code in (200, 201):
             return {"ok": True, "message": f"Connected — model {model}"}
-        return {"ok": False, "message": f"HTTP {resp.status_code} from provider"}
+        return {"ok": False, "message": _http_error_message(resp.status_code)}
     except httpx.ConnectError:
         return {"ok": False, "message": f"Could not reach {api_base}"}
     except httpx.TimeoutException:
         return {"ok": False, "message": "Request timed out"}
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
+
+
+# ── Model listing ─────────────────────────────────────────────────────────────
+
+async def list_provider_models(slot: ProviderSlotConfig) -> dict[str, Any]:
+    """Fetch the live model catalog for a slot — returns {ok, models, message}.
+
+    Hits the provider's OpenAI-compatible /models endpoint with the supplied API
+    key. Never raises: on any failure it returns ok=False with an empty list so
+    the wizard can fall back to manual model entry.
+    """
+    pinfo = PROVIDERS.get(slot.provider, {})
+    api_base = slot.base_url or pinfo.get("api_base", "")
+    extra_headers = pinfo.get("extra_headers", {})
+    if not api_base:
+        return {"ok": False, "models": [], "message": f"No API base URL for provider '{slot.provider}'"}
+    if not slot.api_key:
+        return {"ok": False, "models": [], "message": "API key is required to load models"}
+
+    # Anthropic uses x-api-key, not Authorization: Bearer.
+    if slot.provider == "claude":
+        headers = {"x-api-key": slot.api_key, **extra_headers}
+    else:
+        headers = {"Authorization": f"Bearer {slot.api_key}", **extra_headers}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{api_base}/models", headers=headers)
+        if resp.status_code not in (200, 201):
+            return {"ok": False, "models": [], "message": _http_error_message(resp.status_code)}
+        data = resp.json()
+        raw = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            return {"ok": False, "models": [], "message": "Unexpected /models response shape"}
+        models = sorted(
+            {str(m["id"]) for m in raw if isinstance(m, dict) and m.get("id")}
+        )
+        if not models:
+            return {"ok": False, "models": [], "message": "Provider returned no models"}
+        return {"ok": True, "models": models, "message": f"{len(models)} models"}
+    except httpx.ConnectError:
+        return {"ok": False, "models": [], "message": f"Could not reach {api_base}"}
+    except httpx.TimeoutException:
+        return {"ok": False, "models": [], "message": "Request timed out"}
+    except Exception as exc:
+        return {"ok": False, "models": [], "message": str(exc)}
 
 
 # ── HTTP streaming runner ────────────────────────────────────────────────────

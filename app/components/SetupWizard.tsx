@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4200";
 
@@ -124,14 +124,147 @@ function ProviderCard({
   );
 }
 
+const inputStyle: React.CSSProperties = {
+  width: "100%",
+  padding: "9px 12px",
+  background: "var(--dualith-input-bg)",
+  color: "var(--dualith-input-text)",
+  border: "1.5px solid var(--dualith-line)",
+  borderRadius: 7,
+  fontSize: 13,
+  fontFamily: "monospace",
+  boxSizing: "border-box",
+  outline: "none",
+};
+
+const labelStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: 12,
+  color: "var(--dualith-text-muted)",
+  marginBottom: 6,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+};
+
+function ModelField({
+  slot,
+  onChange,
+  token,
+}: {
+  slot: SlotConfig;
+  onChange: (updated: SlotConfig) => void;
+  token: string;
+}) {
+  const meta = PROVIDER_META[slot.provider];
+  const [models, setModels] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [fetchError, setFetchError] = useState("");
+  // Track the latest request so a stale in-flight response can't overwrite state.
+  const reqId = useRef(0);
+
+  // Fetch the live model catalog whenever the key/provider/base-url settles.
+  useEffect(() => {
+    if (!slot.apiKey) {
+      setModels([]);
+      setFetchError("");
+      setLoading(false);
+      return;
+    }
+    const id = ++reqId.current;
+    setLoading(true);
+    setFetchError("");
+    const handle = setTimeout(async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/api/setup/models`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Dualith-Token": token },
+          body: JSON.stringify({
+            slot: {
+              provider: slot.provider,
+              mode: slot.mode,
+              api_key: slot.apiKey || null,
+              model: slot.model || null,
+              base_url: slot.baseUrl || null,
+            },
+          }),
+        });
+        const data = await resp.json();
+        if (id !== reqId.current) return; // superseded
+        if (data.ok && Array.isArray(data.models) && data.models.length > 0) {
+          const list: string[] = data.models;
+          setModels(list);
+          // Auto-select the default if present, else first, when current is invalid.
+          if (!list.includes(slot.model)) {
+            const next = list.includes(meta.defaultModel) ? meta.defaultModel : list[0];
+            onChange({ ...slot, model: next });
+          }
+        } else {
+          setModels([]);
+          setFetchError(data.message || "Couldn't load models");
+        }
+      } catch {
+        if (id !== reqId.current) return;
+        setModels([]);
+        setFetchError("Couldn't reach backend to load models");
+      } finally {
+        if (id === reqId.current) setLoading(false);
+      }
+    }, 500);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slot.apiKey, slot.provider, slot.baseUrl, token]);
+
+  const hint = !slot.apiKey
+    ? "Enter your API key to load available models"
+    : loading
+    ? "Loading models…"
+    : fetchError
+    ? `${fetchError} — enter the model ID manually`
+    : "";
+
+  return (
+    <div>
+      <label style={labelStyle}>Model</label>
+      {models.length > 0 ? (
+        <select
+          value={slot.model}
+          onChange={(e) => onChange({ ...slot, model: e.target.value })}
+          style={{ ...inputStyle, cursor: "pointer", appearance: "auto" }}
+        >
+          {models.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <input
+          type="text"
+          value={slot.model}
+          onChange={(e) => onChange({ ...slot, model: e.target.value })}
+          placeholder={meta.defaultModel || "e.g. gpt-4o"}
+          style={inputStyle}
+        />
+      )}
+      {hint && (
+        <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--dualith-text-faint)" }}>
+          {hint}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function SlotStep({
   slotIndex,
   slot,
   onChange,
+  token,
 }: {
   slotIndex: number;
   slot: SlotConfig;
   onChange: (updated: SlotConfig) => void;
+  token: string;
 }) {
   const meta = PROVIDER_META[slot.provider];
 
@@ -228,29 +361,7 @@ function SlotStep({
               }}
             />
           </div>
-          <div>
-            <label style={{ display: "block", fontSize: 12, color: "var(--dualith-text-muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.08em" }}>
-              Model
-            </label>
-            <input
-              type="text"
-              value={slot.model}
-              onChange={(e) => onChange({ ...slot, model: e.target.value })}
-              placeholder={meta.defaultModel || "e.g. gpt-4o"}
-              style={{
-                width: "100%",
-                padding: "9px 12px",
-                background: "var(--dualith-input-bg)",
-                color: "var(--dualith-input-text)",
-                border: "1.5px solid var(--dualith-line)",
-                borderRadius: 7,
-                fontSize: 13,
-                fontFamily: "monospace",
-                boxSizing: "border-box",
-                outline: "none",
-              }}
-            />
-          </div>
+          <ModelField slot={slot} onChange={onChange} token={token} />
           {slot.provider === "custom" && (
             <div>
               <label style={{ display: "block", fontSize: 12, color: "var(--dualith-text-muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.08em" }}>
@@ -526,7 +637,6 @@ export function SetupWizard({ token, onComplete }: { token: string; onComplete: 
           overflowY: "auto",
           display: "flex",
           flexDirection: "column",
-          maxWidth: 620,
         }}
       >
         {step === 1 && (
@@ -537,7 +647,7 @@ export function SetupWizard({ token, onComplete }: { token: string; onComplete: 
             <p style={{ margin: "0 0 28px", fontSize: 14, color: "var(--dualith-text-muted)" }}>
               Runner A handles primary agent work — Lead, PM, Architect, and planning phases.
             </p>
-            <SlotStep slotIndex={0} slot={slotA} onChange={setSlotA} />
+            <SlotStep slotIndex={0} slot={slotA} onChange={setSlotA} token={token} />
             <div style={{ marginTop: 32, display: "flex", justifyContent: "flex-end" }}>
               <button onClick={() => setStep(2)} style={primaryBtn}>
                 Next →
@@ -554,7 +664,7 @@ export function SetupWizard({ token, onComplete }: { token: string; onComplete: 
             <p style={{ margin: "0 0 28px", fontSize: 14, color: "var(--dualith-text-muted)" }}>
               Runner B handles review agents — Tester, specialists, and the final reviewer.
             </p>
-            <SlotStep slotIndex={1} slot={slotB} onChange={setSlotB} />
+            <SlotStep slotIndex={1} slot={slotB} onChange={setSlotB} token={token} />
             <div style={{ marginTop: 32, display: "flex", gap: 10, justifyContent: "flex-end" }}>
               <button onClick={() => setStep(1)} style={ghostBtn}>← Back</button>
               <button onClick={() => setStep(3)} style={primaryBtn}>Next →</button>
