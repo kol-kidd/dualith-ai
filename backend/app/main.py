@@ -19,7 +19,8 @@ from uuid import uuid4
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect
+import secrets
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Header, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -37,6 +38,19 @@ from .orchestration.validator import validate_plan
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DUALITH_DIR = ROOT_DIR / ".dualith"
 REGISTRY_PATH = DUALITH_DIR / "projects.json"
+
+# ── Setup token ───────────────────────────────────────────────────────────────
+# Generated fresh each server start. The frontend reads it from /api/setup/status
+# and sends it as X-Dualith-Token on all mutating setup calls.
+# A cross-origin page cannot read the status response body (CORS blocks it), and
+# cannot send an unknown custom header without a preflight that CORS will deny.
+_SETUP_TOKEN: str = secrets.token_urlsafe(32)
+
+
+async def _require_setup_token(x_dualith_token: str | None = Header(None)) -> None:
+    if x_dualith_token != _SETUP_TOKEN:
+        raise HTTPException(status_code=403, detail="Missing or invalid setup token")
+
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 def _setup_logger() -> logging.Logger:
@@ -7960,7 +7974,9 @@ async def health() -> dict[str, Any]:
 
 @app.get("/api/setup/status")
 async def setup_status() -> dict[str, Any]:
-    return {"configured": provider_config_exists()}
+    # Token is safe to expose here: cross-origin pages are blocked from reading
+    # this response by the CORS policy (only allowed origins get the body).
+    return {"configured": provider_config_exists(), "token": _SETUP_TOKEN}
 
 
 class SetupTestRequest(BaseModel):
@@ -7968,7 +7984,7 @@ class SetupTestRequest(BaseModel):
     runner_b: ProviderSlotConfig
 
 
-@app.post("/api/setup/test")
+@app.post("/api/setup/test", dependencies=[Depends(_require_setup_token)])
 async def setup_test(request: SetupTestRequest) -> dict[str, Any]:
     runner_a_result, runner_b_result = await asyncio.gather(
         test_provider_slot(request.runner_a),
@@ -7982,7 +7998,7 @@ class SetupSaveRequest(BaseModel):
     runner_b: ProviderSlotConfig
 
 
-@app.post("/api/setup/save")
+@app.post("/api/setup/save", dependencies=[Depends(_require_setup_token)])
 async def setup_save(request: SetupSaveRequest) -> dict[str, Any]:
     config = ProviderConfig(
         runner_a=request.runner_a,
@@ -7997,7 +8013,7 @@ async def setup_save(request: SetupSaveRequest) -> dict[str, Any]:
     return {"ok": True}
 
 
-@app.delete("/api/setup/config")
+@app.delete("/api/setup/config", dependencies=[Depends(_require_setup_token)])
 async def setup_delete_config() -> dict[str, Any]:
     delete_provider_config()
     log.info("Provider config deleted — wizard will re-run on next load")

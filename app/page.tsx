@@ -8574,6 +8574,7 @@ function DualithApp() {
   const { theme, setTheme, density, setDensity } = useAppearance();
   const [wizardOpen, setWizardOpen] = useState(false);
   const [setupChecked, setSetupChecked] = useState(false);
+  const [setupToken, setSetupToken] = useState("");
 
   useEffect(() => {
     try {
@@ -8630,10 +8631,14 @@ function DualithApp() {
   }, [applySnapshot]);
 
   // First-run gate: check if provider config exists before loading the app.
+  // Also captures the per-session CSRF token used to authenticate mutating setup calls.
   useEffect(() => {
     fetch(`${apiBase}/api/setup/status`, { cache: "no-store" })
       .then((r) => r.json())
-      .then((d) => { if (!d.configured) setWizardOpen(true); })
+      .then((d) => {
+        if (d.token) setSetupToken(d.token);
+        if (!d.configured) setWizardOpen(true);
+      })
       .catch(() => { /* backend not ready — let the normal load error surface */ })
       .finally(() => setSetupChecked(true));
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -9075,7 +9080,7 @@ function DualithApp() {
   const [composerFill, setComposerFill] = useState("");
 
   if (!setupChecked || wizardOpen) {
-    return <SetupWizard onComplete={() => { setWizardOpen(false); refreshProjects().catch(() => {}); }} />;
+    return <SetupWizard token={setupToken} onComplete={() => { setWizardOpen(false); refreshProjects().catch(() => {}); }} />;
   }
 
   return (
@@ -9265,7 +9270,7 @@ function DualithApp() {
             onQuotaSave={saveQuota}
             onStatusRefresh={refreshStatus}
             onReconfigure={async () => {
-              await fetch(`${apiBase}/api/setup/config`, { method: "DELETE" });
+              await fetch(`${apiBase}/api/setup/config`, { method: "DELETE", headers: { "X-Dualith-Token": setupToken } });
               setWizardOpen(true);
             }}
             runnerHealth={runnerHealth}

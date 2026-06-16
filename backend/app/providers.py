@@ -9,13 +9,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
 log = logging.getLogger("dualith")
 
@@ -66,6 +68,40 @@ PROVIDERS: dict[str, dict[str, Any]] = {
 }
 
 
+# ── SSRF guard ────────────────────────────────────────────────────────────────
+
+# Blocks private/loopback/link-local addresses that could be used for SSRF.
+_PRIVATE_HOST = re.compile(
+    r"^("
+    r"localhost"
+    r"|127\.\d+\.\d+\.\d+"          # loopback
+    r"|0\.0\.0\.0"
+    r"|::1"
+    r"|10\.\d+\.\d+\.\d+"           # RFC-1918 class A
+    r"|192\.168\.\d+\.\d+"          # RFC-1918 class C
+    r"|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+"  # RFC-1918 class B
+    r"|169\.254\.\d+\.\d+"          # link-local / AWS EC2 metadata
+    r"|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+"  # CGNAT
+    r"|fd[0-9a-f]{2}(:[0-9a-f]{0,4}){0,6}"  # IPv6 ULA
+    r")$",
+    re.I,
+)
+
+
+def _validate_custom_base_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"base_url must use https, got '{parsed.scheme}'")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise ValueError("base_url must include a valid hostname")
+    if _PRIVATE_HOST.match(host):
+        raise ValueError(
+            f"base_url may not target private, loopback, or link-local addresses (got '{host}')"
+        )
+    return url
+
+
 # ── Config models ─────────────────────────────────────────────────────────────
 
 class ProviderSlotConfig(BaseModel):
@@ -73,7 +109,17 @@ class ProviderSlotConfig(BaseModel):
     mode: Literal["subscription", "api_key"]
     api_key: str | None = None
     model: str | None = None
-    base_url: str | None = None  # for custom providers
+    base_url: str | None = None  # only valid when provider == "custom"
+
+    @model_validator(mode="after")
+    def validate_base_url_scope(self) -> "ProviderSlotConfig":
+        if self.base_url is not None and self.provider != "custom":
+            raise ValueError(
+                f"base_url may only be set when provider is 'custom', not '{self.provider}'"
+            )
+        if self.base_url is not None:
+            self.base_url = _validate_custom_base_url(self.base_url)
+        return self
 
 
 class ProviderConfig(BaseModel):
@@ -200,8 +246,7 @@ async def _test_api_key(slot: ProviderSlotConfig) -> dict[str, Any]:
             resp = await client.post(f"{api_base}/chat/completions", headers=headers, json=payload)
         if resp.status_code in (200, 201):
             return {"ok": True, "message": f"Connected — model {model}"}
-        body = resp.text[:300]
-        return {"ok": False, "message": f"HTTP {resp.status_code}: {body}"}
+        return {"ok": False, "message": f"HTTP {resp.status_code} from provider"}
     except httpx.ConnectError:
         return {"ok": False, "message": f"Could not reach {api_base}"}
     except httpx.TimeoutException:
@@ -259,8 +304,7 @@ async def run_agent_via_api(
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=5.0)) as client:
             async with client.stream("POST", f"{api_base}/chat/completions", headers=headers, json=payload) as resp:
                 if resp.status_code not in (200, 201):
-                    body = await resp.aread()
-                    error = f"HTTP {resp.status_code}: {body.decode(errors='replace')[:300]}"
+                    error = f"HTTP {resp.status_code} from provider"
                     finish_usage_fn(usage_record, "error", resp.status_code)
                     return _api_error_record(usage_record, error)
 

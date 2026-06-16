@@ -330,7 +330,7 @@ function SlotSummaryCard({
   );
 }
 
-export function SetupWizard({ onComplete }: { onComplete: () => void }) {
+export function SetupWizard({ token, onComplete }: { token: string; onComplete: () => void }) {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [slotA, setSlotA] = useState<SlotConfig>(defaultSlot);
   const [slotB, setSlotB] = useState<SlotConfig>({
@@ -357,7 +357,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
     try {
       const resp = await fetch(`${API_BASE}/api/setup/test`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Dualith-Token": token },
         body: JSON.stringify({
           runner_a: {
             provider: slotA.provider,
@@ -390,7 +390,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
     try {
       const resp = await fetch(`${API_BASE}/api/setup/save`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Dualith-Token": token },
         body: JSON.stringify({
           runner_a: {
             provider: slotA.provider,
