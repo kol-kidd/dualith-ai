@@ -171,38 +171,42 @@ function RunnerStatusCard({ entry, runner, quotaPeriods, providerSlot, className
   const hasUnknownLimit = !isApiSlot && quotaPeriods.some((qp) => !quotaLimitKnown(qp.period));
 
   const isError = entry.status === "error" || entry.status === "timeout";
-  const dot = isError ? "bg-danger" : isApiSlot ? (entry.status === "ok" ? "bg-ok" : "bg-zinc-700") : hasUnknownLimit ? "bg-warn" : hasData ? "bg-ok" : entry.status === "ok" ? "bg-warn" : "bg-zinc-700";
+  const isOk = !isError && (isApiSlot ? entry.status === "ok" : hasData && !hasUnknownLimit);
+  const dotColor = isError ? "bg-danger" : isOk ? "bg-ok" : hasUnknownLimit ? "bg-warn" : "bg-zinc-700";
 
   return (
-    <div className={`min-w-0 space-y-2 px-3 py-2.5 ${className ?? ""}`}>
-      <div className="flex items-center justify-between gap-1">
+    <div className={`min-w-0 px-3 py-3 ${className ?? ""}`}>
+      {/* Header row */}
+      <div className="flex items-center justify-between gap-2 mb-2.5">
         <div className="flex min-w-0 items-center gap-2">
-          <RunnerMascot runner={runner} size={16} />
-          <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-400 truncate">{label}</span>
+          <RunnerMascot runner={runner} size={18} />
+          <span className="text-sm font-semibold text-text-strong truncate">{label}</span>
           {providerSlot && (
-            <span className={`shrink-0 rounded px-1 py-px text-[9px] uppercase tracking-wide ${isApiSlot ? "bg-zinc-800 text-zinc-500" : "bg-zinc-800 text-zinc-500"}`}>
+            <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide border ${isApiSlot ? "border-line-hard bg-surface text-text-faint" : "border-line-hard bg-surface text-text-faint"}`}>
               {isApiSlot ? "api key" : "subscription"}
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1.5">
-          <div className={`h-1.5 w-1.5 rounded-full ${dot}`} />
-          <span className="text-[10px] text-zinc-600">{entry.checked_at ? timestampLabel(entry.checked_at) : "—"}</span>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <div className={`h-2 w-2 rounded-full ${dotColor}`} />
+          <span className="text-[10px] tabular-nums text-text-faint">{entry.checked_at ? timestampLabel(entry.checked_at) : "—"}</span>
         </div>
       </div>
+
+      {/* Body */}
       {isError ? (
-        <p className="truncate text-[10px] text-danger">{entry.error || runnerStatusLabel(entry)}</p>
+        <p className="text-xs text-danger">{entry.error || runnerStatusLabel(entry)}</p>
       ) : isApiSlot ? (
         <div className="space-y-1">
           {providerSlot.model && (
-            <p className="truncate text-[10px] text-zinc-500">{providerSlot.model}</p>
+            <p className="truncate text-xs font-medium text-text-muted">{providerSlot.model}</p>
           )}
-          <p className="text-[10px] text-zinc-600">
+          <p className="text-xs text-text-faint">
             {entry.status === "ok" ? "Connected · quota tracked by provider" : runnerStatusLabel(entry)}
           </p>
         </div>
       ) : hasData ? (
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           {periods.map(({ label: pLabel, key }) => {
             const p = entry.parsed[key];
             if (!p) return null;
@@ -212,7 +216,7 @@ function RunnerStatusCard({ entry, runner, quotaPeriods, providerSlot, className
           })}
         </div>
       ) : (
-        <p className={`text-[10px] ${runnerStatusTone(entry)}`}>{runnerStatusLabel(entry)}</p>
+        <p className={`text-xs ${runnerStatusTone(entry)}`}>{runnerStatusLabel(entry)}</p>
       )}
     </div>
   );
@@ -426,72 +430,110 @@ function UsageStatusTab({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
-      <div className="grid grid-cols-1 border-b border-line-hard">
-        <RunnerStatusCard className="border-b border-line-hard" entry={quota.status.codex} runner="codex" quotaPeriods={codexPeriods} providerSlot={providerSlots?.codex} />
-        <RunnerStatusCard entry={quota.status.claude} runner="claude" quotaPeriods={claudePeriods} providerSlot={providerSlots?.claude} />
+      {/* Runner cards */}
+      <div className="grid grid-cols-2 border-b border-line-hard">
+        <RunnerStatusCard
+          className="border-r border-line-hard"
+          entry={quota.status.codex}
+          runner="codex"
+          quotaPeriods={codexPeriods}
+          providerSlot={providerSlots?.codex}
+        />
+        <RunnerStatusCard
+          entry={quota.status.claude}
+          runner="claude"
+          quotaPeriods={claudePeriods}
+          providerSlot={providerSlots?.claude}
+        />
       </div>
 
-      <div className="border-b border-line-hard px-3 py-2.5">
-        <div className="mb-1.5 flex items-baseline justify-between gap-2">
-          <span className="text-[10px] uppercase tracking-widest text-zinc-600">Today</span>
-          <span className="truncate text-[10px] text-zinc-600">{usageStatusLabel(usage.today)}</span>
-        </div>
-        <div className="grid grid-cols-3 border border-line-hard">
-          <UsageStat label="Runs" value={String(usage.today.runs)} />
-          <UsageStat label="Runtime" value={durationLabel(usage.today.duration_ms) === "-" ? "0s" : durationLabel(usage.today.duration_ms)} />
-          <UsageStat label="Tokens" value={usageTokenLabel(usage.today)} />
-        </div>
-        <div className="mt-2 grid grid-cols-[1fr_auto] gap-2 text-[10px]">
-          <span className="min-w-0 truncate text-zinc-600">{usageRunMeta(usage.today)}</span>
-          <span className={tokenWarning ? "text-warn" : "text-zinc-600"}>{usageTokenDetail(usage.today)}</span>
-        </div>
-      </div>
-
+      {/* Active runs */}
       {active.length > 0 && (
-        <div className="border-b border-line-hard px-3 py-2">
-          <div className="mb-1.5 text-[10px] uppercase tracking-widest text-zinc-600">Running now</div>
-          <div className="space-y-1">
+        <div className="border-b border-line-hard px-3 py-2.5">
+          <div className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-text-faint">Running now</div>
+          <div className="space-y-1.5">
             {active.map((run) => (
-              <div key={run.id} className="grid grid-cols-[auto_1fr_auto] items-center gap-2 border border-line-hard px-2 py-1.5">
-                <span className={`text-[10px] uppercase ${usageStatusTone(run.status)}`}>{run.status}</span>
-                <span className="flex min-w-0 items-center gap-1.5 truncate text-[10px] text-zinc-500">
-                  <RunnerMascot runner={run.runner} size={14} />
-                  <span className="truncate">{run.project} / {modeLabels[run.mode]} / {providerSlots?.[run.runner]?.label ?? runnerLabels[run.runner] ?? run.runner} / {run.model || "default"}</span>
-                </span>
-                <span className="shrink-0 tabular-nums text-[10px] text-zinc-600">{activeDurationLabel(run, nowTick)} / {usageRunTokenLabel(run)}</span>
+              <div key={run.id} className="rounded border border-line-hard bg-surface px-2.5 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <RunnerMascot runner={run.runner} size={14} />
+                    <span className="truncate text-xs font-medium text-text-strong">
+                      {providerSlots?.[run.runner]?.label ?? runnerLabels[run.runner] ?? run.runner}
+                    </span>
+                    <span className="text-[10px] text-text-faint">/</span>
+                    <span className="truncate text-[10px] text-text-muted">{modeLabels[run.mode]}</span>
+                  </div>
+                  <span className={`shrink-0 text-[10px] font-semibold uppercase ${usageStatusTone(run.status)}`}>{run.status}</span>
+                </div>
+                <div className="mt-1 flex items-baseline justify-between gap-2 text-[10px] text-text-faint">
+                  <span className="truncate">{run.project} · {run.model || "default"}</span>
+                  <span className="shrink-0 tabular-nums">{activeDurationLabel(run, nowTick)} / {usageRunTokenLabel(run)}</span>
+                </div>
               </div>
             ))}
           </div>
         </div>
       )}
 
+      {/* Today stats */}
+      <div className="border-b border-line-hard px-3 py-3">
+        <div className="mb-2.5 flex items-center justify-between gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-text-faint">Today</span>
+          <span className="text-[10px] text-text-faint">{usageStatusLabel(usage.today)}</span>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <div className="rounded border border-line-hard bg-surface px-2.5 py-2 text-center">
+            <div className="text-base font-semibold tabular-nums text-text-strong">{usage.today.runs}</div>
+            <div className="mt-0.5 text-[10px] uppercase tracking-widest text-text-faint">Runs</div>
+          </div>
+          <div className="rounded border border-line-hard bg-surface px-2.5 py-2 text-center">
+            <div className="text-base font-semibold tabular-nums text-text-strong">
+              {durationLabel(usage.today.duration_ms) === "-" ? "0s" : durationLabel(usage.today.duration_ms)}
+            </div>
+            <div className="mt-0.5 text-[10px] uppercase tracking-widest text-text-faint">Runtime</div>
+          </div>
+          <div className="rounded border border-line-hard bg-surface px-2.5 py-2 text-center">
+            <div className="text-base font-semibold tabular-nums text-text-strong">{usageTokenLabel(usage.today)}</div>
+            <div className="mt-0.5 text-[10px] uppercase tracking-widest text-text-faint">Tokens</div>
+          </div>
+        </div>
+        <div className="mt-2 flex items-baseline justify-between gap-2 text-[10px]">
+          <span className="min-w-0 truncate text-text-faint">{usageRunMeta(usage.today)}</span>
+          <span className={`shrink-0 ${tokenWarning ? "text-warn" : "text-text-faint"}`}>{usageTokenDetail(usage.today)}</span>
+        </div>
+      </div>
+
+      {/* Tracked by model */}
       <div className="min-h-0 flex-1 overflow-auto">
-        <div className="sticky top-0 z-10 flex items-baseline justify-between gap-2 border-b border-line-hard bg-bg px-3 py-2 text-[10px]">
-          <span className="uppercase tracking-widest text-zinc-600">Tracked by model</span>
-          <span className="truncate text-zinc-600">{usage.totals.runs} runs / {durationLabel(usage.totals.duration_ms) === "-" ? "0s" : durationLabel(usage.totals.duration_ms)}</span>
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-line-hard bg-bg px-3 py-2">
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-text-faint">By model</span>
+          <span className="text-[10px] tabular-nums text-text-faint">{usage.totals.runs} runs · {durationLabel(usage.totals.duration_ms) === "-" ? "0s" : durationLabel(usage.totals.duration_ms)}</span>
         </div>
         {byModel.map((item) => (
-          <div key={item.id} className="border-b border-zinc-950 px-3 py-1.5">
-            <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2">
-              <span className="shrink-0 text-[10px] uppercase text-zinc-600">{item.runs}x</span>
-              <span className="flex min-w-0 items-center gap-1.5 truncate text-[10px] text-zinc-500">
-                <RunnerMascot runner={item.runner} size={14} />
-                <span className="truncate">{providerSlots?.[item.runner]?.label ?? runnerLabels[item.runner] ?? item.runner} / {item.model}</span>
-              </span>
-              <span className="shrink-0 tabular-nums text-[10px] text-zinc-600">{usageTokenLabel(item)}</span>
-            </div>
-            <div className="mt-0.5 grid grid-cols-[1fr_auto] gap-2 text-[10px] text-zinc-700">
-              <span className="min-w-0 truncate">{usageRunMeta(item)}</span>
-              <span className={`shrink-0 ${usageStatusTone(item.last_status)}`}>{item.last_status || usageStatusLabel(item)}</span>
+          <div key={item.id} className="flex items-start gap-2.5 border-b border-line-hard px-3 py-2.5">
+            <RunnerMascot runner={item.runner} size={16} />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="truncate text-xs font-medium text-text-strong">
+                  {providerSlots?.[item.runner]?.label ?? runnerLabels[item.runner] ?? item.runner}
+                </span>
+                <span className="shrink-0 tabular-nums text-[10px] text-text-muted">{usageTokenLabel(item)}</span>
+              </div>
+              <div className="truncate text-[10px] text-text-faint">{item.model}</div>
+              <div className="mt-0.5 flex items-baseline justify-between gap-2 text-[10px] text-text-faint">
+                <span className="min-w-0 truncate">{item.runs} runs · {usageRunMeta(item)}</span>
+                <span className={`shrink-0 ${usageStatusTone(item.last_status)}`}>{item.last_status || usageStatusLabel(item)}</span>
+              </div>
             </div>
           </div>
         ))}
         {!byModel.length && <EmptyState message="No usage runs tracked yet." />}
       </div>
 
+      {/* Footer */}
       <div className="flex shrink-0 items-center justify-end gap-2 border-t border-line-hard px-3 py-1.5">
         {refreshDetail && (
-          <span className={`text-[10px] ${refreshDetail === "error" ? "text-danger" : refreshDetail === "refreshing" ? "text-warn" : "text-zinc-600"}`}>
+          <span className={`text-[10px] ${refreshDetail === "error" ? "text-danger" : refreshDetail === "refreshing" ? "text-warn" : "text-text-faint"}`}>
             {refreshDetail}
           </span>
         )}
@@ -499,7 +541,7 @@ function UsageStatusTab({
           type="button"
           disabled={refreshing}
           onClick={() => void refresh(true)}
-          className="text-[10px] text-accent outline-none hover:text-zinc-300 disabled:text-zinc-700"
+          className="text-[10px] text-accent outline-none hover:text-text-strong disabled:text-text-faint"
         >
           {refreshing ? "Checking..." : "Refresh usage"}
         </button>
@@ -636,13 +678,14 @@ function LogTab({ entries, commits }: { entries: ConsoleEntry[]; commits: string
 
 type WorkspaceRightTab = "artifacts" | "logs" | "quota" | "preview";
 
-function QuotaPanel({
+export function QuotaModal({
   usage,
   quota,
   providerSlots,
   onQuotaSave,
   onStatusRefresh,
   onReconfigure,
+  onClose,
 }: {
   usage: UsageSnapshot;
   quota: QuotaSnapshot;
@@ -650,48 +693,77 @@ function QuotaPanel({
   onQuotaSave: (settings: QuotaSettings) => Promise<void>;
   onStatusRefresh: (force?: boolean) => Promise<StatusRefreshState | void>;
   onReconfigure?: () => void;
+  onClose: () => void;
 }) {
-  const [activeSection, setActiveSection] = useState<"status" | "config">("status");
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
 
   return (
-    <div className="dualith-quota-panel flex min-h-0 flex-1 flex-col">
-      {/* Section toggle */}
-      <div className="flex shrink-0 border-b border-line-hard text-[10px]">
-        {(["status", "config"] as const).map((s) => (
-          <button
-            key={s}
-            type="button"
-            onClick={() => setActiveSection(s)}
-            className={`flex-1 py-1.5 uppercase tracking-widest outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${activeSection === s ? "bg-zinc-900 text-accent" : "text-zinc-600 hover:text-zinc-400"}`}
-          >
-            {s === "status" ? "Status" : "Settings"}
-          </button>
-        ))}
-      </div>
+    <div className="fixed inset-0 z-50 flex items-stretch justify-stretch bg-bg/80 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="Quota & usage">
+      {/* Backdrop click to close */}
+      <button type="button" className="absolute inset-0 w-full h-full border-0 bg-transparent" onClick={onClose} aria-label="Close quota panel" />
 
-      {activeSection === "status" && (
-        <UsageStatusTab usage={usage} quota={quota} providerSlots={providerSlots} onStatusRefresh={onStatusRefresh} />
-      )}
-      {activeSection === "config" && (
-        <div className="flex min-h-0 flex-1 flex-col overflow-auto">
-          <ConfigTab quota={quota} providerSlots={providerSlots} onQuotaSave={onQuotaSave} />
-          {onReconfigure && (
-            <div className="shrink-0 border-t border-line-hard px-3 py-3">
-              <button
-                type="button"
-                onClick={onReconfigure}
-                className="flex w-full items-center gap-2 rounded border border-line-hard px-3 py-2 text-[11px] text-zinc-500 outline-none transition-colors hover:border-zinc-600 hover:text-zinc-300 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                </svg>
-                Reconfigure AI providers…
-              </button>
-            </div>
-          )}
+      {/* Modal sheet — slides up from bottom, fills most of the screen */}
+      <div className="relative z-10 m-auto flex w-full max-w-5xl flex-col rounded-lg border border-line-hard bg-bg shadow-2xl" style={{ height: "min(90vh, 780px)" }}>
+        {/* Header */}
+        <div className="flex shrink-0 items-center justify-between border-b border-line-hard px-5 py-3.5">
+          <div className="flex items-center gap-3">
+            <span className="text-sm font-semibold text-text-strong">Usage & Quota</span>
+            {(usage.active?.length ?? 0) > 0 && (
+              <span className="rounded-full bg-ok/20 px-2 py-0.5 text-[10px] font-semibold text-ok">
+                {usage.active.length} running
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-7 w-7 items-center justify-center rounded text-text-faint outline-none transition-colors hover:bg-surface hover:text-text-strong focus-visible:ring-1 focus-visible:ring-accent/60"
+            aria-label="Close"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
         </div>
-      )}
+
+        {/* Body — two columns */}
+        <div className="grid min-h-0 flex-1 grid-cols-[1fr_360px] overflow-hidden">
+          {/* Left: status + usage history */}
+          <div className="flex min-h-0 flex-col overflow-hidden border-r border-line-hard">
+            <UsageStatusTab usage={usage} quota={quota} providerSlots={providerSlots} onStatusRefresh={onStatusRefresh} />
+          </div>
+
+          {/* Right: settings */}
+          <div className="flex min-h-0 flex-col overflow-auto">
+            <div className="border-b border-line-hard px-4 py-3">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-text-faint">Settings</p>
+            </div>
+            <div className="flex-1 overflow-auto">
+              <ConfigTab quota={quota} providerSlots={providerSlots} onQuotaSave={onQuotaSave} />
+            </div>
+            {onReconfigure && (
+              <div className="shrink-0 border-t border-line-hard px-4 py-3">
+                <button
+                  type="button"
+                  onClick={onReconfigure}
+                  className="flex w-full items-center gap-2 rounded border border-line-hard px-3 py-2 text-xs text-text-faint outline-none transition-colors hover:border-line hover:text-text-strong focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                  Reconfigure AI providers…
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -702,8 +774,6 @@ export function WorkspaceRightPanel({
   entries,
   commits,
   usage,
-  quota,
-  providerSlots,
   appStatus,
   mobileView,
   onSendChat,
@@ -711,9 +781,7 @@ export function WorkspaceRightPanel({
   onHumanAnswer,
   onApprovePlan,
   onDevServerAction,
-  onQuotaSave,
-  onStatusRefresh,
-  onReconfigure,
+  onOpenQuota,
   runnerHealth,
   initialTab,
   onClose,
@@ -723,8 +791,6 @@ export function WorkspaceRightPanel({
   entries: ConsoleEntry[];
   commits: string[];
   usage: UsageSnapshot;
-  quota: QuotaSnapshot;
-  providerSlots: ProviderSlots | null;
   appStatus: AppStatus;
   mobileView: MobileView;
   onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean; routeMode?: RouteMode; teamMode?: TeamMode }) => Promise<void>;
@@ -732,9 +798,7 @@ export function WorkspaceRightPanel({
   onHumanAnswer: (projectName: string, answer: string) => Promise<void>;
   onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
   onDevServerAction: (projectName: string, action: DevServerAction) => Promise<void>;
-  onQuotaSave: (settings: QuotaSettings) => Promise<void>;
-  onStatusRefresh: (force?: boolean) => Promise<StatusRefreshState | void>;
-  onReconfigure?: () => void;
+  onOpenQuota: () => void;
   runnerHealth: RunnerHealth;
   initialTab?: WorkspaceRightTab;
   onClose?: () => void;
@@ -764,7 +828,7 @@ export function WorkspaceRightPanel({
             type="button"
             role="tab"
             aria-selected={tab === item.id}
-            onClick={() => setTab(item.id)}
+            onClick={() => item.id === "quota" ? onOpenQuota() : setTab(item.id)}
             className={tab === item.id ? "is-active" : ""}
           >
             <span>{item.label}</span>
@@ -785,7 +849,6 @@ export function WorkspaceRightPanel({
           </div>
         )}
         {tab === "logs" && <LogTab entries={entries} commits={commits} />}
-        {tab === "quota" && <QuotaPanel usage={usage} quota={quota} providerSlots={providerSlots} onQuotaSave={onQuotaSave} onStatusRefresh={onStatusRefresh} onReconfigure={onReconfigure} />}
         {tab === "preview" && (
           <div className="dualith-right-stack">
             <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive={mobileView === "details"} />

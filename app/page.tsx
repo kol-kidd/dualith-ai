@@ -68,6 +68,7 @@ import {
   MissionControl,
   TeamRoomFull,
   WorkspaceRightPanel,
+  QuotaModal,
   ProjectSwitcher,
   SettingsMenu,
 } from "./components/ui";
@@ -103,6 +104,7 @@ function DualithApp() {
   const [setupChecked, setSetupChecked] = useState(false);
   const [setupToken, setSetupToken] = useState("");
   const [providerSlots, setProviderSlots] = useState<ProviderSlots | null>(null);
+  const [quotaModalOpen, setQuotaModalOpen] = useState(false);
 
   useEffect(() => {
     try {
@@ -703,8 +705,6 @@ function DualithApp() {
             entries={consoleEntries}
             commits={globalCommits}
             usage={usage}
-            quota={quota}
-            providerSlots={providerSlots}
             appStatus={appStatus}
             mobileView={mobileView}
             onSendChat={sendChat}
@@ -712,16 +712,28 @@ function DualithApp() {
             onHumanAnswer={submitHumanAnswer}
             onApprovePlan={approvePlan}
             onDevServerAction={runDevServerAction}
-            onQuotaSave={saveQuota}
-            onStatusRefresh={refreshStatus}
-            onReconfigure={async () => {
-              await fetch(`${apiBase}/api/setup/config`, { method: "DELETE", headers: { "X-Dualith-Token": setupToken } });
-              setWizardOpen(true);
-            }}
+            onOpenQuota={() => setQuotaModalOpen(true)}
             runnerHealth={runnerHealth}
             initialTab="artifacts"
           />
         </div>
+
+        {/* Quota modal — full-screen overlay */}
+        {quotaModalOpen && (
+          <QuotaModal
+            usage={usage}
+            quota={quota}
+            providerSlots={providerSlots}
+            onQuotaSave={saveQuota}
+            onStatusRefresh={refreshStatus}
+            onReconfigure={async () => {
+              await fetch(`${apiBase}/api/setup/config`, { method: "DELETE", headers: { "X-Dualith-Token": setupToken } });
+              setQuotaModalOpen(false);
+              setWizardOpen(true);
+            }}
+            onClose={() => setQuotaModalOpen(false)}
+          />
+        )}
       </div>{/* end dualith-shell-body */}
 
       <ProjectSetupModal
