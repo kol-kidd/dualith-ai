@@ -180,6 +180,44 @@ RUNNER_POLICIES = {
         "label": "Balanced",
         "description": "Pick the runner with the most quota headroom, then pair it with the other runner.",
     },
+    "eco": {
+        "label": "Eco team",
+        "description": "Route heavy reasoning (lead, architect, planner) to the pricier slot and light roles (tester, summarizer, reviewers) to the cheaper one.",
+    },
+}
+
+# Roles that drive output quality and get the premium (pricier) slot under the
+# "eco" policy; everything else (tester, summarizer, reviewers/critics) runs on
+# the cheaper slot. See eco_team_pair() / eco_runner_for_role().
+ECO_HEAVY_ROLES = {"lead", "builder", "team", "architect", "planner", "pm", "decomposer"}
+
+# Approximate per-token prices (USD) for slots without OpenRouter-style live
+# pricing (CLI/subscription slots, and direct OpenAI/Anthropic/Gemini API models).
+# Used ONLY to rank premium vs cheap tiers for the eco policy — never for billing.
+# Keyed by substring matched against the (lowercased) model id, most-specific
+# needles first. Values are prompt+completion summed, order-of-magnitude accurate
+# as of 2026-06. ":free" / 0-price OpenRouter models are handled separately.
+CLI_MODEL_PRICING: dict[str, float] = {
+    # Anthropic (CLI + 'anthropic/claude-…' API slugs)
+    "opus": 30e-6,
+    "sonnet": 18e-6,
+    "haiku": 5e-6,
+    # OpenAI / Codex
+    "codex-mini": 2e-6,
+    "gpt-5.5": 12e-6,
+    "gpt-5.4": 10e-6,
+    "gpt-5": 10e-6,
+    "gpt-4o-mini": 1e-6,
+    "gpt-4o": 8e-6,
+    "o4": 12e-6,
+    "o3": 12e-6,
+    # Google Gemini ('google/gemini-…' slugs)
+    "flash-lite": 0.5e-6,
+    "flash": 2e-6,
+    "gemini": 6e-6,
+    # Generic cheap-tier hints (matched last)
+    "mini": 1e-6,
+    "nano": 0.5e-6,
 }
 QUOTA_INTEGER_SETTINGS = {
     "reserve_percent",
@@ -228,6 +266,7 @@ from .providers import (
     ProviderSlotConfig,
     apply_provider_config,
     delete_provider_config,
+    describe_provider_config,
     load_provider_config,
     provider_config_exists,
     save_provider_config,
@@ -476,7 +515,7 @@ class HumanInputRequest(BaseModel):
 
 
 class QuotaSettingsRequest(BaseModel):
-    runner_policy: Literal["auto", "codex-heavy", "claude-heavy", "balanced"] = "codex-heavy"
+    runner_policy: Literal["auto", "codex-heavy", "claude-heavy", "balanced", "eco"] = "codex-heavy"
     reserve_percent: int = Field(default=10, ge=0, le=90)
     codex_monthly_tokens: int = Field(default=0, ge=0, le=2_000_000_000)
     claude_five_hour_tokens: int = Field(default=0, ge=0, le=2_000_000_000)
@@ -5880,6 +5919,17 @@ def paired_runner(runner: str) -> str:
     return "claude" if runner == "codex" else "codex"
 
 
+def both_over_reserve_message() -> str:
+    """Quota-exhaustion message using the configured provider labels, not the
+    static 'Codex'/'Claude' names (a slot may be OpenRouter, Gemini, etc.)."""
+    a = str(RUNNER_COMMANDS["claude"].get("label") or "Claude")
+    b = str(RUNNER_COMMANDS["codex"].get("label") or "Codex")
+    return (
+        f"Both {a} and {b} are over their configured quota reserve. "
+        "Adjust your quota settings in the System panel or wait for the limit to reset."
+    )
+
+
 def registry_preferred_runner(agent: str) -> str:
     configured = str(AGENT_REGISTRY.get(agent, {}).get("default_runner", "auto"))
     if configured in RUNNER_COMMANDS:
@@ -5922,7 +5972,7 @@ def best_available_runner(quota: dict[str, Any], tie_breaker: str = "codex") -> 
     scores = {runner: runner_headroom_score(runner, quota) for runner in RUNNER_COMMANDS}
     available = [runner for runner, score in scores.items() if score >= 0]
     if not available:
-        raise HTTPException(status_code=429, detail="Both Codex and Claude are over their configured quota reserve. Adjust your quota settings in the System panel or wait for the limit to reset.")
+        raise HTTPException(status_code=429, detail=both_over_reserve_message())
     return sorted(
         available,
         key=lambda runner: (scores[runner], 1 if runner == tie_breaker else 0),
@@ -5939,7 +5989,7 @@ def resolve_preferred_runner(preferred: str, quota: dict[str, Any], reason: str)
         preferred_label = RUNNER_COMMANDS[preferred]["label"]
         log.info("quota fallback: %s over reserve, switching to %s", preferred_label, fallback_label)
         return fallback, f"{reason} → {fallback_label} (quota fallback: {preferred_label} over reserve)"
-    raise HTTPException(status_code=429, detail="Both Codex and Claude are over their configured quota reserve. Adjust your quota settings in the System panel or wait for the limit to reset.")
+    raise HTTPException(status_code=429, detail=both_over_reserve_message())
 
 
 def configured_review_runner(agent: str) -> tuple[str, str]:
@@ -5963,11 +6013,106 @@ def policy_preferred_runner(agent: str, policy: str) -> tuple[str, str]:
     return registry_preferred_runner(agent), "registry default"
 
 
+# ── Eco policy: price-based premium/cheap tiering ─────────────────────────────
+
+# Live per-token prices for the configured slot models, keyed by runner id.
+# Populated by refresh_eco_pricing() (called from apply_provider_config / startup),
+# so the synchronous policy resolvers below never hit the network. None = unknown.
+_eco_slot_price: dict[str, float | None] = {"claude": None, "codex": None}
+
+
+def _static_model_price(model: str) -> float | None:
+    """Approximate per-token price from the static table by substring match.
+
+    Covers CLI models (opus/sonnet/gpt-*) and named API models (e.g.
+    'anthropic/claude-opus-4.8', 'google/gemini-3.5-flash'). Returns None when
+    nothing matches — e.g. an opaque OpenRouter slug with no live price.
+    """
+    lower = model.lower()
+    if ":free" in lower:
+        return 0.0
+    for needle, price in CLI_MODEL_PRICING.items():
+        if needle in lower:
+            return price
+    return None
+
+
+def runner_cost_score(runner: str) -> float | None:
+    """Per-token cost (USD) used to rank premium vs cheap for the eco policy.
+
+    Prefers a live price (OpenRouter), falls back to the static table by model
+    id. None means genuinely unknown — the caller then leans on the mode order.
+    """
+    live = _eco_slot_price.get(runner)
+    if live is not None:
+        return live
+    config = RUNNER_COMMANDS.get(runner, {})
+    model = str(config.get("api_model") or DEFAULT_RUNNER_MODELS.get(runner, "") or "")
+    return _static_model_price(model)
+
+
+def _slot_mode_rank(runner: str) -> int:
+    """Tiebreaker when prices tie or are unknown: subscription CLI > free CLI > API."""
+    config = RUNNER_COMMANDS.get(runner, {})
+    if config.get("use_http"):
+        return 0  # API slot
+    if config.get("mode") == "subscription":
+        return 2  # subscription CLI — treat as premium-ish
+    return 1      # free/unknown CLI
+
+
+def eco_premium_runner() -> tuple[str, str]:
+    """Return (premium_runner, cheap_runner) for the eco policy.
+
+    Price-first: the pricier slot is premium. Ties / both-unknown fall back to
+    mode order. Equal on every axis defaults to claude=premium, codex=cheap.
+    """
+    a_cost, b_cost = runner_cost_score("claude"), runner_cost_score("codex")
+    if a_cost is not None and b_cost is not None and a_cost != b_cost:
+        return ("claude", "codex") if a_cost > b_cost else ("codex", "claude")
+    a_rank, b_rank = _slot_mode_rank("claude"), _slot_mode_rank("codex")
+    if a_rank != b_rank:
+        return ("claude", "codex") if a_rank > b_rank else ("codex", "claude")
+    return "claude", "codex"
+
+
+def eco_runner_for_role(role: str) -> tuple[str, str]:
+    """Premium slot for heavy roles, cheap slot for light roles (eco policy)."""
+    premium, cheap = eco_premium_runner()
+    if role in ECO_HEAVY_ROLES:
+        return premium, f"eco policy (heavy → {RUNNER_COMMANDS[premium]['label']})"
+    return cheap, f"eco policy (light → {RUNNER_COMMANDS[cheap]['label']})"
+
+
+async def refresh_eco_pricing() -> None:
+    """Refresh the cached live prices for both slots. Best-effort, never raises."""
+    from .providers import fetch_model_price, ProviderSlotConfig as _Slot
+    for runner_id in ("claude", "codex"):
+        config = RUNNER_COMMANDS.get(runner_id, {})
+        if not config.get("use_http"):
+            _eco_slot_price[runner_id] = None
+            continue
+        try:
+            slot = _Slot(
+                provider=config.get("provider") or "openai",
+                mode="api_key",
+                api_key=config.get("api_key"),
+                model=config.get("api_model"),
+                base_url=config.get("api_base"),
+            )
+            _eco_slot_price[runner_id] = await fetch_model_price(slot)
+        except Exception:
+            _eco_slot_price[runner_id] = None
+
+
 def preferred_runner_for_agent(agent: str, quota: dict[str, Any]) -> tuple[str, str]:
     policy = runner_policy_from_settings(quota.get("settings", {}))
     default_runner = registry_preferred_runner(agent)
     if policy == "balanced":
         return best_available_runner(quota, default_runner), "balanced policy"
+    if policy == "eco":
+        preferred, reason = eco_runner_for_role(agent)
+        return resolve_preferred_runner(preferred, quota, reason)
     preferred, reason = policy_preferred_runner(agent, policy)
     return resolve_preferred_runner(preferred, quota, reason)
 
@@ -5976,6 +6121,12 @@ def team_pair_for_policy(policy: str, quota: dict[str, Any]) -> tuple[str, str, 
     if policy == "balanced":
         lead = best_available_runner(quota, "codex")
         return lead, paired_runner(lead), "balanced policy"
+
+    if policy == "eco":
+        premium, cheap = eco_premium_runner()
+        lead, route_reason = resolve_preferred_runner(premium, quota, f"eco policy (lead → {RUNNER_COMMANDS[premium]['label']})")
+        teammate, teammate_reason = resolve_preferred_runner(cheap, quota, f"eco policy (review → {RUNNER_COMMANDS[cheap]['label']})")
+        return lead, teammate, f"{route_reason}; {teammate_reason}"
 
     lead = "claude" if policy == "claude-heavy" else "codex"
     reason = "registry default" if policy == "auto" else f"{policy} policy"
@@ -6019,6 +6170,10 @@ def team_runner_mode(runner_pref: str, lead: str, teammate: str) -> str:
 def role_runner_for_pref(runner_pref: str, role: str) -> str:
     if is_manual_runner_pref(runner_pref):
         return runner_pref
+    # Eco policy tiers every role by price before the legacy role→runner map.
+    if runner_policy_from_settings(quota_snapshot().get("settings", {})) == "eco":
+        runner, _ = eco_runner_for_role(role)
+        return runner
     if role in {"architect", "planner", "pm", "tester", "summarizer"}:
         return "claude"
     if role in REVIEW_AGENTS:
@@ -6059,11 +6214,33 @@ def resolve_round_runner(assigned: str, partner: str) -> tuple[str, bool]:
     )
 
 
+def runner_api_model(runner: str) -> str | None:
+    """For an HTTP/API-key slot, the configured api_model is the only valid model.
+
+    Returns the slot's configured model when the runner is in API-key mode (e.g.
+    OpenRouter/Gemini, or Claude/OpenAI via key), else None so callers fall back
+    to the CLI model whitelist. The slot's provider-native model id (e.g.
+    'nvidia/nemotron-…') would otherwise be rejected by runner_accepts_model and
+    silently replaced with the wrong default ('gpt-5.5'/'sonnet').
+    """
+    config = RUNNER_COMMANDS.get(runner, {})
+    if config.get("use_http"):
+        return str(config.get("api_model") or "") or None
+    return None
+
+
 def runner_default_model(runner: str) -> str:
+    api_model = runner_api_model(runner)
+    if api_model:
+        return api_model
     return DEFAULT_RUNNER_MODELS.get(runner, DEFAULT_RUNNER_MODELS["codex"])
 
 
 def runner_accepts_model(runner: str, model: str) -> bool:
+    # API-key slots accept exactly their configured model; any other id is wrong.
+    api_model = runner_api_model(runner)
+    if api_model is not None:
+        return model == api_model
     lower = model.lower()
     if runner == "codex":
         return lower.startswith(("gpt-", "o"))
@@ -6073,6 +6250,10 @@ def runner_accepts_model(runner: str, model: str) -> bool:
 
 
 def resolve_runner_model(runner: str, requested_model: str) -> str:
+    # An API-key slot has one valid model — never let a stale request override it.
+    api_model = runner_api_model(runner)
+    if api_model:
+        return api_model
     requested = clean_model(requested_model)
     if requested and runner_accepts_model(runner, requested):
         return requested
@@ -6091,6 +6272,11 @@ def resolve_team_step_model(role: str, assigned_runner: str, executing_runner: s
     """Resolve a Team step model without leaking one runner's model to another."""
     if executing_runner not in RUNNER_COMMANDS:
         executing_runner = "codex"
+    # API-key slots have exactly one valid model — the cheap/fast CLI model ids
+    # (codex-mini-latest / claude-haiku) don't exist on e.g. OpenRouter/Gemini.
+    api_model = runner_api_model(executing_runner)
+    if api_model:
+        return api_model
     # Use a cheap/fast model for roles that don't require deep reasoning.
     cheap = _CHEAP_MODEL_ROLES.get(role, {}).get(executing_runner)
     if cheap:
@@ -7935,6 +8121,7 @@ async def startup() -> None:
     _provider_cfg = load_provider_config()
     if _provider_cfg:
         apply_provider_config(_provider_cfg)
+        await refresh_eco_pricing()
         log.info("Provider config loaded: runner_a=%s/%s runner_b=%s/%s",
                  _provider_cfg.runner_a.provider, _provider_cfg.runner_a.mode,
                  _provider_cfg.runner_b.provider, _provider_cfg.runner_b.mode)
@@ -7977,7 +8164,11 @@ async def health() -> dict[str, Any]:
 async def setup_status() -> dict[str, Any]:
     # Token is safe to expose here: cross-origin pages are blocked from reading
     # this response by the CORS policy (only allowed origins get the body).
-    return {"configured": provider_config_exists(), "token": _SETUP_TOKEN}
+    return {
+        "configured": provider_config_exists(),
+        "token": _SETUP_TOKEN,
+        "slots": describe_provider_config(),
+    }
 
 
 class SetupTestRequest(BaseModel):
@@ -8008,6 +8199,7 @@ async def setup_save(request: SetupSaveRequest) -> dict[str, Any]:
     )
     save_provider_config(config)
     apply_provider_config(config)
+    await refresh_eco_pricing()
     log.info("Provider config saved and applied: runner_a=%s/%s runner_b=%s/%s",
              config.runner_a.provider, config.runner_a.mode,
              config.runner_b.provider, config.runner_b.mode)

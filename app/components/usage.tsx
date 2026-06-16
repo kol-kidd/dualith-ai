@@ -28,6 +28,7 @@ import type {
   RunnerHealth,
   AppStatus,
   MobileView,
+  ProviderSlots,
 } from "../_types";
 import {
   runnerPolicies,
@@ -150,33 +151,40 @@ function LimitAwareUsagePeriodBar({ label, period }: { label: string; period: Qu
   );
 }
 
-function RunnerStatusCard({ label, entry, runner, quotaPeriods, className }: {
-  label: string;
+function RunnerStatusCard({ entry, runner, quotaPeriods, providerSlot, className }: {
   entry: RunnerStatusEntry;
   runner: "codex" | "claude";
   quotaPeriods: { label: string; key: string; period: QuotaPeriod }[];
+  providerSlot?: ProviderSlots[string];
   className?: string;
 }) {
+  const isApiSlot = providerSlot?.mode === "api_key";
+  const label = providerSlot?.label ?? (runner === "codex" ? "Codex" : "Claude");
   const periods = runner === "codex"
     ? [{ label: "Monthly", key: "monthly" }]
     : [{ label: "5-Hour", key: "five_hour" }, { label: "Weekly", key: "weekly" }];
 
-  const hasData = periods.some(({ key }) => {
+  const hasData = !isApiSlot && periods.some(({ key }) => {
     const p = entry.parsed[key];
     return p && p.used > 0;
   });
-  const hasUnknownLimit = quotaPeriods.some((quotaPeriod) => !quotaLimitKnown(quotaPeriod.period));
+  const hasUnknownLimit = !isApiSlot && quotaPeriods.some((qp) => !quotaLimitKnown(qp.period));
 
   const isError = entry.status === "error" || entry.status === "timeout";
-  const dot = isError ? "bg-danger" : hasUnknownLimit ? "bg-warn" : hasData ? "bg-ok" : entry.status === "ok" ? "bg-warn" : "bg-zinc-700";
+  const dot = isError ? "bg-danger" : isApiSlot ? (entry.status === "ok" ? "bg-ok" : "bg-zinc-700") : hasUnknownLimit ? "bg-warn" : hasData ? "bg-ok" : entry.status === "ok" ? "bg-warn" : "bg-zinc-700";
 
   return (
     <div className={`min-w-0 space-y-2 px-3 py-2.5 ${className ?? ""}`}>
       <div className="flex items-center justify-between gap-1">
-        <span className="flex min-w-0 items-center gap-2 text-[10px] font-semibold uppercase tracking-widest text-zinc-400">
+        <div className="flex min-w-0 items-center gap-2">
           <RunnerMascot runner={runner} size={16} />
-          <span className="truncate">{label}</span>
-        </span>
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-400 truncate">{label}</span>
+          {providerSlot && (
+            <span className={`shrink-0 rounded px-1 py-px text-[9px] uppercase tracking-wide ${isApiSlot ? "bg-zinc-800 text-zinc-500" : "bg-zinc-800 text-zinc-500"}`}>
+              {isApiSlot ? "api key" : "subscription"}
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-1.5">
           <div className={`h-1.5 w-1.5 rounded-full ${dot}`} />
           <span className="text-[10px] text-zinc-600">{entry.checked_at ? timestampLabel(entry.checked_at) : "—"}</span>
@@ -184,24 +192,23 @@ function RunnerStatusCard({ label, entry, runner, quotaPeriods, className }: {
       </div>
       {isError ? (
         <p className="truncate text-[10px] text-danger">{entry.error || runnerStatusLabel(entry)}</p>
+      ) : isApiSlot ? (
+        <div className="space-y-1">
+          {providerSlot.model && (
+            <p className="truncate text-[10px] text-zinc-500">{providerSlot.model}</p>
+          )}
+          <p className="text-[10px] text-zinc-600">
+            {entry.status === "ok" ? "Connected · quota tracked by provider" : runnerStatusLabel(entry)}
+          </p>
+        </div>
       ) : hasData ? (
         <div className="space-y-1.5">
           {periods.map(({ label: pLabel, key }) => {
             const p = entry.parsed[key];
             if (!p) return null;
             const qp = quotaPeriods.find((q) => q.key === key);
-            if (qp) {
-              return <LimitAwareUsagePeriodBar key={key} label={pLabel} period={qp.period} />;
-            }
-            return (
-              <UsagePeriodBar
-                key={key}
-                label={pLabel}
-                used={p.used}
-                limit={0}
-                resets={p.resets}
-              />
-            );
+            if (qp) return <LimitAwareUsagePeriodBar key={key} label={pLabel} period={qp.period} />;
+            return <UsagePeriodBar key={key} label={pLabel} used={p.used} limit={0} resets={p.resets} />;
           })}
         </div>
       ) : (
@@ -216,17 +223,20 @@ function QuotaInput({
   value,
   onChange,
   max,
+  disabled,
 }: {
   label: string;
   value: number;
   onChange: (value: number) => void;
   max?: number;
+  disabled?: boolean;
 }) {
   return (
-    <label className="min-w-0 border-r border-line-hard px-3 py-1.5 last:border-r-0">
+    <label className={`min-w-0 border-r border-line-hard px-3 py-1.5 last:border-r-0 ${disabled ? "opacity-40" : ""}`}>
       <span className="block truncate text-[10px] uppercase tracking-widest text-zinc-700">{label}</span>
       <input
         type="number"
+        disabled={disabled}
         min={0}
         max={max ?? 2_000_000_000}
         value={value}
@@ -239,9 +249,11 @@ function QuotaInput({
 
 function QuotaEditor({
   quota,
+  providerSlots,
   onQuotaSave,
 }: {
   quota: QuotaSnapshot;
+  providerSlots: ProviderSlots | null;
   onQuotaSave: (settings: QuotaSettings) => Promise<void>;
 }) {
   const [settings, setSettings] = useState<QuotaSettings>(() => normalizeQuotaSettings(quota.settings));
@@ -251,6 +263,11 @@ function QuotaEditor({
   useEffect(() => {
     setSettings(normalizeQuotaSettings(quota.settings));
   }, [quota.settings]);
+
+  const codexIsApi = providerSlots?.codex?.mode === "api_key";
+  const claudeIsApi = providerSlots?.claude?.mode === "api_key";
+  const codexLabel = providerSlots?.codex?.label ?? "Codex";
+  const claudeLabel = providerSlots?.claude?.label ?? "Claude";
 
   const updateSetting = (key: Exclude<keyof QuotaSettings, "runner_policy">, value: number) => {
     setSettings((current) => ({ ...current, [key]: value }));
@@ -291,25 +308,29 @@ function QuotaEditor({
             ))}
           </select>
         </label>
-        <div className="mt-1 truncate text-[10px] text-zinc-600">
+        <div className="mt-1 text-[10px] text-zinc-600">
           {runnerPolicyDescriptions[settings.runner_policy]}
         </div>
+        {settings.runner_policy === "eco" && <EcoTierHint providerSlots={providerSlots} />}
       </div>
       <div className="grid grid-cols-2 border-b border-line-hard">
         <QuotaInput
-          label="Codex cap"
+          label={codexIsApi ? `${codexLabel} cap (N/A)` : `${codexLabel} monthly`}
           value={settings.codex_monthly_tokens}
           onChange={(value) => updateSetting("codex_monthly_tokens", value)}
+          disabled={codexIsApi}
         />
         <QuotaInput
-          label="Claude 5h cap"
+          label={claudeIsApi ? `${claudeLabel} 5h (N/A)` : `${claudeLabel} 5h cap`}
           value={settings.claude_five_hour_tokens}
           onChange={(value) => updateSetting("claude_five_hour_tokens", value)}
+          disabled={claudeIsApi}
         />
         <QuotaInput
-          label="Claude week cap"
+          label={claudeIsApi ? `${claudeLabel} week (N/A)` : `${claudeLabel} weekly`}
           value={settings.claude_weekly_tokens}
           onChange={(value) => updateSetting("claude_weekly_tokens", value)}
+          disabled={claudeIsApi}
         />
         <QuotaInput
           label="Reserve %"
@@ -337,10 +358,11 @@ function QuotaEditor({
 // ── Right panel: tabbed Status / Config / Log ─────────────────────────────
 
 function UsageStatusTab({
-  usage, quota, onStatusRefresh,
+  usage, quota, providerSlots, onStatusRefresh,
 }: {
   usage: UsageSnapshot;
   quota: QuotaSnapshot;
+  providerSlots: ProviderSlots | null;
   onStatusRefresh: (force?: boolean) => Promise<StatusRefreshState | void>;
 }) {
   const active = usage.active ?? [];
@@ -405,8 +427,8 @@ function UsageStatusTab({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
       <div className="grid grid-cols-1 border-b border-line-hard">
-        <RunnerStatusCard className="border-b border-line-hard" label="Codex" entry={quota.status.codex} runner="codex" quotaPeriods={codexPeriods} />
-        <RunnerStatusCard label="Claude" entry={quota.status.claude} runner="claude" quotaPeriods={claudePeriods} />
+        <RunnerStatusCard className="border-b border-line-hard" entry={quota.status.codex} runner="codex" quotaPeriods={codexPeriods} providerSlot={providerSlots?.codex} />
+        <RunnerStatusCard entry={quota.status.claude} runner="claude" quotaPeriods={claudePeriods} providerSlot={providerSlots?.claude} />
       </div>
 
       <div className="border-b border-line-hard px-3 py-2.5">
@@ -434,7 +456,7 @@ function UsageStatusTab({
                 <span className={`text-[10px] uppercase ${usageStatusTone(run.status)}`}>{run.status}</span>
                 <span className="flex min-w-0 items-center gap-1.5 truncate text-[10px] text-zinc-500">
                   <RunnerMascot runner={run.runner} size={14} />
-                  <span className="truncate">{run.project} / {modeLabels[run.mode]} / {run.model || "default"}</span>
+                  <span className="truncate">{run.project} / {modeLabels[run.mode]} / {providerSlots?.[run.runner]?.label ?? runnerLabels[run.runner] ?? run.runner} / {run.model || "default"}</span>
                 </span>
                 <span className="shrink-0 tabular-nums text-[10px] text-zinc-600">{activeDurationLabel(run, nowTick)} / {usageRunTokenLabel(run)}</span>
               </div>
@@ -454,7 +476,7 @@ function UsageStatusTab({
               <span className="shrink-0 text-[10px] uppercase text-zinc-600">{item.runs}x</span>
               <span className="flex min-w-0 items-center gap-1.5 truncate text-[10px] text-zinc-500">
                 <RunnerMascot runner={item.runner} size={14} />
-                <span className="truncate">{runnerLabels[item.runner] ?? item.runner} / {item.model}</span>
+                <span className="truncate">{providerSlots?.[item.runner]?.label ?? runnerLabels[item.runner] ?? item.runner} / {item.model}</span>
               </span>
               <span className="shrink-0 tabular-nums text-[10px] text-zinc-600">{usageTokenLabel(item)}</span>
             </div>
@@ -486,36 +508,96 @@ function UsageStatusTab({
   );
 }
 
+function EcoTierHint({ providerSlots }: { providerSlots: ProviderSlots | null }) {
+  if (!providerSlots) return null;
+  // Mirror the backend eco_premium_runner() logic: API slot with :free model or
+  // subscription slot — derive which is heavy vs light from the mode/label.
+  // We can't run the exact scoring here, so show the slots with their role tags
+  // and a note that the backend decides based on per-token price.
+  const claudeSlot = providerSlots.claude;
+  const codexSlot = providerSlots.codex;
+  if (!claudeSlot || !codexSlot) return null;
+  const slots = [
+    { runner: "claude" as const, slot: claudeSlot },
+    { runner: "codex" as const, slot: codexSlot },
+  ];
+  return (
+    <div className="mt-2 space-y-1 rounded border border-line-hard bg-zinc-900/60 px-2.5 py-2">
+      <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1.5">Tier assignment</div>
+      {slots.map(({ runner, slot }) => (
+        <div key={runner} className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <RunnerMascot runner={runner} size={12} />
+            <span className="truncate text-[10px] text-zinc-400">{slot.label}</span>
+            {slot.model && <span className="truncate text-[10px] text-zinc-600">{slot.model}</span>}
+          </div>
+          <span className="shrink-0 text-[10px] text-zinc-600">
+            {slot.mode === "api_key" && slot.model?.includes(":free") ? "light" : slot.mode === "subscription" ? "heavy" : "ranked by price"}
+          </span>
+        </div>
+      ))}
+      <p className="mt-1 text-[10px] leading-4 text-zinc-700">Backend ranks tiers by per-token price at startup. Heavy → lead, architect, planner. Light → tester, summarizer, reviewers.</p>
+    </div>
+  );
+}
+
 function ConfigTab({
-  quota, onQuotaSave,
+  quota, providerSlots, onQuotaSave,
 }: {
   quota: QuotaSnapshot;
+  providerSlots: ProviderSlots | null;
   onQuotaSave: (settings: QuotaSettings) => Promise<void>;
 }) {
   const runnerPolicy = normalizeRunnerPolicy(quota.settings.runner_policy);
-  const quotaPeriods = [quota.codex.monthly, quota.claude.five_hour, quota.claude.weekly];
-  const unknownLimits = quotaPeriods.filter((period) => !quotaLimitKnown(period)).length;
+
+  // For API slots, the CLI token quota windows (monthly/5h/weekly) are irrelevant
+  // — quota is enforced by the provider. Only show bars for subscription/CLI slots.
+  const codexIsApi = providerSlots?.codex?.mode === "api_key";
+  const claudeIsApi = providerSlots?.claude?.mode === "api_key";
+  const codexLabel = providerSlots?.codex?.label ?? "Codex";
+  const claudeLabel = providerSlots?.claude?.label ?? "Claude";
+
+  const activePeriods = [
+    ...(!codexIsApi ? [quota.codex.monthly] : []),
+    ...(!claudeIsApi ? [quota.claude.five_hour, quota.claude.weekly] : []),
+  ];
+  const unknownLimits = activePeriods.filter((p) => !quotaLimitKnown(p)).length;
+  const allApi = codexIsApi && claudeIsApi;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
-      {/* Quota guard progress lines */}
       <div className="border-b border-line-hard px-3 py-2.5">
         <div className="mb-1.5 flex items-baseline justify-between gap-2 text-[10px]">
           <span className="uppercase tracking-widest text-zinc-600">Token limits</span>
-          <span className={`truncate ${unknownLimits ? "text-warn" : "text-ok"}`}>{unknownLimits ? `${unknownLimits} limits unknown` : "limits active"}</span>
+          {allApi
+            ? <span className="truncate text-zinc-500">api key slots</span>
+            : <span className={`truncate ${unknownLimits ? "text-warn" : "text-ok"}`}>{unknownLimits ? `${unknownLimits} limits unknown` : "limits active"}</span>
+          }
         </div>
-        <div className={`mb-2 text-[10px] leading-4 ${unknownLimits ? "text-warn" : "text-zinc-600"}`}>
-          {unknownLimits
-            ? "Codex /status and Claude /usage can show usage, but no provider cap was exposed here. Add fallback caps below for remaining budget and reserve warnings."
-            : `${runnerPolicyLabels[runnerPolicy]} guard is using configured caps and ${quota.settings.reserve_percent}% reserve.`}
-        </div>
-        <div className="space-y-2">
-          <QuotaLine label="Codex monthly" period={quota.codex.monthly} />
-          <QuotaLine label="Claude 5-hour" period={quota.claude.five_hour} />
-          <QuotaLine label="Claude weekly" period={quota.claude.weekly} />
-        </div>
+        {allApi ? (
+          <p className="text-[10px] leading-4 text-zinc-600">Both slots use API keys — token budgets are managed by the provider. The caps below are ignored; only the reserve % applies.</p>
+        ) : (
+          <>
+            <div className={`mb-2 text-[10px] leading-4 ${unknownLimits ? "text-warn" : "text-zinc-600"}`}>
+              {unknownLimits
+                ? "No provider cap was exposed. Add fallback caps below for remaining budget and reserve warnings."
+                : `${runnerPolicyLabels[runnerPolicy]} guard is using configured caps and ${quota.settings.reserve_percent}% reserve.`}
+            </div>
+            <div className="space-y-2">
+              {!codexIsApi && <QuotaLine label={`${codexLabel} monthly`} period={quota.codex.monthly} />}
+              {!claudeIsApi && <QuotaLine label={`${claudeLabel} 5-hour`} period={quota.claude.five_hour} />}
+              {!claudeIsApi && <QuotaLine label={`${claudeLabel} weekly`} period={quota.claude.weekly} />}
+              {codexIsApi && (
+                <p className="text-[10px] text-zinc-600">{codexLabel} uses an API key — no token window to track here.</p>
+              )}
+              {claudeIsApi && !allApi && (
+                <p className="text-[10px] text-zinc-600">{claudeLabel} uses an API key — no token window to track here.</p>
+              )}
+            </div>
+          </>
+        )}
       </div>
-      <QuotaEditor quota={quota} onQuotaSave={onQuotaSave} />
+      <QuotaEditor quota={quota} providerSlots={providerSlots} onQuotaSave={onQuotaSave} />
     </div>
   );
 }
@@ -557,38 +639,57 @@ type WorkspaceRightTab = "artifacts" | "logs" | "quota" | "preview";
 function QuotaPanel({
   usage,
   quota,
+  providerSlots,
   onQuotaSave,
   onStatusRefresh,
   onReconfigure,
 }: {
   usage: UsageSnapshot;
   quota: QuotaSnapshot;
+  providerSlots: ProviderSlots | null;
   onQuotaSave: (settings: QuotaSettings) => Promise<void>;
   onStatusRefresh: (force?: boolean) => Promise<StatusRefreshState | void>;
   onReconfigure?: () => void;
 }) {
+  const [activeSection, setActiveSection] = useState<"status" | "config">("status");
+
   return (
-    <div className="dualith-quota-panel">
-      <UsageStatusTab usage={usage} quota={quota} onStatusRefresh={onStatusRefresh} />
-      <ConfigTab quota={quota} onQuotaSave={onQuotaSave} />
-      {onReconfigure && (
-        <div style={{ padding: "12px 16px", borderTop: "1px solid var(--dualith-line)" }}>
+    <div className="dualith-quota-panel flex min-h-0 flex-1 flex-col">
+      {/* Section toggle */}
+      <div className="flex shrink-0 border-b border-line-hard text-[10px]">
+        {(["status", "config"] as const).map((s) => (
           <button
-            onClick={onReconfigure}
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              borderRadius: 7,
-              border: "1.5px solid var(--dualith-line)",
-              background: "transparent",
-              color: "var(--dualith-text-muted)",
-              fontSize: 12,
-              cursor: "pointer",
-              textAlign: "left",
-            }}
+            key={s}
+            type="button"
+            onClick={() => setActiveSection(s)}
+            className={`flex-1 py-1.5 uppercase tracking-widest outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${activeSection === s ? "bg-zinc-900 text-accent" : "text-zinc-600 hover:text-zinc-400"}`}
           >
-            ⚙ Reconfigure AI providers…
+            {s === "status" ? "Status" : "Settings"}
           </button>
+        ))}
+      </div>
+
+      {activeSection === "status" && (
+        <UsageStatusTab usage={usage} quota={quota} providerSlots={providerSlots} onStatusRefresh={onStatusRefresh} />
+      )}
+      {activeSection === "config" && (
+        <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+          <ConfigTab quota={quota} providerSlots={providerSlots} onQuotaSave={onQuotaSave} />
+          {onReconfigure && (
+            <div className="shrink-0 border-t border-line-hard px-3 py-3">
+              <button
+                type="button"
+                onClick={onReconfigure}
+                className="flex w-full items-center gap-2 rounded border border-line-hard px-3 py-2 text-[11px] text-zinc-500 outline-none transition-colors hover:border-zinc-600 hover:text-zinc-300 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </svg>
+                Reconfigure AI providers…
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -602,6 +703,7 @@ export function WorkspaceRightPanel({
   commits,
   usage,
   quota,
+  providerSlots,
   appStatus,
   mobileView,
   onSendChat,
@@ -622,6 +724,7 @@ export function WorkspaceRightPanel({
   commits: string[];
   usage: UsageSnapshot;
   quota: QuotaSnapshot;
+  providerSlots: ProviderSlots | null;
   appStatus: AppStatus;
   mobileView: MobileView;
   onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean; routeMode?: RouteMode; teamMode?: TeamMode }) => Promise<void>;
@@ -682,7 +785,7 @@ export function WorkspaceRightPanel({
           </div>
         )}
         {tab === "logs" && <LogTab entries={entries} commits={commits} />}
-        {tab === "quota" && <QuotaPanel usage={usage} quota={quota} onQuotaSave={onQuotaSave} onStatusRefresh={onStatusRefresh} onReconfigure={onReconfigure} />}
+        {tab === "quota" && <QuotaPanel usage={usage} quota={quota} providerSlots={providerSlots} onQuotaSave={onQuotaSave} onStatusRefresh={onStatusRefresh} onReconfigure={onReconfigure} />}
         {tab === "preview" && (
           <div className="dualith-right-stack">
             <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive={mobileView === "details"} />

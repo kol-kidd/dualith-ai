@@ -26,6 +26,7 @@ import type {
   ConsoleEntry,
   AgentResult,
   RunnerHealth,
+  ProviderSlots,
   ChatMessage,
   TeamMessageRole,
   TeamMessage,
@@ -589,7 +590,7 @@ function DispatchReceipt({ message, onOpenTeam }: { message: ChatMessage; onOpen
 }
 
 export function ChatComposer({
-  project, runSettings, onRunSettingsChange, onSendChat, onStopChat, runnerHealth, activeTab, onTabChange, onClearChat, fillPrompt,
+  project, runSettings, onRunSettingsChange, onSendChat, onStopChat, runnerHealth, providerSlots, activeTab, onTabChange, onClearChat, fillPrompt,
 }: {
   project: ProjectRecord | null;
   runSettings: ChatRunSettings;
@@ -597,6 +598,7 @@ export function ChatComposer({
   onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean; routeMode?: RouteMode; teamMode?: TeamMode }) => Promise<void>;
   onStopChat: (projectName: string) => Promise<void>;
   runnerHealth: RunnerHealth;
+  providerSlots: ProviderSlots | null;
   activeTab: "chat" | "team";
   onTabChange: (tab: "chat" | "team") => void;
   onClearChat?: (projectName: string) => Promise<void>;
@@ -606,6 +608,50 @@ export function ChatComposer({
   const modelChoice = runSettings.model;
   const reasoning = runSettings.reasoning;
   const teamMode = runSettings.teamMode;
+
+  // Run-mode picker labels/models follow the providers the user actually
+  // configured in setup (provider-config.json), not the static codex/claude
+  // names — the runner ids stay internal slot keys (see apply_provider_config).
+  const slotLabel = useCallback((id: RunnerId): string => {
+    if (id === "auto") return "Auto team";
+    const provider = providerSlots?.[id]?.label;
+    return provider ? `${provider} only` : runnerChoiceLabels[id];
+  }, [providerSlots]);
+
+  const slotTitle = useCallback((id: RunnerId): string => {
+    if (id === "auto") {
+      const a = providerSlots?.claude?.label;
+      const b = providerSlots?.codex?.label;
+      return a && b
+        ? `Auto team: ${a} and ${b} work together based on policy and quota.`
+        : runnerChoiceTitles.auto;
+    }
+    const slot = providerSlots?.[id];
+    return slot ? `${slot.label} only (${slot.mode === "api_key" ? "API key" : "subscription"}): every role uses ${slot.label}.` : runnerChoiceTitles[id];
+  }, [providerSlots]);
+
+  // Model dropdown for the active slot: prefer the model configured in setup,
+  // fall back to the static catalog (subscription/CLI slots that take a model arg).
+  const modelOptions = useMemo((): { value: string; label: string }[] => {
+    if (runner === "auto") return modelChoices.auto;
+    const slot = providerSlots?.[runner];
+    if (slot?.mode === "api_key" && slot.model) {
+      // API slots run exactly the configured model — no other choice is valid.
+      return [{ value: slot.model, label: slot.model }];
+    }
+    return modelChoices[runner];
+  }, [runner, providerSlots]);
+
+  // Reconcile a persisted/stale model against the active API slot once the
+  // provider config loads: an API slot has exactly one valid model.
+  useEffect(() => {
+    if (runner === "auto") return;
+    const slot = providerSlots?.[runner];
+    if (slot?.mode === "api_key" && slot.model && modelChoice !== slot.model) {
+      onRunSettingsChange({ ...runSettings, model: slot.model });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runner, providerSlots]);
   const [runPrompt, setRunPrompt] = useState("");
   const [pendingAction, setPendingAction] = useState<"start" | "stop" | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
@@ -705,9 +751,13 @@ export function ChatComposer({
   };
 
   const updateRunner = (nextRunner: RunnerId) => {
+    // For an API-key slot, the configured model is the only valid one — snap to
+    // it instead of the static default so we never send a stale GPT/Sonnet id.
+    const slot = nextRunner !== "auto" ? providerSlots?.[nextRunner] : null;
+    const model = slot?.mode === "api_key" && slot.model ? slot.model : defaultModelByRunner[nextRunner];
     onRunSettingsChange({
       runner: nextRunner,
-      model: defaultModelByRunner[nextRunner],
+      model,
       reasoning: defaultReasoningByRunner[nextRunner],
       teamMode: runSettings.teamMode,
     });
@@ -908,13 +958,13 @@ export function ChatComposer({
               </button>
               <span className="dualith-runner-chip inline-flex min-w-0 items-center gap-1.5 rounded-full border border-line bg-bg px-2.5 py-1 text-[11px] font-medium text-accent">
                 <RunnerMascot runner={runner} size={14} />
-                <span className="dualith-runner-chip__label">{runnerChoiceLabels[runner]}</span>
+                <span className="dualith-runner-chip__label">{slotLabel(runner)}</span>
               </span>
               <button
                 type="button"
                 onClick={() => setSettingsOpen((v) => !v)}
                 className={`${chip(settingsOpen)} dualith-composer-settings-toggle inline-flex items-center gap-1`}
-                title={`Run settings - ${runnerChoiceLabels[runner]}${runner === "auto" ? "" : ` / ${modelChoice || "default"}`}`}
+                title={`Run settings - ${slotLabel(runner)}${runner === "auto" ? "" : ` / ${modelChoice || "default"}`}`}
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <circle cx="12" cy="12" r="3" />
@@ -991,12 +1041,12 @@ export function ChatComposer({
                     const health = option.id !== "auto" ? runnerHealth[option.id] : null;
                     const suffix = health && !health.ready ? " (off)" : "";
                     return (
-                      <option key={option.id} value={option.id} title={runnerChoiceTitles[option.id]}>{option.label}{suffix}</option>
+                      <option key={option.id} value={option.id} title={slotTitle(option.id)}>{slotLabel(option.id)}{suffix}</option>
                     );
                   })}
                 </select>
                 <select value={modelChoice} disabled={isRunning || runner === "auto"} onChange={(event) => updateModel(event.target.value)} className={formClass}>
-                  {modelChoices[runner].map((option) => (
+                  {modelOptions.map((option) => (
                     <option key={`${runner}-${option.value}`} value={option.value}>{option.label}</option>
                   ))}
                 </select>

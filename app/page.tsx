@@ -24,6 +24,7 @@ import type {
   QuotaSettings,
   QuotaSnapshot,
   RunnerHealth,
+  ProviderSlots,
   AppStatus,
   SnapshotPayload,
   SetupMode,
@@ -101,6 +102,7 @@ function DualithApp() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [setupChecked, setSetupChecked] = useState(false);
   const [setupToken, setSetupToken] = useState("");
+  const [providerSlots, setProviderSlots] = useState<ProviderSlots | null>(null);
 
   useEffect(() => {
     try {
@@ -155,18 +157,22 @@ function DualithApp() {
   }, [applySnapshot]);
 
   // First-run gate: check if provider config exists before loading the app.
-  // Also captures the per-session CSRF token used to authenticate mutating setup calls.
+  // Also captures the per-session CSRF token used to authenticate mutating setup calls
+  // and the per-slot provider summary used to label the run-settings picker.
+  const refreshSetupStatus = useCallback(async () => {
+    const res = await fetch(`${apiBase}/api/setup/status`, { cache: "no-store" });
+    const d = await res.json();
+    if (d.token) setSetupToken(d.token);
+    setProviderSlots((d.slots as ProviderSlots) ?? null);
+    return Boolean(d.configured);
+  }, []);
+
   useEffect(() => {
-    fetch(`${apiBase}/api/setup/status`, { cache: "no-store" })
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.token) setSetupToken(d.token);
-        if (!d.configured) setWizardOpen(true);
-      })
+    refreshSetupStatus()
+      .then((configured) => { if (!configured) setWizardOpen(true); })
       .catch(() => { /* backend not ready — let the normal load error surface */ })
       .finally(() => setSetupChecked(true));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshSetupStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -538,7 +544,7 @@ function DualithApp() {
   const [composerFill, setComposerFill] = useState("");
 
   if (!setupChecked || wizardOpen) {
-    return <SetupWizard token={setupToken} onComplete={() => { setWizardOpen(false); refreshProjects().catch(() => {}); }} />;
+    return <SetupWizard token={setupToken} onComplete={() => { setWizardOpen(false); refreshSetupStatus().catch(() => {}); refreshProjects().catch(() => {}); }} />;
   }
 
   return (
@@ -678,6 +684,7 @@ function DualithApp() {
               onSendChat={sendChat}
               onStopChat={stopChat}
               runnerHealth={runnerHealth}
+              providerSlots={providerSlots}
               activeTab={roomTab}
               onTabChange={setRoomTab}
               onClearChat={clearChatHistory}
@@ -697,6 +704,7 @@ function DualithApp() {
             commits={globalCommits}
             usage={usage}
             quota={quota}
+            providerSlots={providerSlots}
             appStatus={appStatus}
             mobileView={mobileView}
             onSendChat={sendChat}

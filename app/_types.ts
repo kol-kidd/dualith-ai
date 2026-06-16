@@ -10,7 +10,7 @@ export type RunnerId = "auto" | "codex" | "claude";
 export type RouteMode = "ask" | "team" | "auto";
 export type TeamMode = "lean" | "full";
 export type StackProfile = "smart" | "next-web" | "fastify-api" | "fastapi-api" | "none";
-export type RunnerPolicyId = "auto" | "codex-heavy" | "claude-heavy" | "balanced";
+export type RunnerPolicyId = "auto" | "codex-heavy" | "claude-heavy" | "balanced" | "eco";
 export type RefineRunnerId = Exclude<RunnerId, "auto">;
 export type StatusRefreshState = "refreshed" | "fresh" | "running" | "refreshing" | "error";
 export type RunRole =
@@ -402,6 +402,11 @@ export type QuotaSnapshot = {
 
 export type RunnerHealthEntry = { ready: boolean; version: string; error: string };
 export type RunnerHealth = Record<string, RunnerHealthEntry>;
+
+// Secret-free summary of a configured provider slot, keyed by runner id
+// (the non-"auto" runner ids: "codex" / "claude"). Returned by /api/setup/status.
+export type ProviderSlotInfo = { provider: string; label: string; mode: "subscription" | "api_key"; model: string };
+export type ProviderSlots = Record<string, ProviderSlotInfo>;
 
 export type AppStatus = {
   lan_mode: boolean;

@@ -282,6 +282,31 @@ def provider_config_exists() -> bool:
     return _provider_config_path().exists()
 
 
+def describe_provider_config() -> dict[str, Any] | None:
+    """Public, secret-free summary of the configured slots, keyed by runner id.
+
+    Maps the on-disk runner_a/runner_b slots onto the runner ids the frontend
+    uses (runner_a -> "claude", runner_b -> "codex"; see apply_provider_config).
+    The UI uses this to label the run-mode picker and model dropdown with the
+    provider the user actually configured, instead of static "Codex"/"Claude".
+    Returns None when no config exists. Never includes API keys.
+    """
+    config = load_provider_config()
+    if config is None:
+        return None
+    mapping = {"claude": config.runner_a, "codex": config.runner_b}
+    slots: dict[str, Any] = {}
+    for runner_id, slot in mapping.items():
+        pinfo = PROVIDERS.get(slot.provider, {})
+        slots[runner_id] = {
+            "provider": slot.provider,
+            "label": pinfo.get("label", slot.provider.title()),
+            "mode": slot.mode,
+            "model": slot.model or pinfo.get("default_model", ""),
+        }
+    return slots
+
+
 # ── Runtime wiring ────────────────────────────────────────────────────────────
 
 def apply_provider_config(config: ProviderConfig) -> None:
@@ -463,6 +488,55 @@ async def list_provider_models(slot: ProviderSlotConfig) -> dict[str, Any]:
         return {"ok": False, "models": [], "message": str(exc)}
 
 
+# ── Pricing lookup (for the eco runner policy) ────────────────────────────────
+
+# Cache the per-token price of a single (provider, model) so the eco policy's
+# tier ranking doesn't hit the network on every team step. Keyed by "provider::model".
+_price_cache: dict[str, float | None] = {}
+
+
+async def fetch_model_price(slot: ProviderSlotConfig) -> float | None:
+    """Best-effort per-token price (prompt+completion, USD) for a slot's model.
+
+    Returns None when the provider exposes no pricing (most do not — only
+    OpenRouter ships pricing in /models). Callers fall back to a static table.
+    Result is cached per (provider, model). Never raises.
+    """
+    model = slot.model or PROVIDERS.get(slot.provider, {}).get("default_model", "")
+    if not model:
+        return None
+    cache_key = f"{slot.provider}::{model}"
+    if cache_key in _price_cache:
+        return _price_cache[cache_key]
+
+    price: float | None = None
+    # OpenRouter is the one provider whose /models endpoint carries pricing.
+    if slot.provider == "openrouter" and slot.api_key:
+        api_base = slot.base_url or PROVIDERS.get(slot.provider, {}).get("api_base", "")
+        extra_headers = PROVIDERS.get(slot.provider, {}).get("extra_headers", {})
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    f"{api_base}/models",
+                    headers={"Authorization": f"Bearer {slot.api_key}", **extra_headers},
+                )
+            if resp.status_code in (200, 201):
+                raw = (resp.json() or {}).get("data") or []
+                for entry in raw:
+                    if isinstance(entry, dict) and entry.get("id") == model:
+                        pricing = entry.get("pricing") or {}
+                        try:
+                            price = float(pricing.get("prompt", 0)) + float(pricing.get("completion", 0))
+                        except (TypeError, ValueError):
+                            price = None
+                        break
+        except Exception as exc:
+            log.debug("model price lookup failed for %s (%s)", cache_key, exc)
+
+    _price_cache[cache_key] = price
+    return price
+
+
 # ── HTTP streaming runner ────────────────────────────────────────────────────
 
 async def run_agent_via_api(
@@ -512,7 +586,14 @@ async def run_agent_via_api(
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=5.0)) as client:
             async with client.stream("POST", f"{api_base}/chat/completions", headers=headers, json=payload) as resp:
                 if resp.status_code not in (200, 201):
-                    error = f"HTTP {resp.status_code} from provider"
+                    # Read the streamed body so _http_error_message can surface the
+                    # provider's own detail; the actionable text (e.g. "rate limit"
+                    # on a 429) also lets main.py's fallback detector trigger.
+                    try:
+                        await resp.aread()
+                    except Exception:
+                        pass
+                    error = _http_error_message(resp.status_code, resp)
                     finish_usage_fn(usage_record, "error", resp.status_code)
                     return _api_error_record(usage_record, error)
 

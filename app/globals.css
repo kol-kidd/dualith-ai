@@ -158,7 +158,7 @@ body {
   background: var(--dualith-bg);
   color: var(--dualith-text);
   font-family: var(--dualith-font-mono);
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
@@ -447,7 +447,7 @@ select option:disabled {
   border-right: 1px solid var(--dualith-line);
   padding: 0 0.75rem;
   color: var(--dualith-text-faint);
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   outline: none;
@@ -742,7 +742,7 @@ select option:disabled {
 
 .dualith-workspace-kicker,
 .dualith-minihead {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.12em;
@@ -771,7 +771,7 @@ select option:disabled {
   gap: 0.4rem;
   min-width: 10rem;
   color: var(--dualith-text-faint);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .dualith-workspace-meta {
@@ -780,7 +780,7 @@ select option:disabled {
   gap: 0.35rem;
   margin-top: 0.55rem;
   color: var(--dualith-text-faint);
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -818,7 +818,7 @@ select option:disabled {
 
 .dualith-phase__status {
   color: color-mix(in srgb, currentColor 72%, var(--dualith-text-faint));
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -855,7 +855,7 @@ select option:disabled {
 .dualith-agent-roster__item strong {
   margin-top: 0.15rem;
   color: color-mix(in srgb, currentColor 72%, var(--dualith-text-faint));
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -923,7 +923,7 @@ select option:disabled {
 .dualith-team-turn__speaker strong {
   margin-top: 0.18rem;
   color: var(--dualith-text-faint);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -932,7 +932,7 @@ select option:disabled {
 .dualith-team-turn__speaker em {
   margin-top: 0.38rem;
   color: var(--dualith-text-faint);
-  font-size: 10px;
+  font-size: 11px;
   font-style: normal;
 }
 
@@ -981,7 +981,7 @@ select option:disabled {
 .dualith-decision-card__head > span {
   color: var(--dualith-text-faint);
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -994,7 +994,7 @@ select option:disabled {
 .dualith-workspace-band__label {
   margin-bottom: 0.25rem;
   color: var(--dualith-amber);
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.12em;
 }
@@ -1020,7 +1020,7 @@ select option:disabled {
 
 .dualith-decision-card__grid span {
   color: var(--dualith-text-faint);
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
@@ -1087,7 +1087,7 @@ select option:disabled {
   margin-top: 0.4rem;
   color: var(--dualith-amber);
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -1102,7 +1102,7 @@ select option:disabled {
 .dualith-decision-history summary {
   cursor: pointer;
   color: var(--dualith-text-faint);
-  font-size: 10px;
+  font-size: 11px;
   outline: none;
 }
 
@@ -1130,7 +1130,7 @@ select option:disabled {
 .dualith-decision-history__item time {
   color: var(--dualith-text-faint);
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .dualith-decision-history__item strong {
@@ -1298,7 +1298,7 @@ select option:disabled {
 
 .dualith-task-event__type {
   color: var(--dualith-text-faint);
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -1322,7 +1322,7 @@ select option:disabled {
 
 .dualith-task-event__time {
   color: var(--dualith-text-faint);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .dualith-task-event__body {
@@ -1447,7 +1447,7 @@ select option:disabled {
   display: block;
   margin-top: 0.15rem;
   color: var(--dualith-amber);
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -1509,7 +1509,7 @@ select option:disabled {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--dualith-muted);
@@ -2132,7 +2132,7 @@ select option:disabled {
 }
 
 .crew-member__name {
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--dualith-text-muted);
   white-space: nowrap;
@@ -2142,7 +2142,7 @@ select option:disabled {
 }
 
 .crew-member__runner {
-  font-size: 9px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -2152,7 +2152,7 @@ select option:disabled {
   min-height: 2.6em;
   color: var(--dualith-text-muted);
   font-family: var(--dualith-font-prose);
-  font-size: 11.5px;
+  font-size: 15px;
   line-height: 1.3;
   overflow-wrap: anywhere;
 }
@@ -2161,7 +2161,7 @@ select option:disabled {
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 9px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.07em;
   color: var(--dualith-text-faint);
@@ -2224,7 +2224,7 @@ select option:disabled {
   cursor: pointer;
   color: var(--dualith-text-muted);
   font-family: var(--dualith-font-mono);
-  font-size: 9.5px;
+  font-size: 11px;
   list-style: none;
   outline: none;
 }
@@ -2249,7 +2249,7 @@ select option:disabled {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
   color: var(--dualith-text-faint);
-  font-size: 9.5px;
+  font-size: 11px;
 }
 
 .crew-review-detail span {
@@ -2316,7 +2316,7 @@ select option:disabled {
 .mission-lane strong,
 .mission-lane em {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-muted);
 }
 
@@ -2326,7 +2326,7 @@ select option:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--dualith-font-mono);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--dualith-fg);
 }
 
@@ -2585,7 +2585,7 @@ select option:disabled {
 }
 
 .team-dispatch-receipt__head time {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 400;
   color: var(--dualith-text-faint);
 }
@@ -2596,7 +2596,7 @@ select option:disabled {
   gap: 0.2rem 0.7rem;
   margin-top: 0.3rem;
   color: var(--dualith-text-muted);
-  font-size: 10.5px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -2613,7 +2613,7 @@ select option:disabled {
   background: transparent;
   color: var(--dualith-cyan);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   padding: 0.25rem 0.6rem;
   transition: border-color 120ms, background 120ms, color 120ms;
@@ -2762,7 +2762,7 @@ select option:disabled {
   flex-shrink: 0;
   width: 18px;
   text-align: center;
-  font-size: 10px;
+  font-size: 11px;
   opacity: 0.6;
   font-family: var(--dualith-font-mono);
 }
@@ -2778,7 +2778,7 @@ select option:disabled {
 
 .mission-timeline__verdict {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 11px;
 }
 .mission-timeline__verdict.is-ok { color: var(--dualith-emerald); }
 .mission-timeline__verdict.is-err { color: var(--dualith-warn); }
@@ -2786,7 +2786,7 @@ select option:disabled {
 /* Attempt N divider in the timeline */
 .mission-timeline__divider {
   padding: 0.5rem 0.75rem 0.25rem;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--dualith-muted);
@@ -2948,7 +2948,7 @@ select option:disabled {
 }
 
 .agent-bubble__runner {
-  font-size: 10px;
+  font-size: 11px;
   font-family: var(--dualith-font-mono);
   color: var(--dualith-muted);
   letter-spacing: 0.1em;
@@ -2956,14 +2956,14 @@ select option:disabled {
 }
 
 .agent-bubble__time {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
   font-family: var(--dualith-font-mono);
   margin-left: auto;
 }
 
 .agent-bubble__body {
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.6;
   color: var(--dualith-text);
 }
@@ -3094,13 +3094,13 @@ select option:disabled {
 }
 
 .team-turn__runner {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
 }
 
 .team-turn__time {
   margin-left: auto;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
 }
 
@@ -3134,7 +3134,7 @@ select option:disabled {
   padding: 5px 8px;
   color: var(--dualith-text-faint);
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   outline: none;
 }
 
@@ -3180,7 +3180,7 @@ select option:disabled {
 
 .team-quote__head {
   font-family: var(--dualith-font-mono);
-  font-size: 9.5px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -3199,7 +3199,7 @@ select option:disabled {
   align-items: center;
   gap: 6px;
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -3223,7 +3223,7 @@ select option:disabled {
   align-items: center;
   gap: 7px;
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--dualith-text-soft);
@@ -3273,7 +3273,7 @@ select option:disabled {
   gap: 6px;
   margin-top: 8px;
   font-family: var(--dualith-font-mono);
-  font-size: 9.5px;
+  font-size: 11px;
 }
 
 .team-ack {
@@ -3297,7 +3297,7 @@ select option:disabled {
 
 /* Role-kind label in the turn header (build / verify / review ...) */
 .team-turn__kind {
-  font-size: 9.5px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -3310,7 +3310,7 @@ select option:disabled {
   border: 1px solid var(--dualith-line);
   border-radius: 3px;
   padding: 1px 5px;
-  font-size: 9px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -3352,7 +3352,7 @@ select option:disabled {
 /* Composer route hint — previews where the intent classifier will send the brief */
 .dualith-composer-hint {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
   padding: 0 8px 4px;
 }
@@ -3360,7 +3360,7 @@ select option:disabled {
 /* Workflow · round · step readout in the room task header */
 .room-task-header__step {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-muted);
 }
 
@@ -3383,7 +3383,7 @@ select option:disabled {
 }
 
 .working-line__text {
-  font-size: 11.5px;
+  font-size: 15px;
   color: var(--dualith-text-muted);
   display: flex;
   align-items: center;
@@ -3429,7 +3429,7 @@ select option:disabled {
   align-items: center;
   padding: 6px 12px;
   border-bottom: 1px solid var(--dualith-border);
-  font-size: 9px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.8px;
   color: var(--dualith-muted);
@@ -3485,11 +3485,11 @@ select option:disabled {
 
 .lane-matrix__files code {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .lane-matrix__more {
-  font-size: 9px;
+  font-size: 11px;
   color: var(--dualith-muted);
   opacity: 0.7;
 }
@@ -3497,7 +3497,7 @@ select option:disabled {
 .lane-matrix__pct {
   text-align: right;
   color: var(--dualith-subtle);
-  font-size: 10.5px;
+  font-size: 12px;
 }
 
 .lane-matrix__row.is-ok .lane-matrix__pct { color: var(--ok); }
@@ -3564,7 +3564,7 @@ aside.flex.min-h-0.flex-col.border-r {
 /* Section header (Projects / title bars) */
 .flex.h-9.shrink-0.items-center.justify-between.border-b.border-line.px-3.text-xs {
   font-family: var(--dualith-font-mono);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -3575,13 +3575,13 @@ aside.flex.min-h-0.flex-col.border-r {
 /* Project list items */
 .group.relative.border-b.border-line-hard {
   font-family: var(--dualith-font-mono);
-  font-size: 11.5px;
+  font-size: 15px;
 }
 
 /* Project name in sidebar */
 .group.relative.border-b.border-line-hard .text-xs.font-medium {
   font-family: var(--dualith-font-mono);
-  font-size: 11.5px;
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -3590,7 +3590,7 @@ aside.flex.min-h-0.flex-col.border-r {
 .group.relative.border-b.border-line-hard .text-\[10px\],
 .group.relative.border-b.border-line-hard .text-\[11px\] {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.01em;
 }
 
@@ -3612,7 +3612,7 @@ aside.flex.min-h-0.flex-col.border-r {
 
 .dualith-workspace-action {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.04em;
   border-radius: 3px;
 }
@@ -3620,7 +3620,7 @@ aside.flex.min-h-0.flex-col.border-r {
 /* ── Engineering workspace kicker / project header ───────────── */
 .dualith-workspace-kicker {
   font-family: var(--dualith-font-mono);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -3638,7 +3638,7 @@ aside.flex.min-h-0.flex-col.border-r {
 .dualith-workspace-shell__header .text-sm,
 .dualith-workspace-shell__header .text-base {
   font-family: var(--dualith-font-mono);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -3647,7 +3647,7 @@ aside.flex.min-h-0.flex-col.border-r {
 .dualith-workspace-shell__header [class*="Badge"],
 .dualith-workspace-shell__header .border.px-1\.5 {
   font-family: var(--dualith-font-mono);
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   border-radius: 2px;
 }
@@ -3656,7 +3656,7 @@ aside.flex.min-h-0.flex-col.border-r {
 .dualith-workspace-meta button,
 .dualith-workspace-meta [role="tab"] {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3666,7 +3666,7 @@ aside.flex.min-h-0.flex-col.border-r {
 /* ── Right panel tabs (DIRECT / ARTIFACTS / LOGS / QUOTA) ───── */
 .dualith-right-tabs button {
   font-family: var(--dualith-font-mono);
-  font-size: 9.5px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.1em;
 }
@@ -3712,7 +3712,7 @@ aside.flex.min-h-0.flex-col.border-r {
 .dualith-agentic-choice__head span {
   color: var(--dualith-amber);
   font-family: var(--dualith-font-mono);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -3721,7 +3721,7 @@ aside.flex.min-h-0.flex-col.border-r {
 .dualith-agentic-choice__head strong {
   color: var(--dualith-text-strong);
   font-family: var(--dualith-font-prose);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   line-height: 1.35;
 }
@@ -3759,14 +3759,14 @@ aside.flex.min-h-0.flex-col.border-r {
 }
 
 .dualith-agentic-choice__options span {
-  font-size: 11.5px;
+  font-size: 15px;
   font-weight: 700;
 }
 
 .dualith-agentic-choice__options em {
   margin-top: 0.16rem;
   color: var(--dualith-text-muted);
-  font-size: 10.5px;
+  font-size: 12px;
   font-style: normal;
   line-height: 1.35;
 }
@@ -3775,7 +3775,7 @@ aside.flex.min-h-0.flex-col.border-r {
 .dualith-composer-submit button,
 .dualith-composer-submit [type="submit"] {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3785,7 +3785,7 @@ aside.flex.min-h-0.flex-col.border-r {
 .dualith-composer-chip,
 .dualith-runner-chip {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   border-radius: 3px;
@@ -3800,7 +3800,7 @@ aside.flex.min-h-0.flex-col.border-r {
 /* ── Artifacts / details panels ──────────────────────────────── */
 details summary {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3816,7 +3816,7 @@ details summary {
 
 .dualith-workspace-band__label {
   font-family: var(--dualith-font-mono);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -3824,13 +3824,13 @@ details summary {
 
 .dualith-attention-panel {
   font-family: var(--dualith-font-mono);
-  font-size: 11.5px;
+  font-size: 15px;
 }
 
 /* ── Miniheads (TEAM ACTIVITY, SPECIALIST REVIEWS, etc.) ─────── */
 .dualith-minihead {
   font-family: var(--dualith-font-mono);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -3846,7 +3846,7 @@ details summary {
 }
 
 .dualith-task-event__type {
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -3893,13 +3893,13 @@ details summary {
 }
 .room-task-header__id {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-muted);
   flex-shrink: 0;
 }
 .room-task-header__title {
   font-family: var(--dualith-font-mono);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--dualith-fg);
   white-space: nowrap;
@@ -3914,7 +3914,7 @@ details summary {
 }
 .room-task-header__status {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3926,7 +3926,7 @@ details summary {
 .room-task-header__status.is-muted { color: var(--dualith-muted); }
 .room-task-header__queue {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-muted);
 }
 
@@ -3949,7 +3949,7 @@ details summary {
   display: block;
   color: var(--dualith-text-faint);
   font-family: var(--dualith-font-mono);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -3973,7 +3973,7 @@ details summary {
   margin-top: 0.2rem;
   color: var(--dualith-text-muted);
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-style: normal;
 }
 
@@ -4006,7 +4006,7 @@ details summary {
 
 .dualith-lane-strip__head span {
   color: var(--dualith-text-faint);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -4058,7 +4058,7 @@ details summary {
 .dualith-lane-strip__item strong,
 .dualith-lane-strip__meta em {
   color: var(--dualith-text-faint);
-  font-size: 9px;
+  font-size: 11px;
   font-style: normal;
   font-weight: 700;
   text-transform: uppercase;
@@ -4082,7 +4082,7 @@ details summary {
   min-width: 0;
   color: var(--dualith-text-faint);
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4098,7 +4098,7 @@ details summary {
 }
 .room-no-task__name {
   font-family: var(--dualith-font-mono);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--dualith-fg);
 }
@@ -4120,7 +4120,7 @@ details summary {
 }
 .team-room__waiting-glyph {
   color: var(--dualith-line-hard);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 /* ── Synthetic turn (no AGENT_CHAT prose, just status record) ── */
@@ -4178,7 +4178,7 @@ details summary {
   background: color-mix(in srgb, var(--ok) 6%, var(--dualith-bg));
 }
 .dualith-topbar-b__project-pill .chevron {
-  font-size: 9px;
+  font-size: 11px;
   color: var(--dualith-muted);
   transition: transform 0.15s;
 }
@@ -4190,7 +4190,7 @@ details summary {
 
 .dualith-topbar-b__status {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-muted);
   display: flex;
   align-items: center;
@@ -4248,7 +4248,7 @@ details summary {
   justify-content: space-between;
   padding: 8px 12px 7px;
   font-family: var(--dualith-font-mono);
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--dualith-muted);
@@ -4327,7 +4327,7 @@ details summary {
   color: var(--dualith-text-strong, var(--dualith-fg));
 }
 .dualith-projects-dropdown__item-status {
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -4440,7 +4440,7 @@ details summary {
   gap: 5px;
   padding: 4px 10px 6px;
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.05em;
   color: var(--dualith-muted);
   cursor: pointer;
@@ -4462,7 +4462,7 @@ details summary {
   color: var(--ok);
   border-radius: 2px;
   padding: 0 4px;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .dualith-bottom-tab-sep {
@@ -4752,7 +4752,7 @@ details summary {
 
   .team-turn__prose {
     max-width: 100%;
-    font-size: 13px;
+    font-size: 15px;
     line-height: 1.58;
   }
 
@@ -5155,7 +5155,7 @@ details summary {
 .dualith-ideas-subtitle {
   margin-top: 2px;
   color: var(--dualith-muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .dualith-ideas-close,
@@ -5168,7 +5168,7 @@ details summary {
   border: 1px solid var(--dualith-line-hard);
   background: transparent;
   color: var(--dualith-muted);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   outline: none;
@@ -5276,7 +5276,7 @@ details summary {
   border-right: 1px solid var(--dualith-line-hard);
   background: transparent;
   color: var(--dualith-muted);
-  font-size: 10px;
+  font-size: 11px;
   outline: none;
 }
 
@@ -5332,7 +5332,7 @@ details summary {
 
 .dualith-ideas-item__meta em {
   color: var(--dualith-muted);
-  font-size: 10px;
+  font-size: 11px;
   font-style: normal;
 }
 
@@ -5461,7 +5461,7 @@ details summary {
   justify-content: space-between;
   gap: 8px;
   color: var(--dualith-muted);
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
 }
 
@@ -5540,7 +5540,7 @@ details summary {
 
 .dualith-ideas-promote label span {
   color: var(--dualith-muted);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -5720,7 +5720,7 @@ button:not(:disabled),
 }
 .dualith-stale-banner span::before {
   content: "● ";
-  font-size: 9px;
+  font-size: 11px;
 }
 
 /* ── Prose line-length guard (72ch) ─────────────────────────────── */
@@ -5739,7 +5739,7 @@ button:not(:disabled),
   gap: 6px;
   padding: 3px 8px 4px;
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-text-muted);
   letter-spacing: 0.03em;
   border-top: 1px solid var(--dualith-line);
@@ -5780,7 +5780,7 @@ button:not(:disabled),
   color: var(--dualith-text-faint);
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  font-size: 9px;
+  font-size: 11px;
 }
 .dualith-idle-digest__val {
   flex: 1;
@@ -5859,7 +5859,7 @@ button:not(:disabled),
 
 .dualith-sidebar__label {
   font-family: var(--dualith-font-mono);
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--dualith-text-faint);
@@ -5871,7 +5871,7 @@ button:not(:disabled),
 
 .dualith-sidebar__label button {
   font-family: var(--dualith-font-mono);
-  font-size: 9px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
   background: transparent;
   border: none;
@@ -5899,7 +5899,7 @@ button:not(:disabled),
   width: 100%;
   padding: 7px 12px;
   font-family: var(--dualith-font-mono);
-  font-size: 11.5px;
+  font-size: 15px;
   color: var(--dualith-text-muted);
   background: transparent;
   border: none;
@@ -5982,7 +5982,7 @@ button:not(:disabled),
   white-space: nowrap;
 }
 .dualith-sidebar__agent-item .status-label {
-  font-size: 9.5px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
   flex-shrink: 0;
   text-transform: uppercase;
@@ -6072,7 +6072,7 @@ button:not(:disabled),
 
 .mission-control--session .session-title {
   font-family: var(--dualith-font-mono);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--dualith-text-strong);
   white-space: nowrap;
@@ -6091,7 +6091,7 @@ button:not(:disabled),
 
 .session-badge {
   font-family: var(--dualith-font-mono);
-  font-size: 9.5px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -6107,7 +6107,7 @@ button:not(:disabled),
 
 .session-participants {
   font-family: var(--dualith-font-mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dualith-text-faint);
   flex-shrink: 0;
 }
