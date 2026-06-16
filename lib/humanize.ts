@@ -52,10 +52,6 @@ const WORKFLOW_LABELS: Record<string, string> = {
   "build-review-loop": "Build & review loop",
 };
 
-export function humanizeWorkflow(workflowId: string, fallback: string): string {
-  return WORKFLOW_LABELS[workflowId] ?? fallback;
-}
-
 export function humanizeKickoffTitle(title: string): string {
   const lower = title.toLowerCase();
   if (lower.includes("kickoff")) return "Your brief";

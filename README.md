@@ -11,7 +11,6 @@ Dualith is a local AI workspace that runs Codex and Claude as a real multi-agent
 - **Plan toggle** — Plan on: Planner writes a step-by-step spec you approve before any code is written. Plan off: PM asks one clarifying question if the request is ambiguous, then the team goes straight to building.
 - **Specialist reviewers** — Security, Architecture, Performance, and Maintainability reviewers each provide a verdict with observations. All run in Full mode; only risk-triggered ones run in Lean.
 - **Live agent feed** — agent turns stream into a chronological story timeline with role-tagged prose, `@mention` handoffs, `re:` quoted replies, and bracket verdict tags (`[✓]` / `[!]`).
-- **Pipeline crew strip** — a header row shows every agent in scope for the current run, their status, and a green top-rule on the active stage.
 - **HITL gate** — any agent can pause and ask a question. You answer in the chat thread; the run resumes.
 - **Contract repair** — missing agent sections are synthesised from the final answer rather than killing the run; verdicts are parsed case-insensitively; observation-count gates are advisory.
 - **Subagent parallelism** — Lead and Builder agents can spawn parallel subagents for large or naturally parallel tasks.
@@ -20,7 +19,8 @@ Dualith is a local AI workspace that runs Codex and Claude as a real multi-agent
 - **Git operations** — commit, push, merge, tag, stash — say it in chat and the Lead handles it, with automatic checkpoint commits after successful runs.
 - **Usage tracking** — token counts, cost, quota reserves, and runner health in the always-visible Artifacts / Quota panel.
 - **Auto runner routing** — Codex-heavy, Claude-heavy, Balanced, or Registry auto; falls back when a runner is over its quota reserve.
-- **Provider setup wizard** — first-run gate lets you pick your AI providers per runner slot. Mix Claude/OpenAI subscriptions (CLI-auth) with direct API keys from Anthropic, OpenAI, OpenRouter, or Gemini. Three modes: Subscription + Subscription, Subscription + API Key, API + API.
+- **Provider setup wizard** — first-run gate lets you pick your AI providers per runner slot. Mix Claude/OpenAI subscriptions (CLI-auth) with direct API keys from Anthropic, OpenAI, OpenRouter, or Gemini. API keys are stored in the OS keyring (not plaintext).
+- **Ideas drawer** — flesh out raw ideas into project briefs with an AI planning chat before promoting them to full projects.
 
 ## UI Layout
 
@@ -33,7 +33,7 @@ The workspace is a three-column shell:
 │  Projects   │  │  Session header          │  │  Artifacts   │
 │  Agent      │  │  (title · status badge)  │  │  Logs        │
 │  roster     │  ├──────────────────────────┤  │  Quota       │
-│             │  │  Crew strip (pipeline)   │  │  Preview     │
+│             │  │  MissionControl strip    │  │  Preview     │
 │             │  ├──────────────────────────┤  │              │
 │             │  │  Story timeline          │  │              │
 │             │  │  (agent turns, live run) │  │              │
@@ -86,13 +86,57 @@ Intent classifier (LLM → keyword fallback)
 
 ## Architecture
 
-- **Frontend:** Next.js 15 App Router in `app/`, served on `http://localhost:3200`.
-- **Backend:** FastAPI in `backend/app/` (`main.py`, `routing.py`, `runners.py`), served on `http://127.0.0.1:4200`.
-- **Real-time:** typed WebSocket event bus (`events.py`) with per-client queues, 250 ms-coalesced delta frames (`agent_output_delta`, `agent_status`, `phase`, `handoff`, `verdict`, `run_error`, `chat`). Snapshot only on connect/resync.
-- **Streaming:** Codex `exec --json` JSONL + Claude `--output-format stream-json --verbose`, normalised per-runner; live turn tails in the feed via `LiveTail`.
+### Frontend
+
+```
+app/
+├── page.tsx                 # Root shell — state, WebSocket delta reducer, layout
+├── _types.ts                # All shared TypeScript types (no runtime deps)
+├── _constants.ts            # Runtime constants, labels, empty-state defaults
+├── _helpers.tsx             # Pure helpers and custom hooks
+├── globals.css              # Theme tokens, utility classes, design system CSS
+└── components/
+    ├── SetupWizard.tsx      # First-run provider configuration wizard
+    ├── columns.tsx          # SidebarColumn, TeamRoomFull, ProjectSwitcher, SettingsMenu
+    ├── chat.tsx             # ChatFeedMessage, TeamRoom, TeamConversationPanel, ChatComposer
+    ├── task.tsx             # DecisionPanel, AttentionPanel, ReviewPane, CommitPane, MissionControl
+    ├── usage.tsx            # WorkspaceRightPanel, QuotaPanel, UsageStatusTab, ConfigTab, LogTab
+    ├── panes.tsx            # ProjectPreviewPanel, MemoryPane, ArtifactPane
+    ├── primitives.tsx       # Badge, SectionHeader, EmptyState, RunnerMascot, pixel mascots
+    ├── setup.tsx            # ProjectSetupModal, IdeasDrawer (project create/import/ideas)
+    └── ui.ts                # Barrel re-export of all component files
+lib/
+├── useDualithSocket.ts      # Typed WebSocket hook (snapshot + typed delta events)
+└── humanize.ts              # Role/status label helpers
+```
+
+### Backend
+
+```
+backend/app/
+├── main.py                  # FastAPI app, project/task/chat/quota/setup/status endpoints
+├── routing.py               # Intent classifier, team routing logic, HITL handling
+├── runners.py               # Codex/Claude subprocess + HTTP streaming adapter
+├── providers.py             # Provider registry, API key management (OS keyring), HTTP adapter
+├── events.py                # Typed WebSocket event bus, per-client queues, delta coalescing
+├── prompts.py               # Agent system prompts and context builders
+├── dialogue.py              # Chat history parsing and transcript helpers
+├── failures.py              # Circuit breaker and run-error handling
+└── orchestration/
+    ├── schema.py            # Pydantic models for tasks, phases, events, reviews
+    ├── agents.py            # Agent definitions and capability registry
+    ├── planner.py           # Plan-first workflow and approval gate
+    ├── results.py           # Result parsing, verdict extraction, contract repair
+    ├── scheduler.py         # Subagent parallelism scheduler
+    └── validator.py         # Agent output validation and observation-count gates
+```
+
+- **Real-time:** typed WebSocket event bus with per-client queues, 250 ms-coalesced delta frames (`agent_output_delta`, `agent_status`, `phase`, `handoff`, `verdict`, `run_error`, `chat`). Snapshot only on connect/resync.
+- **Streaming:** Codex `exec --json` JSONL + Claude `--output-format stream-json --verbose`, normalised per-runner.
 - **Agent runners:** Codex CLI and Claude CLI as subprocesses (subscription mode) or direct HTTP calls to any OpenAI-compatible provider (API key mode), with quota-aware dual-runner takeover.
-- **Provider layer:** `backend/app/providers.py` owns the provider registry (Claude, OpenAI, OpenRouter, Gemini) and the HTTP streaming adapter. Runner slots are configured at first launch and can be reconfigured from the Quota panel.
-- **Local state:** `.dualith/` stores project registry, usage history, quota settings, provider config, attachments, and status cache.
+- **Provider layer:** `providers.py` owns the provider registry (Claude, OpenAI, OpenRouter, Gemini) and the HTTP streaming adapter. API keys are stored in the OS keyring. Runner slots are configured at first launch and can be reconfigured from the Quota panel.
+- **Security:** CSRF token on all mutating setup endpoints; SSRF validation on provider URLs; API keys never written to disk.
+- **Local state:** `.dualith/` stores project registry, usage history, quota settings, and status cache. Provider config stored separately in the OS keyring.
 - **Project files:** each workspace gets `SPEC.md`, `PLAN.md`, `FEEDBACK.md`, `AGENT_CHAT.md`, `CHAT_HISTORY.md`, `HUMAN_INPUT.md`, `PRODUCT.md`, `DESIGN.md`, `CLAUDE.md`.
 
 The frontend and backend communicate over HTTP (actions) and WebSocket (live events + snapshots). The backend watches registered project folders with Watchdog, records filesystem/Git events, manages agent subprocess lifecycles, and broadcasts state on every change.
@@ -192,15 +236,16 @@ If Task Scheduler registration is blocked (non-admin shell), use the Startup fol
 
 ## Usage
 
-1. **First-time setup.** On first launch, a setup wizard walks you through choosing an AI provider per runner slot. Runner A drives primary work (Lead, PM, Architect); Runner B drives review (Tester, specialists). Choose subscription (CLI) or API key for each. Config is saved to `.dualith/provider-config.json`. Reconfigure any time from the Quota panel → "Reconfigure AI providers…".
+1. **First-time setup.** On first launch, a setup wizard walks you through choosing an AI provider per runner slot. Runner A drives primary work (Lead, PM, Architect); Runner B drives review (Tester, specialists). Choose subscription (CLI) or API key for each. API keys are stored in the OS keyring. Reconfigure any time from the Quota panel → "Reconfigure AI providers…".
 2. **Create or import a project.** Dualith registers the workspace and creates agent-facing files. Your projects appear in the left sidebar.
 3. **Select a project.** The sidebar shows the project list and a live agent roster with status dots for the current run.
 4. **Chat** — ask questions, check status, or get explanations. The Ask agent reads the project and responds conversationally.
 5. **Build** — describe the outcome in the composer and choose Lean or Full team mode. With Plan off the team starts immediately (PM asks one clarifying question if the request is ambiguous). With Plan on the Planner writes a spec first — approve it to start building.
-6. **Watch the feed.** Agent turns stream into the story timeline in order. Each turn shows the agent's role, prose, `@mention` handoffs, quoted replies, and a verdict tag at the end. The crew strip at the top tracks which stage is active.
+6. **Watch the feed.** Agent turns stream into the story timeline in order. Each turn shows the agent's role, prose, `@mention` handoffs, quoted replies, and a verdict tag at the end.
 7. **Answer questions.** If an agent hits a blocking ambiguity it pauses and asks you in the chat thread. Type your answer and the run continues.
 8. **Check the right panel.** Artifacts, logs, quota, and preview are always visible in the right column — no drawer needed.
 9. **Git operations.** Say "commit the changes", "push to main", "tag v1.0" — Lead handles it.
+10. **Ideas.** Open the Ideas drawer from the sidebar to draft a raw idea, refine it with AI planning chat, and promote it to a full project when the brief is ready.
 
 ## Build And Production
 
@@ -219,9 +264,9 @@ Make sure the FastAPI backend is running and `NEXT_PUBLIC_API_BASE_URL` points t
 
 **Codex or Claude not found** — confirm the CLI is on `PATH`, or set `DUALITH_CODEX_COMMAND` / `DUALITH_CLAUDE_COMMAND` in `.env.local`. If you configured a runner slot to use an API key instead, this error should not appear — check your provider config via the Quota panel.
 
-**Setup wizard won't go away** — delete `.dualith/provider-config.json` and reload; the wizard re-runs. Or click "Reconfigure AI providers…" in the Quota panel to do this from the UI.
+**Setup wizard won't go away** — click "Reconfigure AI providers…" in the Quota panel, or delete the provider config from the OS keyring and reload.
 
-**API key connection test fails** — verify the key is correct and the model name matches the provider's format (e.g. `anthropic/claude-sonnet-4-6` for OpenRouter, `claude-sonnet-4-6` for Anthropic direct).
+**API key connection test fails** — verify the key is correct and the model name matches the provider's format (e.g. `anthropic/claude-sonnet-4-6` for OpenRouter, `claude-sonnet-4-6` for Anthropic direct). The connection test surfaces the raw provider error to help diagnose mismatches.
 
 **Status refresh does not parse limits** — configure fallback quota values in the System panel. Dualith uses them for Auto runner routing even without a parseable CLI limit.
 
