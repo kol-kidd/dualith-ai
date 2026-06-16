@@ -2,7 +2,7 @@
 
 # Dualith
 
-Dualith is a local AI workspace that runs Codex and Claude as a real multi-agent engineering team inside your project folders. You describe the outcome; the agents plan, implement, test, and review — while you watch the team conversation unfold in a CI-style feed.
+Dualith is a local AI workspace that runs any two AI providers as a real multi-agent engineering team inside your project folders. You describe the outcome; the agents plan, implement, test, and review — while you watch the team conversation unfold in a CI-style feed.
 
 ## What It Does
 
@@ -116,7 +116,7 @@ lib/
 backend/app/
 ├── main.py                  # FastAPI app, project/task/chat/quota/setup/status endpoints
 ├── routing.py               # Intent classifier, team routing logic, HITL handling
-├── runners.py               # Codex/Claude subprocess + HTTP streaming adapter
+├── runners.py               # CLI subprocess + HTTP streaming adapter (per-runner dispatch)
 ├── providers.py             # Provider registry, API key management (OS keyring), HTTP adapter
 ├── events.py                # Typed WebSocket event bus, per-client queues, delta coalescing
 ├── prompts.py               # Agent system prompts and context builders
@@ -132,8 +132,8 @@ backend/app/
 ```
 
 - **Real-time:** typed WebSocket event bus with per-client queues, 250 ms-coalesced delta frames (`agent_output_delta`, `agent_status`, `phase`, `handoff`, `verdict`, `run_error`, `chat`). Snapshot only on connect/resync.
-- **Streaming:** Codex `exec --json` JSONL + Claude `--output-format stream-json --verbose`, normalised per-runner.
-- **Agent runners:** Codex CLI and Claude CLI as subprocesses (subscription mode) or direct HTTP calls to any OpenAI-compatible provider (API key mode), with quota-aware dual-runner takeover.
+- **Streaming:** CLI output (Codex `exec --json` JSONL, Claude `--output-format stream-json --verbose`) and HTTP SSE for API key slots, normalised per-runner.
+- **Agent runners:** two configurable slots — each runs a CLI subprocess (subscription mode) or makes direct HTTP calls to any OpenAI-compatible provider (API key mode), with quota-aware dual-runner takeover.
 - **Provider layer:** `providers.py` owns the provider registry (Claude, OpenAI, OpenRouter, Gemini) and the HTTP streaming adapter. API keys are stored in the OS keyring. Runner slots are configured at first launch and can be reconfigured from the Quota panel.
 - **Security:** CSRF token on all mutating setup endpoints; SSRF validation on provider URLs; API keys never written to disk.
 - **Local state:** `.dualith/` stores project registry, usage history, quota settings, and status cache. Provider config stored separately in the OS keyring.
@@ -145,8 +145,8 @@ The frontend and backend communicate over HTTP (actions) and WebSocket (live eve
 
 - Node.js with npm
 - Python 3
-- **Subscription mode (default):** Codex CLI (`codex`) and/or Claude CLI (`claude`) installed and authenticated
-- **API key mode:** API key from Anthropic, OpenAI, OpenRouter, or Gemini — no CLI needed for those slots
+- **Subscription (CLI) mode:** Codex CLI (`codex`) and/or Claude CLI (`claude`) installed and authenticated — required only for slots configured in subscription mode
+- **API key mode:** an API key from Anthropic, OpenAI, OpenRouter, or Gemini — no CLI needed for those slots
 
 ## Installation
 
@@ -173,28 +173,30 @@ python -m venv .venv
 
 Edit `.env.local` after copying the example.
 
+The `DUALITH_CODEX_*` and `DUALITH_CLAUDE_*` variables configure the two default CLI runner slots (Runner A = Claude CLI, Runner B = Codex CLI). They are only relevant when a slot is in subscription (CLI) mode. If a slot is configured with an API key through the setup wizard, these variables are ignored for that slot — the provider, model, and base URL come from the wizard config instead.
+
 | Variable | Purpose |
 |---|---|
 | `NEXT_PUBLIC_API_BASE_URL` | Backend API URL. Defaults to `http://127.0.0.1:4200`. |
 | `DUALITH_PROJECTS_ROOT` | Root folder for new and imported projects. |
-| `DUALITH_CODEX_COMMAND` | Codex executable path. |
-| `DUALITH_CODEX_ARGS` | Base args for Codex. |
-| `DUALITH_CODEX_MODEL_ARGS` | Model arg format string for Codex. |
-| `DUALITH_CODEX_REASONING_ARGS` | Reasoning arg format string for Codex. |
-| `DUALITH_CODEX_STATUS_COMMAND` | Command for Codex status refresh. |
-| `DUALITH_CODEX_STATUS_ARGS` | Args for Codex status refresh. |
-| `DUALITH_CLAUDE_COMMAND` | Claude executable path. |
-| `DUALITH_CLAUDE_ARGS` | Base args for Claude. |
-| `DUALITH_CLAUDE_MODEL_ARGS` | Model arg format string for Claude. |
-| `DUALITH_CLAUDE_REASONING_ARGS` | Reasoning arg format string for Claude. |
-| `DUALITH_CLAUDE_STATUS_COMMAND` | Command for Claude status refresh. |
-| `DUALITH_CLAUDE_STATUS_ARGS` | Args for Claude status refresh. |
-| `DUALITH_REVIEW_RUNNER` | Default runner for review roles in auto routing. Defaults to `codex`; set `claude` for Claude review or `auto` for registry defaults. |
-| `DUALITH_STATUS_TIMEOUT_SECONDS` | Timeout for status refresh commands. |
+| `DUALITH_CODEX_COMMAND` | Codex CLI executable path (Runner B subscription mode). |
+| `DUALITH_CODEX_ARGS` | Base args for Codex CLI. |
+| `DUALITH_CODEX_MODEL_ARGS` | Model arg format string for Codex CLI. |
+| `DUALITH_CODEX_REASONING_ARGS` | Reasoning arg format string for Codex CLI. |
+| `DUALITH_CODEX_STATUS_COMMAND` | Command for Codex quota status refresh. |
+| `DUALITH_CODEX_STATUS_ARGS` | Args for Codex quota status refresh. |
+| `DUALITH_CLAUDE_COMMAND` | Claude CLI executable path (Runner A subscription mode). |
+| `DUALITH_CLAUDE_ARGS` | Base args for Claude CLI. |
+| `DUALITH_CLAUDE_MODEL_ARGS` | Model arg format string for Claude CLI. |
+| `DUALITH_CLAUDE_REASONING_ARGS` | Reasoning arg format string for Claude CLI. |
+| `DUALITH_CLAUDE_STATUS_COMMAND` | Command for Claude quota status refresh. |
+| `DUALITH_CLAUDE_STATUS_ARGS` | Args for Claude quota status refresh. |
+| `DUALITH_REVIEW_RUNNER` | Default slot for review roles in auto routing. Defaults to `codex` (Runner B); set `claude` (Runner A) or `auto` for registry defaults. |
+| `DUALITH_STATUS_TIMEOUT_SECONDS` | Timeout for CLI status refresh commands. |
 | `DUALITH_AGENT_IDLE_TIMEOUT_SECONDS` | Idle watchdog in seconds for agent runs with no output. Defaults to `600`; set `0` to disable. |
 | `DUALITH_IDEA_RUN_TIMEOUT` | Timeout in seconds for Ideas planning chat and brief generation. Defaults to `300`. |
 | `DUALITH_IDEA_CODEX_SEARCH` | Enables native Codex web search for Ideas planning when set to `1`. Defaults to `1`. |
-| `DUALITH_IDEA_CLAUDE_TOOLS` | Claude tools available to Ideas planning. Defaults to `WebSearch,WebFetch`. |
+| `DUALITH_IDEA_CLAUDE_TOOLS` | Claude CLI tools available to Ideas planning. Defaults to `WebSearch,WebFetch`. |
 
 ## Running Locally
 
@@ -262,7 +264,7 @@ Make sure the FastAPI backend is running and `NEXT_PUBLIC_API_BASE_URL` points t
 
 **Python dependencies missing** — reinstall: `.\.venv\Scripts\python -m pip install -r requirements.txt`
 
-**Codex or Claude not found** — confirm the CLI is on `PATH`, or set `DUALITH_CODEX_COMMAND` / `DUALITH_CLAUDE_COMMAND` in `.env.local`. If you configured a runner slot to use an API key instead, this error should not appear — check your provider config via the Quota panel.
+**CLI runner not found** — confirm the CLI (`codex` or `claude`) is on `PATH`, or set `DUALITH_CODEX_COMMAND` / `DUALITH_CLAUDE_COMMAND` in `.env.local`. This only applies to slots in subscription mode — if a slot is configured with an API key, no CLI is needed and this error should not appear. Check your provider config via the Quota panel → "Reconfigure AI providers…".
 
 **Setup wizard won't go away** — click "Reconfigure AI providers…" in the Quota panel, or delete the provider config from the OS keyring and reload.
 
