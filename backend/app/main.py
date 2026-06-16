@@ -6449,11 +6449,17 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
     # API-key mode: dispatch to HTTP adapter instead of CLI subprocess
     if config.get("use_http"):
         from .providers import run_agent_via_api
+        # Mirror the CLI path: write the user query to CHAT_HISTORY before the run.
+        if agent == "ask" and run_prompt.strip():
+            attach_names = [Path(p).name for p in (attachment_paths or []) if p and p.strip()]
+            attach_line = f"\n\n_Attached: {', '.join(attach_names)}_" if attach_names else ""
+            append_chat_history(project_path, f"### User Query - {utc_now()}\n\n{run_prompt.strip()}{attach_line}\n\n")
+            await broadcast("chat_event", record_event("CHAT_QUERY", f"{relative_path(project_path)} :: ask query"))
         prompt = agent_prompt(agent, run_prompt, project_path, partner, attachment_paths)
         usage_record = new_usage_record(project_name, agent, runner, model, reasoning, prompt)
         usage_record["user_prompt"] = run_prompt.strip()
         output_path = result_file_path(project_path, str(usage_record["id"]))
-        return await run_agent_via_api(
+        result = await run_agent_via_api(
             project_name=project_name,
             agent=agent,
             runner=runner,
@@ -6465,6 +6471,11 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             finish_usage_fn=finish_usage_record,
             result_file_path=output_path,
         )
+        # Mirror the CLI path: write the answer to CHAT_HISTORY after the run.
+        if agent == "ask" and result.get("status") == "ok" and result.get("content", "").strip():
+            append_chat_history(project_path, f"### Dualith Answer - {utc_now()}\n\n{result['content'].strip()}\n\n")
+            await broadcast("chat_event", record_event("CHAT_ANSWER", f"{relative_path(project_path)} :: ask answer"))
+        return result
 
     key = agent_run_key(project_name, agent)
     prompt = agent_prompt(agent, run_prompt, project_path, partner, attachment_paths)

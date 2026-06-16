@@ -32,7 +32,6 @@ import {
   priorityLabel,
   priorityTone,
   attentionCountLabel,
-  attentionPanelStorageKey,
   missionNarration,
 } from "../_helpers";
 import { Badge, EmptyState } from "./primitives";
@@ -106,18 +105,21 @@ export function AttentionPanel({
   const attention = attentionState(project);
   const [pending, setPending] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
-  const storageKey = attentionPanelStorageKey(project.name);
+  const [expanded, setExpanded] = useState(false);
+  // Dismissed key includes updated_at so a new run re-shows the banner automatically.
+  const dismissKey = `attention-dismissed:${project.name}:${attention.updated_at ?? ""}`;
+  const [dismissed, setDismissed] = useState(() => {
+    try { return window.localStorage.getItem(dismissKey) === "1"; } catch { return false; }
+  });
 
+  // Re-check dismiss state when the key changes (new attention snapshot arrives).
   useEffect(() => {
-    try {
-      setCollapsed(window.localStorage.getItem(storageKey) === "collapsed");
-    } catch {
-      setCollapsed(false);
-    }
-  }, [storageKey]);
+    try { setDismissed(window.localStorage.getItem(dismissKey) === "1"); } catch { setDismissed(false); }
+  }, [dismissKey]);
 
   if (attention.status !== "attention" && attention.status !== "stale") return null;
+  if (dismissed) return null;
+
   const topItems = attention.items.slice(0, 4);
 
   const address = async () => {
@@ -133,24 +135,19 @@ export function AttentionPanel({
     }
   };
 
-  const toggleCollapsed = () => {
-    setCollapsed((value) => {
-      const next = !value;
-      try {
-        window.localStorage.setItem(storageKey, next ? "collapsed" : "expanded");
-      } catch {
-        // localStorage can be unavailable in private windows; the in-memory state still works.
-      }
-      return next;
-    });
+  const dismiss = () => {
+    try { window.localStorage.setItem(dismissKey, "1"); } catch { /* ignore */ }
+    setDismissed(true);
   };
 
   return (
-    <section className={`dualith-attention-panel ${attention.status === "stale" ? "is-stale" : ""} ${collapsed ? "is-collapsed" : ""}`}>
+    <section className={`dualith-attention-panel ${attention.status === "stale" ? "is-stale" : ""} ${!expanded ? "is-collapsed" : ""}`}>
       <div className="dualith-attention-panel__header">
         <div className="min-w-0">
           <div className="dualith-workspace-band__label">{attention.status === "stale" ? "Review notes may be outdated" : "Feedback needs attention"}</div>
-          <div className="dualith-workspace-band__body">{attention.summary || "Some items in the project feedback file need to be addressed."}</div>
+          {expanded && (
+            <div className="dualith-workspace-band__body">{attention.summary || "Some items in the project feedback file need to be addressed."}</div>
+          )}
           <div className="dualith-workspace-band__meta">
             {attention.source || "FEEDBACK.md"}{attention.updated_at ? ` · ${timestampLabel(attention.updated_at)}` : ""} · {attentionCountLabel(attention)}
           </div>
@@ -159,19 +156,24 @@ export function AttentionPanel({
           <button
             type="button"
             className="dualith-attention-panel__toggle"
-            onClick={toggleCollapsed}
-            aria-expanded={!collapsed}
-            title={collapsed ? "Expand notes" : "Minimize notes"}
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            title={expanded ? "Collapse" : "Expand"}
           >
-            <span aria-hidden="true">{collapsed ? "+" : "-"}</span>
-            <span>{collapsed ? "Expand" : "Minimize"}</span>
+            <span aria-hidden="true">{expanded ? "−" : "+"}</span>
+            <span>{expanded ? "Collapse" : "Expand"}</span>
           </button>
-          <button type="button" disabled={!onAddressNotes || pending} onClick={() => void address()} title="Dispatches an agent run to address the feedback items">
-            {pending ? "Dispatching…" : addressActionLabel}
+          {expanded && (
+            <button type="button" disabled={!onAddressNotes || pending} onClick={() => void address()} title="Dispatches an agent run to address the feedback items">
+              {pending ? "Dispatching…" : addressActionLabel}
+            </button>
+          )}
+          <button type="button" onClick={dismiss} title="Dismiss until next run" aria-label="Dismiss">
+            ✕
           </button>
         </div>
       </div>
-      {!collapsed && topItems.length > 0 && (
+      {expanded && topItems.length > 0 && (
         <div className="dualith-attention-list">
           {topItems.map((item, index) => (
             <div key={`${item.priority}-${item.title}-${index}`} className="dualith-attention-item">
@@ -182,7 +184,7 @@ export function AttentionPanel({
           ))}
         </div>
       )}
-      {!collapsed && errorText && <div className="dualith-attention-error">Error: {errorText}</div>}
+      {expanded && errorText && <div className="dualith-attention-error">Error: {errorText}</div>}
     </section>
   );
 }
