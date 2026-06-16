@@ -342,20 +342,46 @@ async def _test_cli(provider: str) -> dict[str, Any]:
         return {"ok": False, "message": str(exc)}
 
 
-def _http_error_message(status: int) -> str:
-    """Translate a provider HTTP status into actionable guidance."""
+def _provider_detail(resp: "httpx.Response | None") -> str:
+    """Pull the provider's own error message out of the response body, if any."""
+    if resp is None:
+        return ""
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict) and err.get("message"):
+                return str(err["message"])
+            if isinstance(err, str):
+                return err
+            if body.get("message"):
+                return str(body["message"])
+    except Exception:
+        pass
+    return ""
+
+
+def _http_error_message(status: int, resp: "httpx.Response | None" = None) -> str:
+    """Translate a provider HTTP status into actionable guidance.
+
+    Appends the provider's own error message when present — it usually says
+    exactly why (e.g. a saturated free-model pool vs. an account daily cap).
+    """
+    detail = _provider_detail(resp)
+    suffix = f" — {detail}" if detail else ""
     if status in (401, 403):
-        return f"HTTP {status} — API key rejected. Check the key is correct and active."
+        return f"HTTP {status} — API key rejected. Check the key is correct and active.{suffix}"
     if status == 404:
-        return f"HTTP {status} — model not found. Pick a different model for this provider."
+        return f"HTTP {status} — model not found. Pick a different model for this provider.{suffix}"
     if status == 429:
         return (
-            "HTTP 429 — rate limited. Wait a moment and retry; for OpenRouter "
-            "free models, you may also need credits on your account."
+            "HTTP 429 — rate limited by the provider. For OpenRouter ':free' models "
+            "this is often the shared free pool being saturated, or a free-tier daily "
+            f"cap (raised once your account holds credits) — not your own usage.{suffix}"
         )
     if 500 <= status < 600:
-        return f"HTTP {status} — provider server error. Try again shortly."
-    return f"HTTP {status} from provider"
+        return f"HTTP {status} — provider server error. Try again shortly.{suffix}"
+    return f"HTTP {status} from provider{suffix}"
 
 
 async def _test_api_key(slot: ProviderSlotConfig) -> dict[str, Any]:
@@ -382,7 +408,7 @@ async def _test_api_key(slot: ProviderSlotConfig) -> dict[str, Any]:
             resp = await client.post(f"{api_base}/chat/completions", headers=headers, json=payload)
         if resp.status_code in (200, 201):
             return {"ok": True, "message": f"Connected — model {model}"}
-        return {"ok": False, "message": _http_error_message(resp.status_code)}
+        return {"ok": False, "message": _http_error_message(resp.status_code, resp)}
     except httpx.ConnectError:
         return {"ok": False, "message": f"Could not reach {api_base}"}
     except httpx.TimeoutException:
@@ -418,7 +444,7 @@ async def list_provider_models(slot: ProviderSlotConfig) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(f"{api_base}/models", headers=headers)
         if resp.status_code not in (200, 201):
-            return {"ok": False, "models": [], "message": _http_error_message(resp.status_code)}
+            return {"ok": False, "models": [], "message": _http_error_message(resp.status_code, resp)}
         data = resp.json()
         raw = data.get("data") if isinstance(data, dict) else None
         if not isinstance(raw, list):
