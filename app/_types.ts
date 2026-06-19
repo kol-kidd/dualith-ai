@@ -470,12 +470,12 @@ export type DirectoryInputProps = InputHTMLAttributes<HTMLInputElement> & {
 // --- Cross-cutting team-room types (used by both helpers and components) ---
 
 export type ChatMessage = {
-  role: "user" | "agent" | "dispatch" | "plan" | "circuit-breaker";
+  role: "user" | "agent" | "plan" | "circuit-breaker";
   title: string;
   timestamp: string;
   body: string;
   attachments: string[]; // filenames extracted from _Attached: ..._ suffix
-  kind: "ask" | "kickoff" | "answer" | "dispatch" | "plan" | "circuit-breaker";
+  kind: "ask" | "kickoff" | "answer" | "plan" | "circuit-breaker";
 };
 
 export type TeamMessageRole =
@@ -545,7 +545,6 @@ export type RenderedTeamTurn = {
 };
 
 export type MissionFeedItem =
-  | { kind: "chat"; key: string; timestamp: number; order: number; message: ChatMessage }
   | { kind: "team"; key: string; timestamp: number; order: number; turn: RenderedTeamTurn; index: number; total: number }
   | { kind: "live"; key: string; timestamp: number; order: number; run: LiveRun }
   | { kind: "failure"; key: string; timestamp: number; order: number; failure: RunFailure }

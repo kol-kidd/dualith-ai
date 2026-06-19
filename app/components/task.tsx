@@ -257,17 +257,28 @@ export function CommitPane({ commits }: { commits: string[] }) {
   );
 }
 
-export function MissionControl({ project, liveRuns = [], failures = [], activeTab = "chat", onTabChange }: {
+export function MissionControl({ project, liveRuns = [], failures = [], activeTab = "chat", onTabChange, onClearChat }: {
   project: ProjectRecord;
   liveRuns?: LiveRun[];
   failures?: RunFailure[];
   activeTab?: "chat" | "team";
   onTabChange?: (tab: "chat" | "team") => void;
+  onClearChat?: (projectName: string) => Promise<void>;
 }) {
   const task = selectedTask(project);
   const narration = missionNarration(project, task, liveRuns, failures);
   const activeRuns = liveRuns.filter((run) => run.project === project.name);
   const hasLive = activeRuns.length > 0;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = React.useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [menuOpen]);
 
   const sessionTitle = task?.title || project.name;
   const teamStatus = project.team?.status;
@@ -285,18 +296,37 @@ export function MissionControl({ project, liveRuns = [], failures = [], activeTa
       : "Idle";
   const participantCount = task?.planned_agents?.length
     ?? (project.team ? 3 : 0);
-
   return (
     <section className="mission-control mission-control--session" aria-label="Build session">
-      <span className="session-title" title={sessionTitle}>
-        {task ? `Build Session: ${sessionTitle}` : project.name}
+      <span className="session-title" title={project.name}>
+        {project.name}
       </span>
       <div className="session-badges">
         <span className={`session-badge ${badgeClass}`}>{badgeLabel}</span>
         {participantCount > 0 && (
           <span className="session-participants">Participants: {participantCount} Agent{participantCount !== 1 ? "s" : ""}</span>
         )}
-        <button type="button" className="session-more-btn" aria-label="More options">⋯</button>
+        <div className="session-more-wrap" style={{ position: "relative" }} ref={menuRef}>
+          <button
+            type="button"
+            className="session-more-btn"
+            aria-label="More options"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+          >⋯</button>
+          {menuOpen && (
+            <div className="session-more-menu">
+              <button
+                type="button"
+                disabled={!onClearChat || hasLive}
+                onClick={() => { setMenuOpen(false); if (onClearChat) void onClearChat(project.name); }}
+                title={hasLive ? "Cannot clear while a run is active" : "Clear chat, team log, and saved run results"}
+              >
+                Clear chat
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </section>
   );

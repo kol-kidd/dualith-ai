@@ -539,6 +539,29 @@ async def fetch_model_price(slot: ProviderSlotConfig) -> float | None:
 
 # ── HTTP streaming runner ────────────────────────────────────────────────────
 
+def _record_cache_usage(usage_record: dict[str, Any], u: dict[str, Any]) -> None:
+    """Surface input/cache token counts from a provider usage object.
+
+    Handles both Anthropic (input_tokens, cache_read_input_tokens,
+    cache_creation_input_tokens) and OpenAI-compatible
+    (prompt_tokens, prompt_tokens_details.cached_tokens) shapes so the quota UI
+    can show how much the prompt cache is saving.
+    """
+    if not isinstance(u, dict):
+        return
+    if "input_tokens" in u:
+        usage_record["input_tokens"] = u.get("input_tokens") or usage_record.get("input_tokens", 0)
+    elif "prompt_tokens" in u:
+        usage_record["input_tokens"] = u.get("prompt_tokens") or usage_record.get("input_tokens", 0)
+    cache_read = u.get("cache_read_input_tokens")
+    if cache_read is None:
+        cache_read = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
+    if cache_read is not None:
+        usage_record["cache_read_input_tokens"] = cache_read
+    if u.get("cache_creation_input_tokens") is not None:
+        usage_record["cache_creation_input_tokens"] = u.get("cache_creation_input_tokens")
+
+
 async def run_agent_via_api(
     *,
     project_name: str,
@@ -546,6 +569,7 @@ async def run_agent_via_api(
     runner: str,
     model: str,
     run_prompt: str,
+    system_prompt: str = "",
     usage_record: dict[str, Any],
     publish_output_fn: Any,  # event_bus.publish_output
     publish_status_fn: Any,  # publish_agent_status
@@ -563,19 +587,53 @@ async def run_agent_via_api(
     api_key: str = config.get("api_key") or ""
     api_model: str = model or config.get("api_model") or ""
     extra_headers: dict = config.get("api_extra_headers") or {}
+    provider: str = config.get("provider") or ""
     run_id = str(usage_record["id"])
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-        **extra_headers,
-    }
-    payload = {
-        "model": api_model,
-        "messages": [{"role": "user", "content": run_prompt}],
-        "stream": True,
-    }
+    # Native Anthropic Messages API supports explicit prompt caching via cache_control;
+    # mark the stable system prefix ephemeral so repeated calls only pay for the suffix.
+    is_anthropic_native = provider == "claude" and "anthropic.com" in api_base
+
+    if is_anthropic_native:
+        endpoint = f"{api_base}/messages"
+        headers = {
+            "x-api-key": api_key,
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            **extra_headers,
+        }
+        system_blocks = (
+            [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+            if system_prompt.strip()
+            else []
+        )
+        payload: dict[str, Any] = {
+            "model": api_model,
+            "max_tokens": 8192,
+            "messages": [{"role": "user", "content": run_prompt or system_prompt}],
+            "stream": True,
+        }
+        if system_blocks:
+            payload["system"] = system_blocks
+    else:
+        endpoint = f"{api_base}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            **extra_headers,
+        }
+        # OpenAI-compatible providers (OpenAI, OpenRouter, Gemini-compat) auto-cache a
+        # long, stable leading prefix; isolating it in a system message maximizes hits.
+        messages: list[dict[str, str]] = []
+        if system_prompt.strip():
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": run_prompt or system_prompt})
+        payload = {
+            "model": api_model,
+            "messages": messages,
+            "stream": True,
+        }
 
     collected: list[str] = []
     status = "error"
@@ -584,7 +642,7 @@ async def run_agent_via_api(
     try:
         publish_status_fn(project_name, agent, runner, api_model, run_id, "running")
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=5.0)) as client:
-            async with client.stream("POST", f"{api_base}/chat/completions", headers=headers, json=payload) as resp:
+            async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
                 if resp.status_code not in (200, 201):
                     # Read the streamed body so _http_error_message can surface the
                     # provider's own detail; the actionable text (e.g. "rate limit"
@@ -605,16 +663,30 @@ async def run_agent_via_api(
                         break
                     try:
                         chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if is_anthropic_native:
+                        # Anthropic SSE: text arrives as content_block_delta.delta.text;
+                        # usage (incl. cache hits) rides message_start / message_delta.
+                        ctype = chunk.get("type")
+                        if ctype == "content_block_delta":
+                            delta_content = (chunk.get("delta") or {}).get("text") or ""
+                        else:
+                            delta_content = ""
+                            u = (chunk.get("message") or {}).get("usage") or chunk.get("usage") or {}
+                            if u:
+                                _record_cache_usage(usage_record, u)
+                    else:
                         delta_content = (
                             chunk.get("choices", [{}])[0]
                             .get("delta", {})
                             .get("content") or ""
                         )
-                        if delta_content:
-                            collected.append(delta_content)
-                            publish_output_fn(project_name, run_id, agent, "output", delta_content)
-                    except json.JSONDecodeError:
-                        pass
+                        if chunk.get("usage"):
+                            _record_cache_usage(usage_record, chunk["usage"])
+                    if delta_content:
+                        collected.append(delta_content)
+                        publish_output_fn(project_name, run_id, agent, "output", delta_content)
 
         full_output = "".join(collected)
         result_file_path.parent.mkdir(parents=True, exist_ok=True)

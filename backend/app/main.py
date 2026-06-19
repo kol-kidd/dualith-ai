@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from contextlib import asynccontextmanager
 
+import httpx
 import secrets
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Header, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -603,12 +604,13 @@ async def check_runner_health() -> None:
     for runner_id, config in RUNNER_COMMANDS.items():
         if config.get("use_http"):
             # API-key mode: probe the provider endpoint instead of the CLI binary
+            _provider = config.get("provider") or "openai"
             slot = ProviderSlotConfig(
-                provider=config.get("provider") or "openai",
+                provider=_provider,
                 mode="api_key",
                 api_key=config.get("api_key"),
                 model=config.get("api_model"),
-                base_url=config.get("api_base"),
+                **( {"base_url": config.get("api_base")} if _provider == "custom" and config.get("api_base") else {} ),
             )
             result = await test_provider_slot(slot)
             runner_health[runner_id] = {
@@ -854,6 +856,9 @@ ANSWER_PREFIX = "✍️ ANSWER:"
 
 # Cap CHAT_HISTORY.md payload streamed to the UI so a long transcript can't bloat snapshots.
 CHAT_HISTORY_MAX_CHARS = 32_000
+# Smaller cap for the history tail *injected into agent prompts* — every agent call
+# re-sends this prefix, so keeping it tight is the single biggest token saver.
+CHAT_HISTORY_PROMPT_CHARS = 6_000
 
 def ensure_dualith_store() -> None:
     DUALITH_DIR.mkdir(parents=True, exist_ok=True)
@@ -1837,6 +1842,21 @@ def taskable_workflow(workflow_id: str) -> bool:
     return kind in {"team", "plan-team", "pm-team", "pipeline"}
 
 
+def short_scope(prompt: str, limit: int = 120) -> str:
+    """A one-line, trimmed scope phrase from the user's prompt for paraphrasing.
+
+    Used to frame the team Objective and the conversational Lead ack without
+    echoing the user's full verbatim message into the Team tab.
+    """
+    cleaned = re.sub(r"\s+", " ", prompt or "").strip()
+    if not cleaned:
+        return "the requested change"
+    first = re.split(r"(?<=[.!?])\s+", cleaned, maxsplit=1)[0].strip() or cleaned
+    if len(first) > limit:
+        first = first[: limit - 1].rstrip() + "…"
+    return first
+
+
 def team_dispatch_receipt_body(
     workflow_id: str,
     workflow: dict[str, Any],
@@ -1895,9 +1915,30 @@ def append_team_dispatch_receipt(
     team_mode: str = "lean",
     estimated_runner_calls: int = 0,
     planned_agents: list[str] | None = None,
+    prompt: str = "",
 ) -> None:
+    """Acknowledge a team dispatch.
+
+    The Chat tab gets a short conversational reply from Dualith (the human-facing
+    conversation lives here). The structured routing detail goes to AGENT_CHAT.md
+    so the Team tab opens with mode/lead/teammate/route context for power users.
+    """
+    scope = short_scope(prompt) if prompt.strip() else "your request"
+    if "queued" in status.lower():
+        ack = (
+            f"Queued **{scope}** — the team will pick it up as soon as the current "
+            "task finishes. I'll post a summary here when it's done; you can watch the "
+            "team work in the Team tab."
+        )
+    else:
+        ack = (
+            f"On it — I'll have the team build **{scope}**. I'll post a summary here "
+            "when it's done; you can watch them work it out in the Team tab."
+        )
+    append_chat_history(project_path, f"### Dualith Answer - {utc_now()}\n\n{ack}\n\n")
+
     body = team_dispatch_receipt_body(workflow_id, workflow, status, route_reason, runner_pref, team_mode, estimated_runner_calls, planned_agents)
-    append_chat_history(project_path, f"### Team Dispatch - {utc_now()}\n\n{body}\n\n")
+    append_agent_chat(project_path, f"### Dispatch - {utc_now()}\n\n{body}\n\n")
 
 
 def recover_interrupted_tasks() -> None:
@@ -2589,6 +2630,8 @@ def new_usage_record(project_name: str, mode: str, runner: str, model: str, reas
         "input_tokens": None,
         "output_tokens": None,
         "total_tokens": None,
+        "cache_read_input_tokens": None,
+        "cache_creation_input_tokens": None,
         "cost_usd": None,
     }
 
@@ -3343,6 +3386,42 @@ async def wait_for_port(project_name: str, project_path: Path, port: int) -> Non
         await broadcast("dev_server_event", entry)
 
 
+async def _auto_npm_install(project_name: str, project_path: Path) -> None:
+    """Run npm install in the background and restart the dev server when done."""
+    entry = record_event("DEV_SERVER_LOG", f"{relative_path(project_path)} :: missing modules detected — running npm install...")
+    await broadcast("dev_server_event", entry)
+    result = await asyncio.to_thread(
+        subprocess.run,
+        ["npm", "install"],
+        cwd=project_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        err_entry = record_event("DEV_SERVER_ERR", f"{relative_path(project_path)} :: npm install failed: {result.stderr.strip()[:240]}")
+        await broadcast("dev_server_event", err_entry)
+        return
+    ok_entry = record_event("DEV_SERVER_LOG", f"{relative_path(project_path)} :: npm install done — restarting dev server...")
+    await broadcast("dev_server_event", ok_entry)
+    # Stop the crashed server and restart it
+    state = active_dev_servers.get(project_name, {})
+    process = state.get("process")
+    if process:
+        await terminate_process_tree(process)
+    req = DevServerStartRequest(port=state.get("port", 0), command=state.get("command", ""))
+    try:
+        active_dev_servers.pop(project_name, None)
+        await start_project_dev_server(project_name, project_path, req)
+    except Exception as exc:
+        err2 = record_event("DEV_SERVER_ERR", f"{relative_path(project_path)} :: restart failed: {exc}")
+        await broadcast("dev_server_event", err2)
+
+
+_npm_install_triggered: set[str] = set()
+
+
 async def stream_dev_server_output(project_name: str, project_path: Path, stream: Any, action: str) -> None:
     if not stream:
         return
@@ -3357,6 +3436,15 @@ async def stream_dev_server_output(project_name: str, project_path: Path, stream
         state[key] = tail[-20:]
         if action.endswith("_ERR"):
             state["last_error"] = text[:500]
+            # Auto-heal: missing npm module → run npm install then restart
+            if (
+                "MODULE_NOT_FOUND" in text
+                and project_name not in _npm_install_triggered
+                and (project_path / "package.json").exists()
+            ):
+                _npm_install_triggered.add(project_name)
+                asyncio.create_task(_auto_npm_install(project_name, project_path))
+                continue  # suppress the raw MODULE_NOT_FOUND noise from the log
         entry = record_event(action, f"{relative_path(project_path)} :: {text[:240]}")
         await broadcast("dev_server_event", entry)
 
@@ -3465,6 +3553,7 @@ async def stop_project_dev_server(project_name: str, project_path: Path) -> dict
         await terminate_process_tree(process)
 
     state["status"] = "stopped"
+    _npm_install_triggered.discard(project_name)
     entry = record_event("DEV_SERVER_STOPPED", project_path)
     await broadcast("dev_server_event", entry)
     return dev_server_snapshot(project_name, project_path)
@@ -3783,15 +3872,17 @@ def agent_process_env(project_name: str, project_path: Path) -> dict[str, str]:
     return env
 
 
-def read_chat_history(project_path: Path) -> str:
+def read_chat_history(project_path: Path, max_chars: int = CHAT_HISTORY_MAX_CHARS) -> str:
     path = chat_history_path(project_path)
     if not path.exists():
         return ""
     content = path.read_text(encoding="utf-8", errors="replace")
-    return content[-CHAT_HISTORY_MAX_CHARS:] if len(content) > CHAT_HISTORY_MAX_CHARS else content
+    return content[-max_chars:] if len(content) > max_chars else content
 
 
-_COMPACT_THRESHOLD = CHAT_HISTORY_MAX_CHARS * 2  # compact when file hits 2× the read cap
+# Compact transcripts when they hit 1× the read cap (not 2×) — halves the max
+# amount an agent can read before the file is trimmed back to the read-cap size.
+_COMPACT_THRESHOLD = CHAT_HISTORY_MAX_CHARS
 
 
 def _compact_transcript(path: Path, archive_dir: Path, max_chars: int) -> None:
@@ -3879,6 +3970,31 @@ def append_agent_chat(project_path: Path, text: str) -> None:
             {"file": "AGENT_CHAT.md", "body": f"{separator}{text}"},
         )
     schedule_team_room_broadcast()
+
+
+# How much AGENT_CHAT.md tail to keep when a new task starts.
+# Agents need enough context to see what the last task did, but not the full
+# multi-task history — keeping it tight is the single biggest per-run saving
+# for mature projects since every CLI agent reads this file autonomously.
+_AGENT_CHAT_TASK_BOUNDARY_CHARS = 8_000
+
+
+def compact_agent_chat_for_new_task(project_path: Path) -> None:
+    """Trim AGENT_CHAT.md to the last ~8KB before starting a new task.
+
+    Each task's agents append to this file.  Without trimming at task boundaries
+    the file grows indefinitely and every subsequent CLI agent pays to read the
+    full accumulated history — even when only the latest round is relevant.
+    """
+    path = agent_chat_path(project_path)
+    if not path.exists():
+        return
+    content = path.read_text(encoding="utf-8", errors="replace")
+    if len(content) <= _AGENT_CHAT_TASK_BOUNDARY_CHARS:
+        return
+    archive_dir = project_path / ".dualith" / "archive"
+    _compact_transcript(path, archive_dir, _AGENT_CHAT_TASK_BOUNDARY_CHARS)
+    log.debug("agent_chat trimmed to %d chars for new task start", _AGENT_CHAT_TASK_BOUNDARY_CHARS)
 
 
 def agent_chat_size(project_path: Path) -> int:
@@ -5498,7 +5614,7 @@ def runner_reasoning_arg(runner: str, reasoning: str) -> str:
     return reasoning
 
 
-def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = None, partner: str = "", attachment_paths: list[str] | None = None) -> str:
+def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = None, partner: str = "", attachment_paths: list[str] | None = None, split: bool = False) -> str | tuple[str, str]:
     runner_labels_by_id = {rid: str(cfg["label"]) for rid, cfg in RUNNER_COMMANDS.items()}
     partner_label = runner_labels_by_id.get(partner, partner or "your teammate")
     prompt_templates = {
@@ -5530,45 +5646,66 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
     is_review_agent = agent in REVIEW_AGENTS
     # Roles that get the full chat history (conversational context matters for them).
     _needs_chat_history = agent in {"lead", "ask", "pm", "architect", "planner"}
-    # Roles that need project memory / global memory (implementation-context agents).
+    # Roles that need project memory (implementation-context agents).
     _needs_memory = agent not in {"summarizer", "decomposer", *SPECIALIST_REVIEWERS}
+    # Global long-term memory only steers the roles that make architectural/build
+    # decisions. Re-sending it to every role just inflates the per-call prefix.
+    _needs_global_memory = agent in {"lead", "architect", "planner"}
 
+    _attached_memory = False
+    _attached_history = False
     if project_path is not None:
         prompt = f"{project_runtime_prompt_block(project_path)}{prompt}"
         if _needs_memory and not is_review_agent:
             doc_block = project_memory_prompt_block(project_path)
             if doc_block:
                 prompt = f"{doc_block}{prompt}"
-                log.debug("project memory injected agent=%s chars=%s", agent, len(doc_block))
-            memory_block = memory_prompt_block(project_path)
-            if memory_block:
-                prompt = f"{memory_block}{prompt}"
+                _attached_memory = True
+            if _needs_global_memory:
+                memory_block = memory_prompt_block(project_path)
+                if memory_block:
+                    prompt = f"{memory_block}{prompt}"
+                    _attached_memory = True
 
     if is_review_agent:
         prompt = f"{prompt}\n\n{REVIEW_COST_CONTROL}"
 
-    # Only Lead, ask, pm, architect, planner need the full chat history tail.
-    # Reviewers, tester, teammate, summarizer read AGENT_CHAT.md directly; giving
-    # them CHAT_HISTORY too doubles their context for no benefit.
+    # Only Lead, ask, pm, architect, planner need the chat history tail, and they
+    # only need a small recent window — re-sending the full 32KB UI snapshot on every
+    # call is the single biggest source of token bloat.
     if project_path is not None and _needs_chat_history:
-        chat = read_chat_history(project_path)
+        chat = read_chat_history(project_path, max_chars=CHAT_HISTORY_PROMPT_CHARS)
         if chat:
             prompt = f"Recent conversation (CHAT_HISTORY.md tail):\n{chat}\n\n{prompt}"
+            _attached_history = True
 
     # HANDOFF boilerplate only for agents that actually hand off to another agent.
     if agent in {"lead", "tester", "teammate", "builder", "auditor"}:
         prompt = f"{prompt}{HANDOFF_PROMPT_TRAILER}"
 
+    # Everything built so far is the stable, role+project prefix. The user-specific
+    # block below is the only part that changes call-to-call. Keeping them separable
+    # lets the HTTP path send the prefix as a cacheable system message.
+    prefix = prompt
+
+    suffix = ""
     extra = run_prompt.strip()
     if extra:
         label = "User question" if agent == "ask" else "User run prompt"
-        prompt = f"{prompt}\n\n{label}:\n{extra}\n"
+        suffix = f"{suffix}\n\n{label}:\n{extra}\n"
 
     paths = [p for p in (attachment_paths or []) if p and p.strip()]
     if paths:
         lines = "\n".join(f"- {p.strip()}" for p in paths)
-        prompt = f"{prompt}\n\nAttached images (read these files from disk; they are part of the user's message):\n{lines}\n"
+        suffix = f"{suffix}\n\nAttached images (read these files from disk; they are part of the user's message):\n{lines}\n"
 
+    prompt = f"{prefix}{suffix}"
+    log.info(
+        "agent_prompt built agent=%s chars=%d history=%s memory=%s",
+        agent, len(prompt), _attached_history, _attached_memory,
+    )
+    if split:
+        return prefix, suffix
     return prompt
 
 
@@ -6455,7 +6592,8 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             attach_line = f"\n\n_Attached: {', '.join(attach_names)}_" if attach_names else ""
             append_chat_history(project_path, f"### User Query - {utc_now()}\n\n{run_prompt.strip()}{attach_line}\n\n")
             await broadcast("chat_event", record_event("CHAT_QUERY", f"{relative_path(project_path)} :: ask query"))
-        prompt = agent_prompt(agent, run_prompt, project_path, partner, attachment_paths)
+        system_prefix, user_block = agent_prompt(agent, run_prompt, project_path, partner, attachment_paths, split=True)
+        prompt = f"{system_prefix}{user_block}"
         usage_record = new_usage_record(project_name, agent, runner, model, reasoning, prompt)
         usage_record["user_prompt"] = run_prompt.strip()
         output_path = result_file_path(project_path, str(usage_record["id"]))
@@ -6464,7 +6602,8 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             agent=agent,
             runner=runner,
             model=model or str(config.get("api_model") or ""),
-            run_prompt=prompt,
+            run_prompt=user_block,
+            system_prompt=system_prefix,
             usage_record=usage_record,
             publish_output_fn=event_bus.publish_output,
             publish_status_fn=publish_agent_status,
@@ -7135,21 +7274,56 @@ def firstMeaningful_backend_line(text: str) -> str:
     return ""
 
 
-def package_scripts(project_path: Path) -> dict[str, str]:
-    path = project_path / "package.json"
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except json.JSONDecodeError:
-        return {}
-    scripts = data.get("scripts", {})
-    return {str(key): str(value) for key, value in scripts.items()} if isinstance(scripts, dict) else {}
+def final_summary_for_user(project_path: Path) -> str:
+    """Build a user-facing summary from the last `### Lead` section in AGENT_CHAT.md.
+
+    The Lead's final section is already written as 2–4 plain sentences leading with
+    the outcome (see LEAD_PROMPT), so we can reuse it as the Chat answer with no
+    extra model call. Strips handoff/question/verdict scaffolding and the header.
+    """
+    section = latest_review_section(project_path, "lead")
+    lines: list[str] = []
+    for raw in section.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        upper = line.upper()
+        # Drop the section header, machine scaffolding, and verdict markers.
+        if upper.startswith("### "):
+            continue
+        if upper.startswith(("HANDOFF:", "QUESTION:")):
+            continue
+        if line.startswith("```"):
+            continue
+        if upper.endswith(("APPROVED", "CHANGES REQUESTED")):
+            continue
+        lines.append(line.lstrip("-*# ").strip())
+    summary = " ".join(part for part in lines if part).strip()
+    if len(summary) > 1200:
+        summary = summary[:1199].rstrip() + "…"
+    return summary
+
+
+def post_final_team_answer(project_name: str, project_path: Path) -> None:
+    """Write one user-facing `### Dualith Answer` to Chat when a team run succeeds.
+
+    Idempotent: guarded by a flag on the active_teams entry so reconnects or
+    repeated terminal paths never double-post.
+    """
+    state = active_teams.get(project_name)
+    if state is not None:
+        if state.get("final_answer_posted"):
+            return
+        state["final_answer_posted"] = True
+    summary = final_summary_for_user(project_path)
+    if not summary:
+        summary = "Done — the team finished and signed off on the change. See the Team tab for the full breakdown."
+    append_chat_history(project_path, f"### Dualith Answer - {utc_now()}\n\n{summary}\n\n")
 
 
 def deterministic_check_commands(project_path: Path) -> list[str]:
     commands: list[str] = []
-    scripts = package_scripts(project_path)
+    scripts = package_scripts(read_package_json(project_path))
     for script in ("check", "test", "build"):
         if script in scripts:
             commands.append(f"npm run {script}")
@@ -7557,6 +7731,7 @@ async def run_plan_then_team(project_name: str, project_path: Path, runner_pref:
 async def run_pm_then_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None, task_id: str | None = None, team_mode: str = "lean") -> None:
     """PM-clarify workflow: PM checks if request is clear, then team builds."""
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
+    compact_agent_chat_for_new_task(project_path)
 
     # 1. Run PM. Manual runner choices are literal; auto keeps Claude as PM.
     pm_runner = role_runner_for_pref(runner_pref, "pm")
@@ -7633,6 +7808,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
     }
     set_task_status(task_id, "active", "lead", f"{team_mode.title()} team loop started.")
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
+    compact_agent_chat_for_new_task(project_path)
     log.info("team routed  project=%s mode=%s team_mode=%s lead=%s teammate=%s reason=%s",
              project_name, runner_mode, team_mode, RUNNER_COMMANDS[lead]['label'], RUNNER_COMMANDS[teammate]['label'], reason)
     record_event("TEAM_ROUTED", f"{relative_path(project_path)} :: {team_mode} :: {runner_mode} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason}")
@@ -7647,7 +7823,13 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
             routing_line = f"Lead: {RUNNER_COMMANDS[lead]['label']} · Teammate: {RUNNER_COMMANDS[teammate]['label']}"
         if not routing_line.startswith("Mode:"):
             routing_line = f"Mode: {team_mode} / {routing_line}"
-        append_agent_chat(project_path, f"### Task - {utc_now()}\n\n{routing_line}\n\n{run_prompt.strip()}\n\n")
+        # Team tab shows agents talking to each other — never the user's raw words.
+        # Frame the work as a neutral objective; the Lead reads the actual request
+        # from CHAT_HISTORY.md (the Lead prompt already loads it).
+        append_agent_chat(
+            project_path,
+            f"### Objective - {utc_now()}\n\n{routing_line}\n\nScope: {short_scope(run_prompt)}\n\n",
+        )
 
     def stopping() -> bool:
         return bool(active_teams.get(project_name, {}).get("stopping"))
@@ -8066,6 +8248,9 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 # card reads "approved" rather than the last specialist's status (both
                 # share the "reviewer" role in the task event log).
                 append_task_event(task_id, "review", "Final Reviewer approved", "Team signed off.", "reviewer", "approved")
+                # Centralize the conversation: post one user-facing summary to Chat,
+                # reusing the Lead's final section so this costs no extra model call.
+                post_final_team_answer(project_name, project_path)
                 await set_team_state(project_name, project_path, "team_event", status="done", step="approved", round=round_no)
                 return
 
@@ -9083,7 +9268,11 @@ async def start_orchestration(
         runner = runner_pref
         route_reason = "manual"
         if runner == "auto":
-            runner, route_reason = auto_runner_for_agent(agent)
+            # role_runner_for_pref applies the eco price tier first (light roles like
+            # `ask` → cheap slot), then falls back to the legacy role→runner map. This
+            # is how simple questions get the lighter model while builds stay premium.
+            runner = role_runner_for_pref(runner_pref, agent)
+            route_reason = "auto (role tier)"
             record_event("AUTO_ROUTED", f"{relative_path(project_path)} :: {RUN_MODES[agent]['label']} -> {RUNNER_COMMANDS[runner]['label']} :: {route_reason}")
         if runner not in RUNNER_COMMANDS:
             raise HTTPException(status_code=404, detail="Unknown runner.")
@@ -9105,6 +9294,94 @@ async def start_orchestration(
         return
 
     raise HTTPException(status_code=404, detail="Unknown workflow kind.")
+
+
+async def try_inline_ask(
+    project_name: str,
+    project_path: Path,
+    runner_pref: str,
+    model: str,
+    prompt: str,
+) -> bool:
+    """Answer a simple ask question directly via the API without spawning a subprocess.
+
+    Returns True if the answer was handled inline, False if the caller should fall
+    through to the normal ask agent subprocess.
+
+    Only activates when the resolved ask runner has use_http=True (api-key mode).
+    Subscription/CLI users fall through so the agent can browse files with its tools.
+    """
+    runner = role_runner_for_pref(runner_pref, "ask")
+    from .runners import RUNNER_COMMANDS
+    config = RUNNER_COMMANDS.get(runner, {})
+    if not config.get("use_http"):
+        return False
+
+    api_base: str = config.get("api_base") or ""
+    api_key: str = config.get("api_key") or ""
+    api_model: str = model or config.get("api_model") or ""
+    extra_headers: dict = config.get("api_extra_headers") or {}
+    if not api_base or not api_key or not api_model:
+        return False
+
+    full_prompt = agent_prompt("ask", prompt, project_path)
+
+    # Write user query to CHAT_HISTORY before answering (mirrors the subprocess path).
+    if prompt.strip():
+        append_chat_history(project_path, f"### User Query - {utc_now()}\n\n{prompt.strip()}\n\n")
+        await broadcast("chat_event", record_event("CHAT_QUERY", f"{relative_path(project_path)} :: ask query"))
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        **extra_headers,
+    }
+    payload = {
+        "model": api_model,
+        "messages": [{"role": "user", "content": full_prompt}],
+        "stream": True,
+    }
+
+    collected: list[str] = []
+    run_id = utc_now().replace(":", "-").replace(" ", "T")
+    event_bus.publish("agent_status", project_name, {
+        "agent": "ask", "runner": runner, "model": api_model,
+        "state": "running", "run_id": run_id, "round": 0, "detail": "",
+    })
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=5.0)) as client:
+            async with client.stream("POST", f"{api_base}/chat/completions", headers=headers, json=payload) as resp:
+                if resp.status_code not in (200, 201):
+                    return False
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                        delta = (chunk.get("choices", [{}])[0].get("delta", {}).get("content") or "")
+                        if delta:
+                            collected.append(delta)
+                            event_bus.publish_output(project_name, run_id, "ask", "output", delta)
+                    except json.JSONDecodeError:
+                        pass
+    except Exception:
+        return False
+
+    answer = "".join(collected).strip()
+    if not answer:
+        return False
+
+    event_bus.publish("agent_status", project_name, {
+        "agent": "ask", "runner": runner, "model": api_model,
+        "state": "done", "run_id": run_id, "round": 0, "detail": "",
+    })
+    append_chat_history(project_path, f"### Dualith Answer - {utc_now()}\n\n{answer}\n\n")
+    await broadcast("chat_event", record_event("CHAT_ANSWER", f"{relative_path(project_path)} :: ask answer"))
+    return True
 
 
 @app.post("/api/projects/{name}/chat")
@@ -9232,7 +9509,7 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
                 preflight_status=str(preflight.get("status", "ready")),
             )
             append_task_event(str(task.get("id", "")), "queue_event", "Queued behind active task", "This request will start automatically when the active task finishes.", "queue", "pending")
-            append_team_dispatch_receipt(project_path, workflow_id, workflow, "queued behind active task", route_reason, runner, team_mode, estimated_runner_calls, planned_agents)
+            append_team_dispatch_receipt(project_path, workflow_id, workflow, "queued behind active task", route_reason, runner, team_mode, estimated_runner_calls, planned_agents, prompt=request.prompt)
             entry = record_event("TASK_QUEUED", f"{relative_path(project_path)} :: {task.get('title', 'Task queued')}")
             schedule_broadcast("team_event", entry)
             return await collect_snapshot()
@@ -9264,7 +9541,15 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
         )
         task_id = str(task.get("id", ""))
         record_event("TASK_STARTED", f"{relative_path(project_path)} :: {task.get('title', 'Task started')}")
-        append_team_dispatch_receipt(project_path, workflow_id, workflow, "starting now", route_reason, runner, team_mode, estimated_runner_calls, planned_agents)
+        append_team_dispatch_receipt(project_path, workflow_id, workflow, "starting now", route_reason, runner, team_mode, estimated_runner_calls, planned_agents, prompt=request.prompt)
+
+    # For ask-intent requests: attempt a fast inline answer via the API (no subprocess).
+    # Falls through to start_orchestration if the runner is in CLI/subscription mode.
+    if workflow_id == "ask" and not request.attachment_paths:
+        handled = await try_inline_ask(name, project_path, runner, model, request.prompt)
+        if handled:
+            return await collect_snapshot()
+
     await start_orchestration(name, project_path, workflow_id, runner, model, reasoning, request.prompt, request.attachment_paths, task_id=task_id, team_mode=team_mode)
 
     return await collect_snapshot()
@@ -9378,9 +9663,30 @@ async def clear_chat(name: str) -> dict[str, Any]:
     clear_chat_history(project_path)
     clear_agent_chat(project_path, notify=False)
     clear_project_results(name)
-    entry = record_event("CHAT_CLEARED", f"{relative_path(project_path)} :: chat + agent-chat + results cleared")
-    schedule_broadcast("chat_event", entry)
-    return await collect_snapshot()
+    # Reset the active task's run-state so the team conversation panel shows
+    # empty after clear (phases, events, specialist_reviews all come from the
+    # task record, not from AGENT_CHAT.md, so they survive a file-only clear).
+    all_tasks = read_tasks()
+    changed = False
+    for task in all_tasks:
+        if str(task.get("project", "")) != name:
+            continue
+        workflow_id = str(task.get("workflow_id", ""))
+        task["phases"] = initial_task_phases(workflow_id)
+        task["events"] = []
+        task["decisions"] = []
+        task["active_phase"] = ""
+        task["subagents"] = []
+        task["status"] = "pending"
+        if isinstance(task.get("specialist_reviews"), list):
+            task["specialist_reviews"] = [specialist_review_state(r) for r in SPECIALIST_REVIEWERS]
+        changed = True
+    if changed:
+        write_tasks(all_tasks)
+    entry = record_event("CHAT_CLEARED", f"{relative_path(project_path)} :: chat + agent-chat + results + task state cleared")
+    snapshot = await collect_snapshot()
+    await broadcast("chat_event", entry)
+    return snapshot
 
 
 @app.post("/api/projects/{name}/pipeline/start")

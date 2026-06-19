@@ -14,6 +14,7 @@
   --dualith-line: #d9d9e0;
   --dualith-line-hard: #e7e7ec;
   --dualith-text: #1f2328;
+  --dualith-fg: #1f2328;
   --dualith-muted: #6b7280;
   --dualith-text-strong: #111827;
   --dualith-text-soft: #1f2937;
@@ -41,6 +42,7 @@
   --dualith-line: #1f2937;
   --dualith-line-hard: #111827;
   --dualith-text: #d4d4d8;
+  --dualith-fg: #d4d4d8;
   --dualith-muted: #71717a;
   --dualith-text-strong: #f4f4f5;
   --dualith-text-soft: #d4d4d8;
@@ -69,6 +71,7 @@
   --dualith-line: #2a2a31;
   --dualith-line-hard: #1c1c21;
   --dualith-text: #e4e4e7;
+  --dualith-fg: #e4e4e7;
   --dualith-muted: #8b8b94;
   --dualith-text-strong: #f5f5f6;
   --dualith-text-soft: #e4e4e7;
@@ -97,6 +100,7 @@
   --dualith-line: #2b3a4d;
   --dualith-line-hard: #1c2836;
   --dualith-text: #d8dee9;
+  --dualith-fg: #d8dee9;
   --dualith-muted: #7c8da3;
   --dualith-text-strong: #eceff4;
   --dualith-text-soft: #d8dee9;
@@ -209,70 +213,70 @@ select option:disabled {
 /* Theme compatibility for existing Tailwind utility classes in the app. */
 .text-zinc-100,
 .text-zinc-200 {
-  color: var(--dualith-text-strong);
+  color: var(--dualith-text-strong) !important;
 }
 
 .text-zinc-300,
 .text-zinc-400 {
-  color: var(--dualith-text-soft);
+  color: var(--dualith-text-soft) !important;
 }
 
 .text-zinc-500,
 .text-zinc-600 {
-  color: var(--dualith-text-muted);
+  color: var(--dualith-text-muted) !important;
 }
 
 .text-zinc-700 {
-  color: var(--dualith-text-faint);
+  color: var(--dualith-text-faint) !important;
 }
 
 .text-zinc-800 {
-  color: color-mix(in srgb, var(--dualith-text-faint) 72%, var(--dualith-bg));
+  color: color-mix(in srgb, var(--dualith-text-faint) 72%, var(--dualith-bg)) !important;
 }
 
 .placeholder\:text-zinc-600::placeholder,
 .placeholder\:text-zinc-700::placeholder {
-  color: var(--dualith-text-faint);
+  color: var(--dualith-text-faint) !important;
 }
 
 .bg-zinc-950 {
-  background-color: var(--dualith-bg);
+  background-color: var(--dualith-bg) !important;
 }
 
 .bg-zinc-950\/60 {
-  background-color: color-mix(in srgb, var(--dualith-bg) 72%, transparent);
+  background-color: color-mix(in srgb, var(--dualith-bg) 72%, transparent) !important;
 }
 
 .bg-zinc-900,
 .bg-zinc-900\/50 {
-  background-color: var(--dualith-surface-hover);
+  background-color: var(--dualith-surface-hover) !important;
 }
 
 .bg-zinc-800 {
-  background-color: color-mix(in srgb, var(--dualith-line) 72%, var(--dualith-surface));
+  background-color: color-mix(in srgb, var(--dualith-line) 72%, var(--dualith-surface)) !important;
 }
 
 .border-zinc-950,
 .border-zinc-900,
 .border-zinc-800,
 .border-zinc-700 {
-  border-color: var(--dualith-line);
+  border-color: var(--dualith-line) !important;
 }
 
 .hover\:bg-zinc-950:hover,
 .hover\:bg-zinc-900:hover,
 .hover\:bg-zinc-900\/50:hover {
-  background-color: var(--dualith-surface-hover);
+  background-color: var(--dualith-surface-hover) !important;
 }
 
 .hover\:text-zinc-200:hover,
 .hover\:text-zinc-300:hover,
 .hover\:text-zinc-400:hover {
-  color: var(--dualith-text-strong);
+  color: var(--dualith-text-strong) !important;
 }
 
 .hover\:text-zinc-500:hover {
-  color: var(--dualith-text-soft);
+  color: var(--dualith-text-soft) !important;
 }
 
 .disabled\:text-zinc-600:disabled,
@@ -1463,9 +1467,7 @@ select option:disabled {
 
 /* Chat thread: centered transcript below the workspace. */
 .dualith-thread {
-  margin-inline: auto;
   width: 100%;
-  max-width: var(--dualith-chat-max);
   display: flex;
   flex-direction: column;
   gap: var(--dualith-chat-gap);
@@ -2549,147 +2551,6 @@ select option:disabled {
   padding: 0.5rem 0;
 }
 
-.team-dispatch-receipt {
-  display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 0.65rem;
-  padding: 0.65rem 0.75rem;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--dualith-cyan) 7%, var(--dualith-surface));
-  color: var(--dualith-text);
-  font-family: var(--dualith-font-mono);
-}
-
-.team-dispatch-receipt__mark {
-  width: 7px;
-  height: 7px;
-  margin-top: 0.35rem;
-  border-radius: 2px;
-  background: var(--dualith-cyan);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dualith-cyan) 14%, transparent);
-}
-
-.team-dispatch-receipt__content {
-  min-width: 0;
-}
-
-.team-dispatch-receipt__head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.45rem 0.7rem;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--dualith-text-strong);
-}
-
-.team-dispatch-receipt__head time {
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--dualith-text-faint);
-}
-
-.team-dispatch-receipt__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.2rem 0.7rem;
-  margin-top: 0.3rem;
-  color: var(--dualith-text-muted);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.team-dispatch-receipt__meta span {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.team-dispatch-receipt__action {
-  align-self: center;
-  min-height: 1.7rem;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--dualith-cyan);
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 0.25rem 0.6rem;
-  transition: border-color 120ms, background 120ms, color 120ms;
-  white-space: nowrap;
-}
-
-.team-dispatch-receipt__action:hover {
-  background: color-mix(in srgb, var(--dualith-cyan) 10%, transparent);
-  color: var(--dualith-text-strong);
-}
-
-.team-dispatch-receipt__action:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dualith-cyan) 40%, transparent);
-}
-
-@media (max-width: 640px) {
-  .team-dispatch-receipt {
-    grid-template-columns: 8px minmax(0, 1fr);
-  }
-
-  .team-dispatch-receipt__action {
-    grid-column: 2;
-    justify-self: start;
-  }
-}
-
-/* ── Smart dispatch chip ──────────────────────────────────────── */
-.dispatch-chip {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin: 0.25rem 0.5rem 0.25rem;
-  padding: 0.35rem 0.6rem;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--dualith-cyan) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--dualith-cyan) 30%, var(--dualith-line));
-  font-size: 11px;
-  font-family: var(--dualith-font-mono);
-}
-
-.dispatch-chip__label {
-  color: var(--dualith-muted);
-  flex-shrink: 0;
-}
-
-.dispatch-chip__confirm {
-  flex: 1 1 auto;
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--dualith-cyan);
-  font-size: 11px;
-  font-family: var(--dualith-font-mono);
-  font-weight: 600;
-  text-align: left;
-  padding: 0;
-  transition: opacity 120ms;
-}
-
-.dispatch-chip__confirm:hover { opacity: 0.75; }
-.dispatch-chip__confirm:disabled { opacity: 0.4; cursor: default; }
-
-.dispatch-chip__dismiss {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--dualith-muted);
-  font-size: 14px;
-  line-height: 1;
-  padding: 0 0.1rem;
-  transition: color 120ms;
-}
-.dispatch-chip__dismiss:hover { color: var(--dualith-text); }
-
 /* ── Mission feed — two-zone layout ─────────────────────────── */
 .mission-feed-root {
   display: flex;
@@ -2828,8 +2689,7 @@ select option:disabled {
 }
 
 .dualith-thread-measure {
-  width: min(100%, 68rem);
-  margin-inline: auto;
+  width: 100%;
 }
 
 .mission-msg {
@@ -5659,8 +5519,6 @@ button:not(:disabled),
 .dualith-attention-panel__toggle,
 .dualith-attention-panel__actions button,
 .dualith-agentic-choice__options button,
-.dispatch-chip button,
-.team-dispatch-receipt__action,
 .dualith-right-close {
   cursor: pointer;
 }
@@ -5672,8 +5530,7 @@ button:not(:disabled),
 .dualith-right-tabs button:focus-visible,
 .dualith-project-item:focus-visible,
 .dualith-attention-panel__actions button:focus-visible,
-.dualith-attention-panel__toggle:focus-visible,
-.team-dispatch-receipt__action:focus-visible {
+.dualith-attention-panel__toggle:focus-visible {
   outline: 2px solid var(--dualith-cyan);
   outline-offset: 1px;
 }
@@ -5759,8 +5616,6 @@ button:not(:disabled),
   flex-direction: column;
   gap: 0;
   padding: 1.5rem 1rem 1rem;
-  max-width: var(--dualith-chat-max);
-  margin-inline: auto;
   width: 100%;
 }
 .dualith-idle-digest__row {
@@ -6128,6 +5983,33 @@ button:not(:disabled),
   flex-shrink: 0;
 }
 .session-more-btn:hover { background: var(--dualith-surface-hover); color: var(--dualith-text-strong); }
+
+.session-more-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  min-width: 140px;
+  background: var(--dualith-surface);
+  border: 1px solid var(--dualith-line-hard);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  padding: 2px;
+}
+.session-more-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--dualith-text);
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.session-more-menu button:hover:not(:disabled) { background: var(--dualith-surface-hover); color: var(--dualith-text-strong); }
+.session-more-menu button:disabled { opacity: 0.4; cursor: default; }
 
 /* ── Agent turn: role-colored left border ──────────────────────── */
 .team-turn {

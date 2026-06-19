@@ -178,13 +178,39 @@ export function TeamRoomFull({
     .filter((i) => i >= 0)
     .slice(-1)[0] ?? -1;
 
-  // Auto-switch to Team tab when a live run starts
-  const hasLive = liveRuns.length > 0;
-  const prevHasLive = useRef(false);
+  // Auto-switch to Team tab only when a non-ask (team) run starts — never for
+  // the Ask agent, which runs in the Chat tab and should not redirect the user.
+  const hasTeamLive = liveRuns.some((run) => run.agent !== "ask");
+  const prevHasTeamLive = useRef(hasTeamLive);
   useEffect(() => {
-    if (hasLive && !prevHasLive.current) onTabChange?.("team");
-    prevHasLive.current = hasLive;
-  }, [hasLive, onTabChange]);
+    if (hasTeamLive && !prevHasTeamLive.current) onTabChange?.("team");
+    prevHasTeamLive.current = hasTeamLive;
+  }, [hasTeamLive, onTabChange]);
+
+  // Auto-scroll chat thread to bottom when new messages arrive
+  const chatThreadRef = useRef<HTMLDivElement>(null);
+  const [chatAutoFollow, setChatAutoFollow] = useState(true);
+  useEffect(() => {
+    if (activeTab !== "chat") return;
+    setChatAutoFollow(true);
+  }, [project.name, activeTab]);
+  useEffect(() => {
+    if (activeTab !== "chat" || !chatAutoFollow) return;
+    const el = chatThreadRef.current;
+    if (!el) return;
+    const scrollParent = el.closest(".dualith-room-scroll") as HTMLElement | null;
+    const target = scrollParent ?? el;
+    const frame = window.requestAnimationFrame(() => { target.scrollTop = target.scrollHeight; });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeTab, chatAutoFollow, chatMessages.length]);
+  const handleChatScroll = () => {
+    const el = chatThreadRef.current;
+    if (!el) return;
+    const scrollParent = el.closest(".dualith-room-scroll") as HTMLElement | null;
+    const target = scrollParent ?? el;
+    const distanceFromBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+    setChatAutoFollow(distanceFromBottom < 96);
+  };
 
   return (
     <div className="dualith-room-inner">
@@ -193,7 +219,7 @@ export function TeamRoomFull({
 
       {/* Chat tab */}
       {activeTab === "chat" && (
-        <div className="room-chat-thread dualith-thread-measure">
+        <div ref={chatThreadRef} onScroll={handleChatScroll} className="room-chat-thread dualith-thread-measure">
           {chatMessages.length === 0 ? (
             <IdleDigest project={project} results={results} onSuggestPrompt={onSuggestPrompt} />
           ) : (

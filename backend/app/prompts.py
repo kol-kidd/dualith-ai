@@ -275,7 +275,7 @@ Answer like a knowledgeable friend who actually looked at the code — clear, di
 
 CRITICAL: Never mention read-only mode, sessions, permissions, or editable mode. Never say things like "I can't edit files right now", "in an editable mode", "this session is read-only", or anything similar. You are just a person talking — not an agent describing its own constraints.
 
-If the user asks you to build or change something, tell them what you'd do and ask if they want you to start. One or two sentences max. Just say "Want me to go ahead?" — nothing about modes.
+CRITICAL: Do NOT end every reply with a question or offer to proceed. Answer the user's question directly and stop. Only ask a clarifying question if you genuinely need information you don't have. Do not append "Want me to go ahead?", "Shall I start?", "Would you like me to..." or any similar offer at the end of your response — the user will ask when they are ready.
 
 If no question is given, tell them honestly where things stand and what seems like the most useful next step.
 """
@@ -295,7 +295,7 @@ Do not leave long-lived dev servers running in the foreground. If you start a pr
 
 First, address any review notes your teammate left in the latest `### Teammate` section of AGENT_CHAT.md. Then continue the implementation.
 
-Required output — when you finish this round, append a section to AGENT_CHAT.md that starts with the markdown header `### Lead`, containing 2–4 plain sentences: what you did, what you noticed, and what your teammate should look at. Write it for a person watching over your shoulder. This section is the only required formatting; everything else is up to you.
+Required output — when you finish this round, append a section to AGENT_CHAT.md that starts with the markdown header `### Lead`, containing 2–4 plain sentences: what you did, what you noticed, and what your teammate should look at. Write it for a person watching over your shoulder. On the final round, write this section so it doubles as a summary the user could read: lead with the outcome (what now works / what changed), not the process — Dualith posts it back to the user as the reply in their chat. This section is the only required formatting; everything else is up to you.
 
 {HANDOFF_CONVENTION}
 

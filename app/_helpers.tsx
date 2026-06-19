@@ -1333,7 +1333,7 @@ export function syntheticTurnsFromTask(task: DualithTask): TeamMessage[] {
   const agents = crewAgentsForTask(task);
   for (const def of agents) {
     const status = crewAgentStatus(task, def);
-    if (status === "waiting" || status === "skipped" || status === "not_captured" || status === "n/a") continue;
+    if (status === "waiting" || status === "pending" || status === "skipped" || status === "not_captured" || status === "n/a") continue;
     const key = def.id;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1637,6 +1637,8 @@ function agentRoleFromHeader(header: string): { role: TeamMessageRole; title: st
   if (lower.startsWith("summarizer")) return { role: "summarizer", title: "Summarizer" };
   if (lower.startsWith("plan")) return { role: "plan", title: "Plan" };
   if (lower.startsWith("task")) return { role: "task", title: "Team task" };
+  if (lower.startsWith("objective")) return { role: "task", title: "Objective" };
+  if (lower.startsWith("dispatch")) return { role: "task", title: "Dispatch" };
   if (lower.startsWith("note")) return { role: "note", title: "Note" };
   return { role: "agent", title: title || "Agent" };
 }
@@ -1782,8 +1784,6 @@ function parseChatHistory(raw: string): ChatMessage[] {
       messages.push({ role: "user", title: "Pipeline kickoff", timestamp, body, attachments, kind: "kickoff" });
     } else if (lower.startsWith("dualith answer")) {
       messages.push({ role: "agent", title: "Dualith", timestamp, body, attachments: [], kind: "answer" });
-    } else if (lower.startsWith("team dispatch")) {
-      messages.push({ role: "dispatch", title: "Team dispatch", timestamp, body, attachments: [], kind: "dispatch" });
     } else if (lower.startsWith("plan")) {
       messages.push({ role: "plan", title: "Plan", timestamp, body, attachments: [], kind: "plan" });
     } else if (lower.startsWith("plan feedback")) {
@@ -1795,13 +1795,6 @@ function parseChatHistory(raw: string): ChatMessage[] {
     }
   }
   return messages;
-}
-
-export function looksLikeWorkCommand(prompt: string): boolean {
-  const t = prompt.trim().toLowerCase();
-  if (!t || t.length < 4) return false;
-  return /^(continue|fix|add|build|implement|create|refactor|update|remove|delete|migrate|deploy|test|review|optimize|improve|write|generate|set up|integrate|connect|debug|resolve|close|handle|make|convert|extract|scaffold|install|configure|enable|disable|rewrite|upgrade|clean)\b/.test(t)
-    || /\b(feature|bug|issue|ticket|task|sprint|story|endpoint|component|function|module|service|migration|schema|database|api|route|page|hook|test|spec|lint|build|deploy|pipeline|ci|cd)\b/.test(t);
 }
 
 export function promptWithAgenticChoice(choice: AgenticChoiceDraft, option: HumanInputOption) {

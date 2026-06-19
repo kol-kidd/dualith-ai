@@ -74,7 +74,6 @@ import {
   teamRoomRoleKind,
   teamRoomBody,
   teamRoomStatus,
-  looksLikeWorkCommand,
   promptWithAgenticChoice,
   likelyWorkflow,
 } from "../_helpers";
@@ -189,9 +188,6 @@ export function ChatFeedMessage({
   if (message.role === "user") {
     return <UserBubble message={message} projectName={project?.name ?? ""} />;
   }
-  if (message.role === "dispatch") {
-    return <DispatchReceipt message={message} onOpenTeam={onOpenTeam} />;
-  }
   if (message.role === "plan") {
     const isPending = Boolean(project?.plan_pending && isLatestPlan);
     return (
@@ -261,7 +257,6 @@ function ResultFeedCard({ result }: { result: AgentResult }) {
 export function TeamRoom({
   task,
   messages,
-  chatMessages = [],
   project,
   projectEvents,
   results = [],
@@ -271,7 +266,6 @@ export function TeamRoom({
 }: {
   task: DualithTask | null;
   messages: TeamMessage[];
-  chatMessages?: ChatMessage[];
   project: ProjectRecord | null;
   projectEvents: ConsoleEntry[];
   results?: AgentResult[];
@@ -319,28 +313,11 @@ export function TeamRoom({
     : [];
   const teamTurns = renderedTurns.length > 0 ? renderedTurns : fallbackTurns;
   const liveCovered = new Set(teamTurns.filter((turn) => turn.isLive).map((turn) => turn.message.role));
-  // The same failure can be recorded once per dispatch attempt — show one card.
-  const seenBreakers = new Set<string>();
-  const dedupedChat = chatMessages.filter((message) => {
-    if (message.kind !== "circuit-breaker") return true;
-    const key = message.body.trim();
-    if (seenBreakers.has(key)) return false;
-    seenBreakers.add(key);
-    return true;
-  });
-  const latestPlanIndex = dedupedChat
-    .map((message, index) => message.role === "plan" ? index : -1)
-    .filter((index) => index >= 0)
-    .slice(-1)[0] ?? -1;
 
+  // The Team tab is purely the agents' room — the user↔Dualith conversation lives
+  // in the Chat tab. The feed is built from team turns, live runs, failures, and
+  // the final result only; chat history is never merged in here.
   const items: MissionFeedItem[] = [
-    ...dedupedChat.map((message, index) => ({
-      kind: "chat" as const,
-      key: `chat-history-${index}`,
-      timestamp: timestampValue(message.timestamp, 1_000 + index),
-      order: index,
-      message,
-    })),
     ...teamTurns.map((turn, index) => ({
       kind: "team" as const,
       key: turn.key,
@@ -375,8 +352,7 @@ export function TeamRoom({
     }] : []),
   ].sort((a, b) => a.timestamp === b.timestamp ? a.order - b.order : a.timestamp - b.timestamp);
 
-  const chatItems = items.filter((i) => i.kind === "chat");
-  const workItems = items.filter((i) => i.kind !== "chat");
+  const workItems = items;
 
   const threadRef = useRef<HTMLDivElement>(null);
   const [autoFollowLatest, setAutoFollowLatest] = useState(true);
@@ -561,34 +537,6 @@ const AgentBubble = React.memo(function AgentBubble({ runner, label, timestamp, 
   );
 });
 
-function DispatchReceipt({ message, onOpenTeam }: { message: ChatMessage; onOpenTeam?: () => void }) {
-  const lines = message.body.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const summary = lines[0] || "Passed to team.";
-  const details = lines.slice(1);
-
-  return (
-    <div className="team-dispatch-receipt" role="status" aria-live="polite">
-      <span className="team-dispatch-receipt__mark" aria-hidden="true" />
-      <div className="team-dispatch-receipt__content">
-        <div className="team-dispatch-receipt__head">
-          <span>{summary}</span>
-          {message.timestamp && <time>{timestampLabel(message.timestamp)}</time>}
-        </div>
-        {details.length > 0 && (
-          <div className="team-dispatch-receipt__meta">
-            {details.map((line, index) => <span key={`${line}-${index}`}>{line}</span>)}
-          </div>
-        )}
-      </div>
-      {onOpenTeam && (
-        <button type="button" className="team-dispatch-receipt__action" onClick={onOpenTeam}>
-          View Team
-        </button>
-      )}
-    </div>
-  );
-}
-
 export function ChatComposer({
   project, runSettings, onRunSettingsChange, onSendChat, onStopChat, runnerHealth, providerSlots, activeTab, onTabChange, onClearChat, fillPrompt,
 }: {
@@ -660,15 +608,12 @@ export function ChatComposer({
   const [agenticChoice, setAgenticChoice] = useState<AgenticChoiceDraft | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
-  const [dismissedChip, setDismissedChip] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const activeRuns = project?.active_runs ?? [];
   const askRunning = activeRuns.some((run) => run.mode === "ask");
   const workRunning = Boolean(project?.pipeline) || Boolean(project?.team) || activeRuns.some((run) => run.mode !== "ask");
   const isRunning = activeTab === "chat" ? askRunning : workRunning;
-
-  const showDispatchChip = activeTab === "chat" && !dismissedChip && !workRunning && !agenticChoice && runPrompt.trim().length > 3 && looksLikeWorkCommand(runPrompt);
 
   useEffect(() => {
     setErrorText(null);
@@ -775,7 +720,7 @@ export function ChatComposer({
     onRunSettingsChange({ ...runSettings, teamMode: nextTeamMode });
   };
 
-  const sendPrompt = async (promptToSend: string, routeMode: RouteMode = activeTab === "team" ? "team" : "ask") => {
+  const sendPrompt = async (promptToSend: string, routeMode: RouteMode = "auto") => {
     if (!project || (!promptToSend.trim() && attachments.length === 0)) return;
     setPendingAction("start");
     setErrorText(null);
@@ -794,12 +739,12 @@ export function ChatComposer({
 
   const send = async () => {
     if (!project || (!runPrompt.trim() && attachments.length === 0)) return;
-    await sendPrompt(runPrompt, activeTab === "team" ? "team" : "ask");
+    await sendPrompt(runPrompt, "auto");
   };
 
   const sendChoice = async (option: HumanInputOption) => {
     if (!agenticChoice) return;
-    await sendPrompt(promptWithAgenticChoice(agenticChoice, option), "team");
+    await sendPrompt(promptWithAgenticChoice(agenticChoice, option), "auto");
   };
 
   const stop = async () => {
@@ -839,7 +784,7 @@ export function ChatComposer({
 
   return (
     <section className="dualith-composer-shell shrink-0 px-4 pb-4 pt-2">
-      <div className="mx-auto w-full" style={{ maxWidth: "var(--dualith-chat-max)" }}>
+      <div className="w-full">
         <div
           className={`dualith-composer relative px-2 pb-2 pt-2 ${dragOver ? "ring-1 ring-accent/70" : ""}`}
           onDragOver={(event) => { if (!isRunning) { event.preventDefault(); setDragOver(true); } }}
@@ -876,7 +821,7 @@ export function ChatComposer({
             id="agent-prompt"
             value={runPrompt}
             disabled={pendingAction !== null || isRunning}
-            onChange={(event) => { setRunPrompt(event.target.value); setAgenticChoice(null); setDismissedChip(false); }}
+            onChange={(event) => { setRunPrompt(event.target.value); setAgenticChoice(null); }}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
             placeholder={project ? (activeTab === "team" ? "Brief the team..." : "Ask about this project...") : "Select a project first"}
@@ -906,28 +851,7 @@ export function ChatComposer({
               </div>
             </div>
           )}
-          {showDispatchChip && (
-            <div className="dispatch-chip" role="status" aria-live="polite">
-              <span className="dispatch-chip__label">Send to team?</span>
-              <button
-                type="button"
-                className="dispatch-chip__confirm"
-                disabled={!project || pendingAction !== null}
-                onClick={() => { onTabChange("team"); void sendPrompt(runPrompt, "team"); }}
-              >
-                Send to team →
-              </button>
-              <button
-                type="button"
-                className="dispatch-chip__dismiss"
-                onClick={() => setDismissedChip(true)}
-                aria-label="Dismiss"
-              >
-                ×
-              </button>
-            </div>
-          )}
-          {runPrompt.trim() && !agenticChoice && !showDispatchChip && (
+          {runPrompt.trim() && !agenticChoice && (
             <div className="dualith-composer-hint" aria-live="polite">
               {activeTab === "chat"
                 ? "→ ask · 1 call"
@@ -1069,7 +993,8 @@ export function ChatComposer({
           ) : attachments.length > 0 ? (
             <span className="text-accent">{attachments.length} image{attachments.length > 1 ? "s" : ""} attached - Enter to send</span>
           ) : (
-            <>{activeTab === "team" ? "Enter dispatches the Team - Shift+Enter for newline" : "Enter sends Chat only - Shift+Enter for newline"}</>
+            <>Enter sends · Shift+Enter for newline</>
+
           )}
         </div>
         {routeHint && !isRunning && runPrompt.trim().length >= 4 && (

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDualithSocket } from "../lib/useDualithSocket";
 import type { DualithDeltaEvent } from "../lib/useDualithSocket";
 import { SetupWizard } from "./components/SetupWizard";
@@ -105,6 +105,10 @@ function DualithApp() {
   const [setupToken, setSetupToken] = useState("");
   const [providerSlots, setProviderSlots] = useState<ProviderSlots | null>(null);
   const [quotaModalOpen, setQuotaModalOpen] = useState(false);
+  // Wall-clock ms of the most recent applySnapshot call. Used to drop stale WS
+  // chat deltas that arrive after a clear (the clear returns a snapshot that
+  // zeroes agent_chat/chat_history, but a queued delta can re-populate them).
+  const lastSnapshotAtRef = useRef<number>(0);
 
   useEffect(() => {
     try {
@@ -127,6 +131,7 @@ function DualithApp() {
   }, [chatRunSettings, chatRunSettingsLoaded]);
 
   const applySnapshot = useCallback((snapshot: SnapshotPayload, preferredName?: string) => {
+    lastSnapshotAtRef.current = Date.now();
     const sorted = sortProjects(snapshot.projects ?? []);
     setProjects(sorted);
     // Snapshot is authoritative: drop live runs the backend no longer tracks.
@@ -199,6 +204,11 @@ function DualithApp() {
       const body = event.body ?? "";
       const file = (event.file ?? "").toUpperCase();
       const field: "chat_history" | "agent_chat" = file.includes("CHAT_HISTORY") ? "chat_history" : "agent_chat";
+      // Drop deltas whose backend timestamp predates the last snapshot. This
+      // prevents stale WS frames from re-populating a field that the snapshot
+      // just cleared (e.g. after "Clear chat" races an in-flight agent write).
+      const deltaMs = event.ts ? new Date(event.ts).getTime() : 0;
+      if (deltaMs > 0 && deltaMs < lastSnapshotAtRef.current) return;
       setProjects((current) => current.map((project) => (
         project.name === event.project
           ? {
@@ -441,7 +451,7 @@ function DualithApp() {
       prompt: options.prompt,
       attachment_paths: options.attachmentPaths ?? [],
       plan_mode: options.planMode ?? false,
-      route_mode: options.routeMode ?? "ask",
+      route_mode: options.routeMode ?? "auto",
       team_mode: options.teamMode ?? "lean",
     };
     const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat`, {
@@ -619,6 +629,7 @@ function DualithApp() {
                 project={selectedProject}
                 liveRuns={Object.values(liveRuns).filter((run) => run.project === selectedProject.name)}
                 failures={runFailures[selectedProject.name] ?? []}
+                onClearChat={clearChatHistory}
               />
             )}
 
@@ -626,6 +637,7 @@ function DualithApp() {
             <div className="dualith-room-scroll" ref={null}>
               {selectedProject ? (
                 <TeamRoomFull
+                  key={selectedProject.name}
                   project={selectedProject}
                   projectEvents={projectEvents}
                   results={results}
