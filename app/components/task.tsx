@@ -50,7 +50,7 @@ export function DecisionPanel({ project, task, onSubmit }: { project: ProjectRec
     <section className={`dualith-workspace-band dualith-decision-card ${blocked || project.plan_pending ? "is-decision" : ""}`}>
       <div className="dualith-decision-card__head">
         <div>
-          <div className="dualith-workspace-band__label">{highlight.label}</div>
+          <div className="dualith-workspace-band__label text-balance">{highlight.label}</div>
           {highlight.timestamp && <time>{timestampLabel(highlight.timestamp)}</time>}
         </div>
         {highlight.status && <span>{highlight.status.replace(/_/g, " ")}</span>}
@@ -198,11 +198,11 @@ export function ReviewPane({ project }: { project: ProjectRecord | null }) {
 
   return (
     <details className={`group border-t transition-colors duration-150 ${clean ? "border-emerald-900" : needsAttention ? "border-amber-900" : "border-line"}`} open={needsAttention || total > 0}>
-      <summary className="flex h-9 cursor-pointer list-none items-center justify-between px-4 text-xs outline-none hover:bg-zinc-950 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60">
-        <span className="font-medium uppercase tracking-widest text-zinc-400">AI Notes</span>
+      <summary className="flex h-9 cursor-pointer list-none items-center justify-between px-4 text-xs outline-none hover:bg-surface-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60">
+        <span className="font-medium uppercase tracking-widest text-muted">AI Notes</span>
         <div className="flex items-center gap-2">
           {total > 0 && (
-            <span className="text-[10px] tabular-nums text-zinc-600">{attentionCountLabel(attention)}</span>
+            <span className="text-[10px] tabular-nums text-faint">{attentionCountLabel(attention)}</span>
           )}
           <Badge label={badge.label} tone={badge.tone} />
         </div>
@@ -210,15 +210,15 @@ export function ReviewPane({ project }: { project: ProjectRecord | null }) {
       <div className="max-h-44 overflow-auto border-t border-line-hard">
         {attention.items.length ? (
           <>
-            <div className="border-b border-line-hard px-3 py-2 text-[11px] text-zinc-600">
+            <div className="border-b border-line-hard px-3 py-2 text-[11px] text-faint">
               {attention.source || "AI notes"}{attention.updated_at ? ` / ${timestampLabel(attention.updated_at)}` : ""}
             </div>
             {attention.items.map((item, i) => (
               <div key={`${item.priority}-${item.title}-${i}`} className="grid grid-cols-[auto_1fr] gap-2 border-b border-line-hard px-3 py-2 text-xs leading-relaxed">
                 <Badge label={priorityLabel(item.priority)} tone={priorityTone(item.priority)} />
                 <div className="min-w-0">
-                  <div className="truncate text-zinc-300" title={item.text}>{item.title || item.text}</div>
-                  {item.suggested_command && <div className="mt-1 truncate text-[11px] text-zinc-600">{item.suggested_command}</div>}
+                  <div className="truncate text-text" title={item.text}>{item.title || item.text}</div>
+                  {item.suggested_command && <div className="mt-1 truncate text-[11px] text-faint">{item.suggested_command}</div>}
                 </div>
               </div>
             ))}
@@ -234,9 +234,9 @@ export function ReviewPane({ project }: { project: ProjectRecord | null }) {
 export function CommitPane({ commits }: { commits: string[] }) {
   return (
     <details className="border-t border-line">
-      <summary className="flex h-9 cursor-pointer list-none items-center justify-between px-4 text-xs outline-none hover:bg-zinc-950 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60">
-        <span className="font-medium uppercase tracking-widest text-zinc-400">Commits</span>
-        <span className="text-zinc-600">latest {commits.length || 0}</span>
+      <summary className="flex h-9 cursor-pointer list-none items-center justify-between px-4 text-xs outline-none hover:bg-surface-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60">
+        <span className="font-medium uppercase tracking-widest text-muted">Commits</span>
+        <span className="text-faint">latest {commits.length || 0}</span>
       </summary>
       <div className="max-h-36 overflow-auto border-t border-line-hard">
         {commits.length ? (
@@ -245,7 +245,7 @@ export function CommitPane({ commits }: { commits: string[] }) {
             return (
               <div key={`${commit}-${i}`} className="flex gap-3 border-b border-line-hard px-3 py-1.5 text-xs leading-5">
                 <span className="shrink-0 font-mono text-warn">{hash?.slice(0, 7)}</span>
-                <span className="truncate text-zinc-500">{rest.join(" ")}</span>
+                <span className="truncate text-muted">{rest.join(" ")}</span>
               </div>
             );
           })

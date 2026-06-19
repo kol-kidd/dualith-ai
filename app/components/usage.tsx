@@ -75,8 +75,8 @@ let statusAutoRefreshRequested = false;
 function UsageStat({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 border-r border-line-hard px-3 py-2 last:border-r-0">
-      <div className="truncate text-[10px] uppercase tracking-widest text-zinc-700">{label}</div>
-      <div className="truncate text-xs text-zinc-300">{value}</div>
+      <div className="truncate text-[10px] uppercase tracking-widest text-faint">{label}</div>
+      <div className="truncate text-xs text-text">{value}</div>
     </div>
   );
 }
@@ -93,12 +93,12 @@ function QuotaLine({ label, period }: { label: string; period: QuotaPeriod }) {
   return (
     <div className="py-1.5">
       <div className="grid grid-cols-[96px_1fr_auto] items-baseline gap-x-2 text-[10px]">
-        <span className="truncate uppercase tracking-wider text-zinc-600">{label}</span>
-        <span className="min-w-0 leading-4 text-zinc-600" title={windowMeta}>{windowMeta}</span>
+        <span className="truncate uppercase tracking-wider text-faint">{label}</span>
+        <span className="min-w-0 leading-4 text-faint" title={windowMeta}>{windowMeta}</span>
         <span className={`shrink-0 tabular-nums ${tone}`}>{hasLimit ? quotaPercentLabel(period) : "cap needed"}</span>
       </div>
-      <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-zinc-800">
-        <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: hasLimit ? `${width}%` : "100%" }} />
+      <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-line">
+        <div className={`h-full rounded-full motion-safe:transition-all motion-safe:duration-500 ${barColor}`} style={{ width: hasLimit ? `${width}%` : "100%" }} />
       </div>
       <div className={`mt-1 text-[10px] leading-4 ${tone}`}>{hasLimit ? `${quotaStateLabel(period)} / ${statusCopy}` : statusCopy}</div>
     </div>
@@ -113,13 +113,13 @@ function UsagePeriodBar({ used, limit, resets, label, period }: { used: number; 
   return (
     <div className="space-y-0.5">
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</span>
-        <span className="shrink-0 tabular-nums text-[10px] text-zinc-400">
-          {compactNumber(used)} tok{resets ? <span className="text-zinc-600"> · {resets}</span> : null}
+        <span className="text-[10px] uppercase tracking-wider text-muted">{label}</span>
+        <span className="shrink-0 tabular-nums text-[10px] text-muted">
+          {compactNumber(used)} tok{resets ? <span className="text-faint"> · {resets}</span> : null}
         </span>
       </div>
-      <div className="h-0.5 w-full overflow-hidden rounded-full bg-zinc-800">
-        <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: hasLimit ? `${width}%` : "100%" }} />
+      <div className="h-0.5 w-full overflow-hidden rounded-full bg-line">
+        <div className={`h-full rounded-full motion-safe:transition-all motion-safe:duration-500 ${barColor}`} style={{ width: hasLimit ? `${width}%` : "100%" }} />
       </div>
       {period && <div className={`truncate text-[10px] ${quotaStateTone(period)}`}>{quotaStateLabel(period)} / {hasLimit ? `${quotaPercentLabel(period)} usable` : "set cap to show remaining"}</div>}
     </div>
@@ -137,15 +137,15 @@ function LimitAwareUsagePeriodBar({ label, period }: { label: string; period: Qu
   return (
     <div className="space-y-0.5">
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</span>
+        <span className="text-[10px] uppercase tracking-wider text-muted">{label}</span>
         <span className={`shrink-0 tabular-nums text-[10px] ${quotaStateTone(period)}`}>
           {hasLimit ? `${quotaPercentLabel(period)} used` : "cap needed"}
         </span>
       </div>
-      <div className="h-0.5 w-full overflow-hidden rounded-full bg-zinc-800">
-        <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: hasLimit ? `${width}%` : "100%" }} />
+      <div className="h-0.5 w-full overflow-hidden rounded-full bg-line">
+        <div className={`h-full rounded-full motion-safe:transition-all motion-safe:duration-500 ${barColor}`} style={{ width: hasLimit ? `${width}%` : "100%" }} />
       </div>
-      <div className="text-[10px] leading-4 text-zinc-600" title={windowMeta}>{windowMeta}</div>
+      <div className="text-[10px] leading-4 text-faint" title={windowMeta}>{windowMeta}</div>
       {hasLimit && <div className={`text-[10px] leading-4 ${quotaStateTone(period)}`}>{statusCopy}</div>}
     </div>
   );
@@ -172,7 +172,7 @@ function RunnerStatusCard({ entry, runner, quotaPeriods, providerSlot, className
 
   const isError = entry.status === "error" || entry.status === "timeout";
   const isOk = !isError && (isApiSlot ? entry.status === "ok" : hasData && !hasUnknownLimit);
-  const dotColor = isError ? "bg-danger" : isOk ? "bg-ok" : hasUnknownLimit ? "bg-warn" : "bg-zinc-700";
+  const dotColor = isError ? "bg-danger" : isOk ? "bg-ok" : hasUnknownLimit ? "bg-warn" : "bg-line-hard";
 
   return (
     <div className={`min-w-0 px-3 py-3 ${className ?? ""}`}>
@@ -237,7 +237,7 @@ function QuotaInput({
 }) {
   return (
     <label className={`min-w-0 border-r border-line-hard px-3 py-1.5 last:border-r-0 ${disabled ? "opacity-40" : ""}`}>
-      <span className="block truncate text-[10px] uppercase tracking-widest text-zinc-700">{label}</span>
+      <span className="block truncate text-[10px] uppercase tracking-widest text-faint">{label}</span>
       <input
         type="number"
         disabled={disabled}
@@ -245,7 +245,7 @@ function QuotaInput({
         max={max ?? 2_000_000_000}
         value={value}
         onChange={(event) => onChange(quotaValueFromInput(event.target.value, max))}
-        className="h-6 w-full min-w-0 bg-bg text-xs tabular-nums text-zinc-300 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+        className="h-6 w-full min-w-0 bg-bg text-xs tabular-nums text-text outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
       />
     </label>
   );
@@ -301,18 +301,18 @@ function QuotaEditor({
     <form onSubmit={save} className="border-t border-line-hard">
       <div className="border-b border-line-hard px-3 py-2">
         <label className="grid min-w-0 grid-cols-[88px_1fr] items-center gap-2">
-          <span className="truncate text-[10px] uppercase tracking-widest text-zinc-700">Runner policy</span>
+          <span className="truncate text-[10px] uppercase tracking-widest text-faint">Runner policy</span>
           <select
             value={settings.runner_policy}
             onChange={(event) => updateRunnerPolicy(event.target.value)}
-            className="h-7 min-w-0 border border-line-hard bg-bg px-2 text-xs text-zinc-300 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+            className="h-7 min-w-0 border border-line-hard bg-bg px-2 text-xs text-text outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
           >
             {runnerPolicies.map((policy) => (
               <option key={policy.id} value={policy.id}>{policy.label}</option>
             ))}
           </select>
         </label>
-        <div className="mt-1 text-[10px] text-zinc-600">
+        <div className="mt-1 text-[10px] text-faint">
           {runnerPolicyDescriptions[settings.runner_policy]}
         </div>
         {settings.runner_policy === "eco" && <EcoTierHint providerSlots={providerSlots} />}
@@ -344,13 +344,13 @@ function QuotaEditor({
         />
       </div>
       <div className="grid grid-cols-[1fr_auto] border-b border-line-hard text-xs">
-        <div className={`truncate px-3 py-1.5 ${status === "Saved" ? "text-ok" : status === "Unsaved" || status === "Saving..." ? "text-warn" : "text-zinc-600"}`}>
+        <div className={`truncate px-3 py-1.5 ${status === "Saved" ? "text-ok" : status === "Unsaved" || status === "Saving..." ? "text-warn" : "text-faint"}`}>
           {status}
         </div>
         <button
           type="submit"
           disabled={saving}
-          className="border-l border-line px-3 py-1.5 text-accent outline-none hover:bg-zinc-900 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-700"
+          className="border-l border-line px-3 py-1.5 text-accent outline-none hover:bg-surface-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-faint"
         >
           Save settings
         </button>
@@ -564,21 +564,21 @@ function EcoTierHint({ providerSlots }: { providerSlots: ProviderSlots | null })
     { runner: "codex" as const, slot: codexSlot },
   ];
   return (
-    <div className="mt-2 space-y-1 rounded border border-line-hard bg-zinc-900/60 px-2.5 py-2">
-      <div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1.5">Tier assignment</div>
+    <div className="mt-2 space-y-1 rounded border border-line-hard bg-surface px-2.5 py-2">
+      <div className="text-[10px] uppercase tracking-widest text-muted mb-1.5">Tier assignment</div>
       {slots.map(({ runner, slot }) => (
         <div key={runner} className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
             <RunnerMascot runner={runner} size={12} />
-            <span className="truncate text-[10px] text-zinc-400">{slot.label}</span>
-            {slot.model && <span className="truncate text-[10px] text-zinc-600">{slot.model}</span>}
+            <span className="truncate text-[10px] text-muted">{slot.label}</span>
+            {slot.model && <span className="truncate text-[10px] text-faint">{slot.model}</span>}
           </div>
-          <span className="shrink-0 text-[10px] text-zinc-600">
+          <span className="shrink-0 text-[10px] text-faint">
             {slot.mode === "api_key" && slot.model?.includes(":free") ? "light" : slot.mode === "subscription" ? "heavy" : "ranked by price"}
           </span>
         </div>
       ))}
-      <p className="mt-1 text-[10px] leading-4 text-zinc-700">Backend ranks tiers by per-token price at startup. Heavy → lead, architect, planner. Light → tester, summarizer, reviewers.</p>
+      <p className="mt-1 text-[10px] leading-4 text-faint">Backend ranks tiers by per-token price at startup. Heavy → lead, architect, planner. Light → tester, summarizer, reviewers.</p>
     </div>
   );
 }
@@ -610,17 +610,17 @@ function ConfigTab({
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
       <div className="border-b border-line-hard px-3 py-2.5">
         <div className="mb-1.5 flex items-baseline justify-between gap-2 text-[10px]">
-          <span className="uppercase tracking-widest text-zinc-600">Token limits</span>
+          <span className="uppercase tracking-widest text-faint">Token limits</span>
           {allApi
-            ? <span className="truncate text-zinc-500">api key slots</span>
+            ? <span className="truncate text-muted">api key slots</span>
             : <span className={`truncate ${unknownLimits ? "text-warn" : "text-ok"}`}>{unknownLimits ? `${unknownLimits} limits unknown` : "limits active"}</span>
           }
         </div>
         {allApi ? (
-          <p className="text-[10px] leading-4 text-zinc-600">Both slots use API keys — token budgets are managed by the provider. The caps below are ignored; only the reserve % applies.</p>
+          <p className="text-[10px] leading-4 text-faint">Both slots use API keys — token budgets are managed by the provider. The caps below are ignored; only the reserve % applies.</p>
         ) : (
           <>
-            <div className={`mb-2 text-[10px] leading-4 ${unknownLimits ? "text-warn" : "text-zinc-600"}`}>
+            <div className={`mb-2 text-[10px] leading-4 ${unknownLimits ? "text-warn" : "text-faint"}`}>
               {unknownLimits
                 ? "No provider cap was exposed. Add fallback caps below for remaining budget and reserve warnings."
                 : `${runnerPolicyLabels[runnerPolicy]} guard is using configured caps and ${quota.settings.reserve_percent}% reserve.`}
@@ -630,10 +630,10 @@ function ConfigTab({
               {!claudeIsApi && <QuotaLine label={`${claudeLabel} 5-hour`} period={quota.claude.five_hour} />}
               {!claudeIsApi && <QuotaLine label={`${claudeLabel} weekly`} period={quota.claude.weekly} />}
               {codexIsApi && (
-                <p className="text-[10px] text-zinc-600">{codexLabel} uses an API key — no token window to track here.</p>
+                <p className="text-[10px] text-faint">{codexLabel} uses an API key — no token window to track here.</p>
               )}
               {claudeIsApi && !allApi && (
-                <p className="text-[10px] text-zinc-600">{claudeLabel} uses an API key — no token window to track here.</p>
+                <p className="text-[10px] text-faint">{claudeLabel} uses an API key — no token window to track here.</p>
               )}
             </div>
           </>
@@ -663,11 +663,11 @@ function LogTab({ entries, commits }: { entries: ConsoleEntry[]; commits: string
       {lines.length ? lines.map((line, i) => {
         const label = humanVerb(line.action);
         return (
-          <div key={`${line.action}-${line.path}-${i}`} className="grid grid-cols-[auto_1fr] gap-x-2 border-b border-zinc-950 px-3 py-0.5">
-            <span className="tabular-nums text-zinc-700">{line.time}</span>
+          <div key={`${line.action}-${line.path}-${i}`} className="grid grid-cols-[auto_1fr] gap-x-2 border-b border-line-hard px-3 py-0.5">
+            <span className="tabular-nums text-faint">{line.time}</span>
             <span className="min-w-0">
               <span className={`${verbToneClass(line.action)} mr-1.5`}>{label}</span>
-              <span className="break-all text-zinc-600">{line.path}</span>
+              <span className="break-all text-faint">{line.path}</span>
             </span>
           </div>
         );

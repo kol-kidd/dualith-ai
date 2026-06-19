@@ -42,7 +42,7 @@ export function ProjectPreviewPanel({
       await onDevServerAction(project.name, action);
       if (action !== "stop") setReloadKey((value) => value + 1);
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : "unknown");
+      setErrorText("Preview server action failed — try again");
     } finally {
       setPending(null);
     }
@@ -55,11 +55,11 @@ export function ProjectPreviewPanel({
       <div className="flex min-h-10 flex-wrap items-center justify-between gap-2 px-4 py-2 text-xs">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="font-medium uppercase tracking-widest text-zinc-400">Preview</span>
+            <span className="font-medium uppercase tracking-widest text-muted">Preview</span>
             <Badge label={status} tone={tone as "green" | "amber" | "red" | "cyan" | "muted"} />
-            {url && <span className="truncate text-zinc-500">{url}</span>}
+            {url && <span className="truncate text-faint">{url}</span>}
           </div>
-          <div className="mt-1 text-[10px] text-zinc-600">
+          <div className="mt-1 text-[10px] text-faint">
             Project ports avoid Dualith ports {reserved}.{appStatus.phone_url ? ` Phone: ${appStatus.phone_url}` : ""}
           </div>
         </div>
@@ -68,7 +68,7 @@ export function ProjectPreviewPanel({
             <button
               type="button"
               onClick={() => setReloadKey((value) => value + 1)}
-              className="border border-line-hard px-2 py-1 text-[10px] text-zinc-400 outline-none hover:text-zinc-200 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+              className="border border-line-hard px-2 py-1 text-[10px] text-muted outline-none hover:text-text focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
             >
               Reload
             </button>
@@ -87,7 +87,7 @@ export function ProjectPreviewPanel({
             <button
               type="button"
               onClick={() => setInlineOpen((value) => !value)}
-              className="border border-line-hard px-2 py-1 text-[10px] text-zinc-400 outline-none hover:text-zinc-200 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+              className="border border-line-hard px-2 py-1 text-[10px] text-muted outline-none hover:text-text focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
             >
               {inlineOpen ? "Hide inline" : "Show inline"}
             </button>
@@ -137,16 +137,16 @@ export function MemoryPane({ project }: { project: ProjectRecord | null }) {
   const entries = Object.entries(memory);
   return (
     <details className="border-t border-line">
-      <summary className="flex h-9 cursor-pointer list-none items-center justify-between px-4 text-xs outline-none hover:bg-zinc-950 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60">
-        <span className="font-medium uppercase tracking-widest text-zinc-400">Memory</span>
-        <span className="text-[10px] tabular-nums text-zinc-600">{entries.length}</span>
+      <summary className="flex h-9 cursor-pointer list-none items-center justify-between px-4 text-xs outline-none hover:bg-surface-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60">
+        <span className="font-medium uppercase tracking-widest text-muted">Memory</span>
+        <span className="text-[10px] tabular-nums text-faint">{entries.length}</span>
       </summary>
       <div className="max-h-44 overflow-auto border-t border-line-hard">
         {entries.length ? (
           entries.map(([key, value]) => (
             <div key={key} className="grid grid-cols-[40%_1fr] gap-2 border-b border-line-hard px-3 py-2 text-xs">
-              <span className="truncate text-zinc-500">{key}</span>
-              <span className="truncate text-zinc-300">{typeof value === "string" ? value : JSON.stringify(value)}</span>
+              <span className="truncate text-muted">{key}</span>
+              <span className="truncate text-text">{typeof value === "string" ? value : JSON.stringify(value)}</span>
             </div>
           ))
         ) : (
@@ -170,22 +170,22 @@ export function ArtifactPane({ project }: { project: ProjectRecord | null }) {
   const ready = entries.filter(([, content]) => Boolean(content?.trim()));
   return (
     <details className="border-t border-line" open={ready.length > 0}>
-      <summary className="flex h-9 cursor-pointer list-none items-center justify-between px-4 text-xs outline-none hover:bg-zinc-950 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60">
-        <span className="font-medium uppercase tracking-widest text-zinc-400">Artifacts</span>
-        <span className="text-[10px] tabular-nums text-zinc-600">{ready.length}</span>
+      <summary className="flex h-9 cursor-pointer list-none items-center justify-between px-4 text-xs outline-none hover:bg-surface-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60">
+        <span className="font-medium uppercase tracking-widest text-muted">Artifacts</span>
+        <span className="text-[10px] tabular-nums text-faint">{ready.length}</span>
       </summary>
       <div className="max-h-72 overflow-auto border-t border-line-hard">
         {ready.length ? (
           entries.map(([label, content]) => (
             <div key={label} className="border-b border-line-hard px-3 py-2 text-xs">
               <div className="mb-1 flex items-center justify-between gap-2">
-                <span className="text-zinc-500">{label}</span>
-                <span className={content?.trim() ? "text-ok" : "text-zinc-700"}>{content?.trim() ? "ready" : "empty"}</span>
+                <span className="text-muted">{label}</span>
+                <span className={content?.trim() ? "text-ok" : "text-faint"}>{content?.trim() ? "ready" : "empty"}</span>
               </div>
               {content?.trim() ? (
-                <pre className="max-h-28 overflow-auto whitespace-pre-wrap text-[11px] leading-5 text-zinc-300">{content.trim()}</pre>
+                <pre className="max-h-28 overflow-auto whitespace-pre-wrap text-[11px] leading-5 text-text">{content.trim()}</pre>
               ) : (
-                <div className="text-[11px] text-zinc-700">No artifact yet.</div>
+                <div className="text-[11px] text-faint">No artifact yet.</div>
               )}
             </div>
           ))

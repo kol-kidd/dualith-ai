@@ -560,7 +560,7 @@ function DualithApp() {
   }
 
   return (
-    <div className="dualith-app-shell h-screen w-screen overflow-hidden bg-bg text-zinc-300">
+    <div className="dualith-app-shell h-dvh w-screen overflow-hidden bg-bg text-zinc-300">
       <header className="dualith-topbar-b border-b border-line">
         <div className="dualith-topbar-b__primary flex items-center gap-3 px-4">
           <DualithLogo />
@@ -602,7 +602,7 @@ function DualithApp() {
       )}
 
       {/* 3-column shell */}
-      <div className="dualith-shell-body">
+      <main id="main-content" className="dualith-shell-body">
         {/* Left sidebar: projects + agent roster */}
         <SidebarColumn
           projects={projects}
@@ -749,7 +749,7 @@ function DualithApp() {
             onClose={() => setQuotaModalOpen(false)}
           />
         )}
-      </div>{/* end dualith-shell-body */}
+      </main>{/* end dualith-shell-body */}
 
       <ProjectSetupModal
         open={setupOpen}

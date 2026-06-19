@@ -19,8 +19,8 @@ import { TeamConversationPanel, TeamRoom } from "./chat";
 export function SectionHeader({ title, meta, children }: { title: string; meta?: string; children?: ReactNode }) {
   return (
     <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-3 text-xs">
-      <span className="font-medium uppercase tracking-widest text-zinc-400">{title}</span>
-      {children ?? (meta ? <span className="text-zinc-600">{meta}</span> : null)}
+      <span className="font-medium uppercase tracking-widest text-muted">{title}</span>
+      {children ?? (meta ? <span className="text-faint">{meta}</span> : null)}
     </div>
   );
 }
@@ -35,12 +35,12 @@ export function Badge({ label, tone, className = "" }: { label: string; tone: "g
           ? "bg-red-950 text-danger border-red-800"
           : tone === "cyan"
             ? "bg-cyan-950 text-accent border-cyan-800"
-            : "bg-zinc-900 text-zinc-500 border-zinc-700";
+            : "bg-surface text-muted border-line";
   return <span className={`border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider ${cls} ${className}`}>{label}</span>;
 }
 
 export function EmptyState({ message }: { message: string }) {
-  return <div className="px-3 py-4 text-xs text-zinc-700">{message}</div>;
+  return <div role="status" className="px-3 py-4 text-xs text-faint">{message}</div>;
 }
 
 export function RunnerMascot({ runner, size = 18 }: { runner: RunnerId; size?: number }) {
@@ -51,7 +51,7 @@ export function RunnerMascot({ runner, size = 18 }: { runner: RunnerId; size?: n
         ? "text-ok"
         : "text-warn";
   const mascotClass = `shrink-0 ${tone}`;
-  const bgFill = "#05070a";
+  const bgFill = "var(--dualith-bg)";
 
   if (runner === "codex") {
     return (

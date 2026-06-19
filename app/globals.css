@@ -2,6 +2,30 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Z-index scale ───────────────────────────────────────────────
+   Semantic ladder — reference these vars, never raw integers.
+   sticky      10  in-flow sticky headers / banners
+   overlay     20  local overlays within a panel
+   panel       21  local slide-in panels above overlay
+   composer    25  sticky composer bar on mobile
+   topbar      30  global top bar
+   backdrop    40  full-screen drawer/modal backdrop
+   drawer      41  slide-over drawers
+   tabs        50  mobile bottom tab bar
+   dropdown    60  floating menus / popovers / modals
+   ─────────────────────────────────────────────────────────────── */
+:root {
+  --z-sticky:    10;
+  --z-overlay:   20;
+  --z-panel:     21;
+  --z-composer:  25;
+  --z-topbar:    30;
+  --z-backdrop:  40;
+  --z-drawer:    41;
+  --z-tabs:      50;
+  --z-dropdown:  60;
+}
+
 /* Direction E typography: JetBrains Mono (structural) + IBM Plex Sans (agent prose) */
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
@@ -19,13 +43,13 @@
   --dualith-text-strong: #111827;
   --dualith-text-soft: #1f2937;
   --dualith-text-muted: #4b5563;
-  --dualith-text-faint: #6b7280;
+  --dualith-text-faint: #5f6672;
   --dualith-surface-hover: #eef2f7;
   --dualith-surface-selected: #dff3fb;
   --dualith-surface-raised: #ffffff;
   --dualith-input-bg: #ffffff;
   --dualith-input-text: #111827;
-  --dualith-input-muted: #6b7280;
+  --dualith-input-muted: #5f6672;
   --dualith-ring: #0e7490;
   --dualith-cyan: #0e7490;
   --dualith-emerald: #047857;
@@ -177,6 +201,14 @@ select,
 textarea {
   font: inherit;
   color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
 }
 
 input,
@@ -388,7 +420,7 @@ select option:disabled {
 .dualith-main-grid {
   display: grid;
   grid-template-columns: minmax(200px, 260px) minmax(34rem, 1fr) minmax(320px, 420px);
-  height: calc(100vh - 36px);
+  height: calc(100dvh - 36px);
 }
 
 /* Collapsed sidebar -> thin icon rail, team room and right panel take the rest. */
@@ -530,7 +562,7 @@ select option:disabled {
   top: 36px;
   right: 0;
   bottom: 0;
-  z-index: 40;
+  z-index: var(--z-drawer);
   width: min(92vw, 380px);
   background: var(--dualith-bg);
   border-left: 1px solid var(--dualith-line);
@@ -557,7 +589,7 @@ select option:disabled {
 .dualith-drawer-backdrop {
   position: fixed;
   inset: 36px 0 0 0;
-  z-index: 30;
+  z-index: var(--z-backdrop);
   display: block;
   border: 0;
   background: rgba(0, 0, 0, 0.5);
@@ -674,7 +706,7 @@ select option:disabled {
 
   .dualith-main-grid {
     display: block;
-    height: calc(100vh - 72px);
+    height: calc(100dvh - 72px);
   }
 
   .dualith-main-grid > main {
@@ -687,7 +719,7 @@ select option:disabled {
     position: fixed;
     top: 0;
     bottom: 0;
-    z-index: 40;
+    z-index: var(--z-drawer);
     width: min(88vw, 360px);
     background: var(--dualith-bg);
     transition: transform 160ms ease;
@@ -711,7 +743,7 @@ select option:disabled {
   .dualith-drawer-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 30;
+    z-index: var(--z-backdrop);
     display: block;
     border: 0;
     background: rgba(0, 0, 0, 0.64);
@@ -1562,7 +1594,7 @@ select option:disabled {
 .dualith-overlay {
   position: absolute;
   inset: 0;
-  z-index: 20;
+  z-index: var(--z-overlay);
   background: rgba(0, 0, 0, 0.45);
   border: 0;
   padding: 0;
@@ -1573,7 +1605,7 @@ select option:disabled {
   top: 0;
   right: 0;
   bottom: 0;
-  z-index: 21;
+  z-index: var(--z-panel);
   width: min(92%, 26rem);
   display: flex;
   flex-direction: column;
@@ -1924,7 +1956,7 @@ select option:disabled {
   .dualith-composer-shell {
     position: sticky;
     bottom: 0;
-    z-index: 24;
+    z-index: var(--z-composer);
     padding: 0.55rem 0.7rem 0.7rem;
     background: linear-gradient(to top, var(--dualith-bg) 76%, transparent);
   }
@@ -2029,7 +2061,7 @@ select option:disabled {
     left: 0;
     right: 0;
     bottom: 0;
-    z-index: 50;
+    z-index: var(--z-tabs);
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 0.3rem;
@@ -4080,7 +4112,7 @@ details summary {
   border-bottom: 1px solid var(--dualith-line);
   background: var(--dualith-surface);
   flex-shrink: 0;
-  z-index: 30;
+  z-index: var(--z-topbar);
   position: relative;
 }
 
@@ -4167,7 +4199,7 @@ details summary {
   border: 1px solid var(--dualith-line-hard);
   border-radius: 6px;
   box-shadow: 0 12px 32px rgba(0,0,0,0.45);
-  z-index: 60;
+  z-index: var(--z-dropdown);
   overflow: hidden;
   animation: dualith-dropdown-in 0.12s ease-out;
 }
@@ -4418,7 +4450,7 @@ details summary {
   position: fixed;
   inset: 0;
   background: rgba(0,0,0,0.45);
-  z-index: 40;
+  z-index: var(--z-backdrop);
   border: none;
   cursor: pointer;
 }
@@ -4431,7 +4463,7 @@ details summary {
   width: 420px;
   background: var(--dualith-surface);
   border-left: 1px solid var(--dualith-line-hard);
-  z-index: 45;
+  z-index: var(--z-drawer);
   display: flex;
   flex-direction: column;
   box-shadow: -8px 0 32px rgba(0,0,0,0.3);
@@ -5057,7 +5089,7 @@ details summary {
   top: 0;
   right: 0;
   bottom: 0;
-  z-index: 45;
+  z-index: var(--z-drawer);
   display: flex;
   width: min(760px, 100vw);
   max-width: 100vw;
@@ -5638,7 +5670,7 @@ button:not(:disabled),
 .dualith-stale-banner {
   position: sticky;
   top: 0;
-  z-index: 10;
+  z-index: var(--z-sticky);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6063,7 +6095,7 @@ button:not(:disabled),
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
-  z-index: 50;
+  z-index: var(--z-dropdown);
   min-width: 140px;
   background: var(--dualith-surface);
   border: 1px solid var(--dualith-line-hard);

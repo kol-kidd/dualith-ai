@@ -71,7 +71,11 @@ export function SidebarColumn({
       {/* Project list */}
       <div className="dualith-sidebar__projects">
         {loading && projects.length === 0 ? (
-          <div style={{ padding: "10px 12px", color: "var(--dualith-text-faint)", fontSize: "11px" }}>Loading…</div>
+          <div role="status" aria-label="Loading projects" style={{ padding: "8px 12px" }} className="space-y-1.5">
+            {[...Array(3)].map((_, i) => (
+              <div key={i} className="h-8 animate-pulse rounded bg-surface-hover opacity-60" />
+            ))}
+          </div>
         ) : projects.length === 0 ? (
           <div style={{ padding: "10px 12px" }}>
             <button type="button" className="dualith-sidebar__footer-btn" onClick={onOpenSetup}>+ New project</button>
@@ -280,28 +284,58 @@ export function ProjectSwitcher({
   onOpenSetup: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [focusedIndex, setFocusedIndex] = useState<number>(-1);
+
+  // Total navigable items: projects + "New project" button at the end
+  const totalItems = projects.length + 1;
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) { setFocusedIndex(-1); return; }
+
     const onClick = (event: MouseEvent) => {
       if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
     };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
     document.addEventListener("mousedown", onClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onClick);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("mousedown", onClick);
   }, [open, setOpen]);
+
+  useEffect(() => {
+    if (!open || focusedIndex < 0) return;
+    const buttons = listRef.current?.querySelectorAll<HTMLButtonElement>("button");
+    buttons?.[focusedIndex]?.focus();
+  }, [open, focusedIndex]);
+
+  const handleTriggerKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setOpen(true);
+      setFocusedIndex(0);
+    }
+    if (event.key === "Escape") setOpen(false);
+  };
+
+  const handleListKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setFocusedIndex((i) => (i + 1) % totalItems);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setFocusedIndex((i) => (i - 1 + totalItems) % totalItems);
+    } else if (event.key === "Escape" || event.key === "Tab") {
+      setOpen(false);
+      triggerRef.current?.focus();
+    }
+  };
 
   return (
     <div ref={ref} className="dualith-project-switcher">
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
+        onKeyDown={handleTriggerKeyDown}
         className="dualith-topbar-b__project-trigger dualith-project-pill flex items-center gap-2 border border-line-hard px-3 py-1 text-xs outline-none transition-colors hover:border-line hover:text-text focus-visible:ring-1 focus-visible:ring-accent/60"
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -319,11 +353,11 @@ export function ProjectSwitcher({
             <span>Projects</span>
             <span className="dualith-projects-dropdown__count">{projects.length}</span>
           </div>
-          <div className="dualith-projects-dropdown__list">
+          <div ref={listRef} className="dualith-projects-dropdown__list" onKeyDown={handleListKeyDown}>
             {projects.length === 0 ? (
               <div className="dualith-projects-dropdown__empty">No projects yet</div>
             ) : (
-              projects.map((project) => {
+              projects.map((project, idx) => {
                 const active = selectedName === project.name;
                 const live = isRecent(project.last_event_at);
                 const status = projectStatus(project);
@@ -333,6 +367,7 @@ export function ProjectSwitcher({
                     type="button"
                     role="option"
                     aria-selected={active}
+                    tabIndex={focusedIndex === idx ? 0 : -1}
                     className={`dualith-projects-dropdown__item${active ? " is-active" : ""}`}
                     onClick={() => {
                       onSelect(project.name);
@@ -351,18 +386,19 @@ export function ProjectSwitcher({
                 );
               })
             )}
+            <button
+              type="button"
+              tabIndex={focusedIndex === projects.length ? 0 : -1}
+              className="dualith-projects-dropdown__add"
+              onClick={() => {
+                onOpenSetup();
+                setOpen(false);
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+              New project
+            </button>
           </div>
-          <button
-            type="button"
-            className="dualith-projects-dropdown__add"
-            onClick={() => {
-              onOpenSetup();
-              setOpen(false);
-            }}
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
-            New project
-          </button>
         </div>
       )}
     </div>
@@ -392,14 +428,14 @@ export function SettingsMenu({ theme, setTheme, density, setDensity }: {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="dualith-settings-trigger border border-line-hard px-2 py-1 text-[10px] uppercase tracking-widest text-zinc-500 outline-none transition-colors hover:text-zinc-200 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+        className="dualith-settings-trigger border border-line-hard px-2 py-1 text-[10px] uppercase tracking-widest text-muted outline-none transition-colors hover:text-text focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
         title="Appearance settings"
       >
         Theme
       </button>
       {open && (
-          <div className="dualith-settings-popover absolute right-0 top-full z-50 mt-1 w-60 rounded-md border border-line bg-surface p-3 text-zinc-300 shadow-xl shadow-black/50">
-          <div className="mb-1.5 text-[10px] uppercase tracking-widest text-zinc-500">Theme</div>
+          <div className="dualith-settings-popover absolute right-0 top-full z-50 mt-1 w-60 rounded-md border border-line bg-surface p-3 text-text shadow-xl shadow-black/50">
+          <div className="mb-1.5 text-[10px] uppercase tracking-widest text-muted">Theme</div>
           <div className="mb-3 grid grid-cols-2 gap-1.5">
             {themeOptions.map((option) => (
               <button
@@ -413,7 +449,7 @@ export function SettingsMenu({ theme, setTheme, density, setDensity }: {
               </button>
             ))}
           </div>
-          <div className="mb-1.5 text-[10px] uppercase tracking-widest text-zinc-500">Density</div>
+          <div className="mb-1.5 text-[10px] uppercase tracking-widest text-muted">Density</div>
           <div className="grid grid-cols-3 gap-1.5">
             {densityOptions.map((option) => (
               <button

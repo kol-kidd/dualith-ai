@@ -215,7 +215,7 @@ function ProjectCreateForm({ projectsRoot, onCreated, runnerHealth }: { projects
         setStatus("Refinement cancelled");
       } else {
         setSpec(sourceGoal);
-        setStatus(`Error: ${err instanceof Error ? err.message : "Unknown error"}`);
+        setStatus("Refinement failed — check your connection and try again");
       }
     } finally {
       setRefining(false);
@@ -729,7 +729,7 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, onClose, onRefr
             />
             {runnerPicker}
             <button type="submit" disabled={!seedIdea.trim() || busy !== null}>
-              {busy === "create" ? "Starting..." : "Start planning"}
+              {busy === "create" ? "Planning..." : busy !== null ? "Busy..." : "Start planning"}
             </button>
           </form>
 

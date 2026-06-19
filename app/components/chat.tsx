@@ -180,7 +180,7 @@ function FailureCard({ failure }: { failure: RunFailure }) {
       </div>
       <div className="team-turn__body">
         <div className="team-turn__head">
-          <span className="team-turn__who">Run interrupted</span>
+          <span className="team-turn__who text-balance">Run interrupted</span>
           {failure.runner && <span className="team-turn__runner">{failure.runner}</span>}
           <span className="team-turn__kind">{failure.code.replace(/_/g, " ")}</span>
           {failure.ts && <time className="team-turn__time">{timestampLabel(failure.ts)}</time>}
@@ -783,7 +783,7 @@ export function ChatComposer({
       setAgenticChoice(null);
       clearAttachments();
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : "unknown");
+      setErrorText("Failed to send — check your connection and try again");
     } finally {
       setPendingAction(null);
     }
@@ -807,7 +807,7 @@ export function ChatComposer({
       // Keep "Stopping…" until the WebSocket confirms the run is gone.
       // pendingAction is cleared by the useEffect below once isRunning goes false.
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : "unknown");
+      setErrorText("Failed to stop run — try again or refresh");
       setPendingAction(null);
     }
   };
