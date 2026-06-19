@@ -151,6 +151,27 @@ function LiveTail({ run }: { run: LiveRun }) {
   );
 }
 
+// Live heartbeat for the Chat tab. The Team tab has a full output tail; here we
+// keep it to a single calm pill + ticking timer so the user knows work is in
+// flight without leaving the conversation for the Team tab or the logs.
+export function ChatWorkingPill({ run }: { run: LiveRun }) {
+  const seconds = useElapsedSeconds(run.startedAt);
+  const runner = runnerLabels[run.runner as RunnerId] ?? run.runner;
+  return (
+    <div className="dualith-working-pill" aria-live="polite">
+      <span className="dualith-working-pill__dot" aria-hidden="true" />
+      <span className="dualith-working-pill__text">
+        {run.state === "starting"
+          ? `${run.roleLabel} (${runner}) is starting…`
+          : `${run.roleLabel} (${runner}) is working…`}
+      </span>
+      {run.state === "running" && (
+        <time className="dualith-working-pill__time">{formatElapsed(seconds)}</time>
+      )}
+    </div>
+  );
+}
+
 function FailureCard({ failure }: { failure: RunFailure }) {
   return (
     <div className="team-turn is-error team-failure" role="alert" aria-label="Run failure">
@@ -231,6 +252,9 @@ export function ChatFeedMessage({
         </div>
       </div>
     );
+  }
+  if (message.role === "system") {
+    return <SystemNote message={message} />;
   }
   return (
     <AgentBubble runner={latest?.runner} label={message.title} timestamp={message.timestamp}>
@@ -516,6 +540,34 @@ const UserBubble = React.memo(function UserBubble({ message, projectName }: { me
         </div>
       )}
     </div>
+  );
+});
+
+// Quiet, collapsed marker for non-conversational transcript entries (git ops,
+// scaffold, or any header outside the chat allowlist). Distinct from agent
+// bubbles so internal activity never reads as Dualith replying; body stays
+// available on demand via the disclosure.
+const SystemNote = React.memo(function SystemNote({ message }: { message: ChatMessage }) {
+  const label = humanizeKickoffTitle(message.title);
+  const time = message.timestamp ? timestampLabel(message.timestamp) : "";
+  if (!message.body.trim()) {
+    return (
+      <div className="dualith-system-note">
+        <span className="dualith-system-note__label">{label}</span>
+        {time && <span className="dualith-system-note__time">{time}</span>}
+      </div>
+    );
+  }
+  return (
+    <details className="dualith-system-note dualith-system-note--expandable">
+      <summary className="dualith-system-note__summary">
+        <span className="dualith-system-note__label">{label}</span>
+        {time && <span className="dualith-system-note__time">{time}</span>}
+      </summary>
+      <div className="dualith-system-note__body">
+        <FormattedAgentOutput content={message.body} />
+      </div>
+    </details>
   );
 });
 

@@ -158,7 +158,10 @@ DEFAULT_RUNNER_REASONING = {
     "claude": "medium",
 }
 DEFAULT_QUOTA_SETTINGS = {
-    "runner_policy": "codex-heavy",
+    # Eco by default: route heavy reasoning (lead/builder) to the pricier/stronger
+    # slot and light roles (tester/reviewers) to the cheaper one — better quality
+    # where it matters, lower spend overall. Env-overridable via the quota panel.
+    "runner_policy": os.environ.get("DUALITH_DEFAULT_RUNNER_POLICY", "eco"),
     "reserve_percent": 10,
     "codex_monthly_tokens": 0,
     "claude_five_hour_tokens": 0,
@@ -190,7 +193,11 @@ RUNNER_POLICIES = {
 # Roles that drive output quality and get the premium (pricier) slot under the
 # "eco" policy; everything else (tester, summarizer, reviewers/critics) runs on
 # the cheaper slot. See eco_team_pair() / eco_runner_for_role().
-ECO_HEAVY_ROLES = {"lead", "builder", "team", "architect", "planner", "pm", "decomposer"}
+# Only the roles that actually write code (lead/builder) and the plan that directly
+# shapes what they build (planner) get the premium slot under eco policy. Everything
+# else — architect, pm, decomposer, reviewers, tester, summarizer, teammate — runs
+# on the cheap slot. "team" is the virtual runner-pref label, not an agent role.
+ECO_HEAVY_ROLES = {"lead", "builder", "team", "planner"}
 
 # Approximate per-token prices (USD) for slots without OpenRouter-style live
 # pricing (CLI/subscription slots, and direct OpenAI/Anthropic/Gemini API models).
@@ -234,6 +241,8 @@ from .routing import (
     REVIEW_AGENTS,
     PIPELINE_MAX_ITERATIONS,
     TEAM_MAX_ROUNDS,
+    LEAN_TEAM_MAX_ROUNDS,
+    effective_max_rounds,
     ROUTE_MODE_VALUES,
     TEAM_MODE_VALUES,
     ORCHESTRATION_WORKFLOWS,
@@ -516,7 +525,7 @@ class HumanInputRequest(BaseModel):
 
 
 class QuotaSettingsRequest(BaseModel):
-    runner_policy: Literal["auto", "codex-heavy", "claude-heavy", "balanced", "eco"] = "codex-heavy"
+    runner_policy: Literal["auto", "codex-heavy", "claude-heavy", "balanced", "eco"] = "eco"
     reserve_percent: int = Field(default=10, ge=0, le=90)
     codex_monthly_tokens: int = Field(default=0, ge=0, le=2_000_000_000)
     claude_five_hour_tokens: int = Field(default=0, ge=0, le=2_000_000_000)
@@ -850,6 +859,14 @@ def lessons_path(project_path: Path) -> Path:
     return project_path / "LESSONS.md"
 
 
+def workspace_state_path(project_path: Path) -> Path:
+    return project_path / "WORKSPACE_STATE.md"
+
+
+def round_context_path(project_path: Path) -> Path:
+    return project_path / ".dualith" / "round_context.md"
+
+
 # HITL marker prefixes (kept as exact strings per spec).
 QUESTION_PREFIX = "🤖 QUESTION:"
 ANSWER_PREFIX = "✍️ ANSWER:"
@@ -857,8 +874,10 @@ ANSWER_PREFIX = "✍️ ANSWER:"
 # Cap CHAT_HISTORY.md payload streamed to the UI so a long transcript can't bloat snapshots.
 CHAT_HISTORY_MAX_CHARS = 32_000
 # Smaller cap for the history tail *injected into agent prompts* — every agent call
-# re-sends this prefix, so keeping it tight is the single biggest token saver.
-CHAT_HISTORY_PROMPT_CHARS = 6_000
+# re-sends this prefix, so keeping it tight is the single biggest token saver. The
+# Summarizer already distills durable context into PROJECT_MEMORY.md, so the raw
+# tail only needs the most recent exchanges. Env-overridable.
+CHAT_HISTORY_PROMPT_CHARS = int(os.environ.get("DUALITH_CHAT_HISTORY_PROMPT_CHARS", "2500"))
 
 def ensure_dualith_store() -> None:
     DUALITH_DIR.mkdir(parents=True, exist_ok=True)
@@ -2584,7 +2603,41 @@ def set_usage_max(record: dict[str, Any], key: str, value: int | float) -> None:
         record[key] = value
 
 
+def _update_usage_from_stream_json(record: dict[str, Any], text: str) -> bool:
+    """Pull structured token counts from a claude stream-json line.
+
+    The terminal {"type":"result"} line (and per-message assistant lines) carry a
+    structured `usage` object with input/output and — critically — cache token
+    counts. Parsing it lets the quota UI show cache reads on the CLI path, which the
+    regex fallback below can't see. Returns True if a usage object was consumed.
+    """
+    if '"usage"' not in text:
+        return False
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    usage = parsed.get("usage")
+    if not isinstance(usage, dict):
+        usage = (parsed.get("message") or {}).get("usage") if isinstance(parsed.get("message"), dict) else None
+    if not isinstance(usage, dict):
+        return False
+    for field in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+        value = usage.get(field)
+        if isinstance(value, (int, float)) and value:
+            set_usage_max(record, field, int(value))
+    if record.get("input_tokens") is not None and record.get("output_tokens") is not None:
+        set_usage_max(record, "total_tokens", int(record["input_tokens"]) + int(record["output_tokens"]))
+    return True
+
+
 def update_usage_metrics(record: dict[str, Any], text: str) -> None:
+    # Prefer structured stream-json usage (carries cache token counts); fall back to
+    # regex scraping for CLIs/lines that only print human-readable token summaries.
+    if _update_usage_from_stream_json(record, text):
+        return
     lower = text.lower()
     patterns = (
         ("input_tokens", r"\b(?:input|prompt)\s+tokens?\b[^0-9]{0,30}([0-9][0-9,_]*)"),
@@ -3836,6 +3889,47 @@ def project_memory_prompt_block(project_path: Path) -> str:
         content = f"{content[:2400].rstrip()}\n\n[... trimmed ...]\n\n{content[-1000:].lstrip()}"
     return (
         "Project memory (durable context from previous tasks, maintained by the team's Summarizer):\n"
+        f"{content}\n\n"
+    )
+
+
+def workspace_state_prompt_block(project_path: Path) -> str:
+    """Inject WORKSPACE_STATE.md (structured cross-task file index written by Summarizer).
+
+    Distinct from PROJECT_MEMORY.md: this carries the *structural* state of the
+    workspace (which files exist and what they do) so the Lead can skip broad
+    repo scans on follow-up tasks.
+    """
+    path = workspace_state_path(project_path)
+    if not path.exists():
+        return ""
+    content = path.read_text(encoding="utf-8", errors="replace").strip()
+    if not content:
+        return ""
+    if len(content) > 4000:
+        content = f"{content[:2800].rstrip()}\n\n[... trimmed ...]\n\n{content[-1000:].lstrip()}"
+    return (
+        "Workspace state (file index + key decisions from prior tasks — read this before scanning the repo):\n"
+        f"{content}\n\n"
+    )
+
+
+def round_context_prompt_block(project_path: Path) -> str:
+    """Inject .dualith/round_context.md written server-side after each agent round.
+
+    Pre-empts broad file scans: the next agent already knows what changed this
+    round, what the tester verdict was, and which files need attention.
+    """
+    path = round_context_path(project_path)
+    if not path.exists():
+        return ""
+    content = path.read_text(encoding="utf-8", errors="replace").strip()
+    if not content:
+        return ""
+    if len(content) > 3000:
+        content = content[:3000].rstrip() + "\n\n[... trimmed ...]"
+    return (
+        "Round context (what happened this round — start here, not with a full repo scan):\n"
         f"{content}\n\n"
     )
 
@@ -5414,6 +5508,7 @@ def add_runner_args(
     result_path: Path | None = None,
     sandbox: str = "workspace-write",
     permission_mode: str | None = None,
+    system_prompt: str | None = None,
 ) -> list[str]:
     if runner == "claude":
         if not args:
@@ -5430,6 +5525,12 @@ def add_runner_args(
                 prefix.extend(["--output-format", "json"])
         if permission_mode:
             prefix = with_option_value(prefix, "--permission-mode", permission_mode)
+        # Cross-call prompt caching: the stable role+project prefix is passed as the
+        # system prompt (Anthropic caches it automatically, ~5-min TTL) so repeated
+        # agent calls in a team round re-read it instead of re-billing full input.
+        # Only the user-specific suffix stays in the positional prompt.
+        if system_prompt and system_prompt.strip() and not has_option(prefix, "--append-system-prompt"):
+            prefix = with_option_value(prefix, "--append-system-prompt", system_prompt)
         return [*prefix, *prompt]
     if runner != "codex":
         return args
@@ -5646,8 +5747,10 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
     is_review_agent = agent in REVIEW_AGENTS
     # Roles that get the full chat history (conversational context matters for them).
     _needs_chat_history = agent in {"lead", "ask", "pm", "architect", "planner"}
-    # Roles that need project memory (implementation-context agents).
-    _needs_memory = agent not in {"summarizer", "decomposer", *SPECIALIST_REVIEWERS}
+    # Roles that need project memory (implementation-context agents). Tester works
+    # off the build/test commands and the diff, not durable project memory, so it
+    # doesn't need the memory block re-sent on every run.
+    _needs_memory = agent not in {"summarizer", "decomposer", "tester", *SPECIALIST_REVIEWERS}
     # Global long-term memory only steers the roles that make architectural/build
     # decisions. Re-sending it to every role just inflates the per-call prefix.
     _needs_global_memory = agent in {"lead", "architect", "planner"}
@@ -5661,11 +5764,24 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
             if doc_block:
                 prompt = f"{doc_block}{prompt}"
                 _attached_memory = True
+            # Structured workspace file-index from prior tasks (Summarizer-written).
+            # Only for roles that plan/implement — reviewers and tester work off the diff.
+            if agent in {"lead", "builder", "architect", "planner"}:
+                ws_block = workspace_state_prompt_block(project_path)
+                if ws_block:
+                    prompt = f"{ws_block}{prompt}"
+                    _attached_memory = True
             if _needs_global_memory:
                 memory_block = memory_prompt_block(project_path)
                 if memory_block:
                     prompt = f"{memory_block}{prompt}"
                     _attached_memory = True
+
+        # Round context is highest priority: inject before everything else so agents
+        # see "what changed this round" as the first thing they read.
+        rc_block = round_context_prompt_block(project_path)
+        if rc_block:
+            prompt = f"{rc_block}{prompt}"
 
     if is_review_agent:
         prompt = f"{prompt}\n\n{REVIEW_COST_CONTROL}"
@@ -6397,27 +6513,58 @@ def resolve_runner_model(runner: str, requested_model: str) -> str:
     return runner_default_model(runner)
 
 
-# Roles that can use a cheaper/faster model — they do focused single-pass work, not reasoning-heavy implementation.
-_CHEAP_MODEL_ROLES: dict[str, dict[str, str]] = {
-    "summarizer": {"claude": "claude-haiku-4-5-20251001", "codex": "codex-mini-latest"},
-    "multi_reviewer": {"claude": "claude-haiku-4-5-20251001", "codex": "codex-mini-latest"},
-    "tester": {"claude": "claude-haiku-4-5-20251001", "codex": "codex-mini-latest"},
+# Roles whose work is focused read-and-judge / short structured output — they don't
+# need the full reasoning budget of the coder roles and should run on the cheapest
+# available model within whichever slot they're assigned to.
+_LIGHT_ROLES: frozenset[str] = frozenset({
+    "summarizer", "multi_reviewer", "tester", "teammate",
+    "architect", "pm", "decomposer",
+    "architecture_reviewer", "security_reviewer",
+    "performance_reviewer", "maintainability_reviewer",
+})
+
+# Default cheap-model IDs for CLI/subscription slots. Keyed by the internal slot
+# name ("claude" = Runner A CLI, "codex" = Runner B CLI). These only apply when the
+# slot is in subscription/CLI mode — API-key slots always use their configured
+# api_model and never consult this table. Override per slot via env vars so users
+# who swap the CLI binary (or want a different cheap tier) don't need to touch code.
+_CLI_CHEAP_MODELS: dict[str, str] = {
+    "claude": os.environ.get("DUALITH_CLAUDE_CHEAP_MODEL", "claude-haiku-4-5-20251001"),
+    "codex":  os.environ.get("DUALITH_CODEX_CHEAP_MODEL",  "codex-mini-latest"),
 }
 
 
+def runner_cheap_model(runner: str) -> str | None:
+    """Return the cheap/fast model for a CLI slot, or None for API-key slots.
+
+    API-key slots have exactly one valid model (their configured api_model) and
+    should never be overridden here. CLI slots default to the cheapest known model
+    for the default binary but are overridable via DUALITH_{SLOT}_CHEAP_MODEL.
+    """
+    if runner_api_model(runner) is not None:
+        return None  # API-key slot: caller uses api_model directly
+    return _CLI_CHEAP_MODELS.get(runner)
+
+
 def resolve_team_step_model(role: str, assigned_runner: str, executing_runner: str, requested_lead_model: str) -> str:
-    """Resolve a Team step model without leaking one runner's model to another."""
+    """Resolve a Team step model without leaking one runner's model to another.
+
+    API-key slots: always their configured api_model — no overrides, since the
+    user already chose the model they want for that slot.
+    CLI subscription slots: light roles (read-and-judge work) get the slot's cheap
+    model; heavy roles (coders) get the requested lead model if the slot accepts it.
+    """
     if executing_runner not in RUNNER_COMMANDS:
         executing_runner = "codex"
-    # API-key slots have exactly one valid model — the cheap/fast CLI model ids
-    # (codex-mini-latest / claude-haiku) don't exist on e.g. OpenRouter/Gemini.
+    # API-key slots have exactly one valid model — never override it.
     api_model = runner_api_model(executing_runner)
     if api_model:
         return api_model
-    # Use a cheap/fast model for roles that don't require deep reasoning.
-    cheap = _CHEAP_MODEL_ROLES.get(role, {}).get(executing_runner)
-    if cheap:
-        return cheap
+    # CLI slots: downgrade light roles to the cheap/fast model for the slot.
+    if role in _LIGHT_ROLES:
+        cheap = runner_cheap_model(executing_runner)
+        if cheap:
+            return cheap
     return resolve_runner_model(executing_runner, requested_lead_model)
 
 
@@ -6617,7 +6764,18 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         return result
 
     key = agent_run_key(project_name, agent)
-    prompt = agent_prompt(agent, run_prompt, project_path, partner, attachment_paths)
+    # For the claude CLI, split the prompt so the stable role+project prefix can be
+    # passed as --append-system-prompt (cacheable across calls); only the user-specific
+    # suffix goes positionally. Codex has no equivalent flag, so it gets the combined
+    # prompt as before (documented caching gap).
+    system_prefix = ""
+    if runner == "claude":
+        system_prefix, user_block = agent_prompt(agent, run_prompt, project_path, partner, attachment_paths, split=True)
+        prompt = user_block or system_prefix  # never send an empty positional arg
+        if not user_block:
+            system_prefix = ""  # nothing to cache when the prefix is the only content
+    else:
+        prompt = agent_prompt(agent, run_prompt, project_path, partner, attachment_paths)
     command = str(config["command"])
 
     # Short-term memory: log the user's Ask query to CHAT_HISTORY.md before the agent runs.
@@ -6627,7 +6785,9 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         append_chat_history(project_path, f"### User Query - {utc_now()}\n\n{run_prompt.strip()}{attach_line}\n\n")
         await broadcast("chat_event", record_event("CHAT_QUERY", f"{relative_path(project_path)} :: ask query"))
     command_reasoning = runner_reasoning_arg(runner, reasoning)
-    usage_record = new_usage_record(project_name, agent, runner, model, reasoning, prompt)
+    # Account for the full payload (cacheable prefix + positional suffix), not just the
+    # suffix the claude path sends positionally — otherwise token estimates undercount.
+    usage_record = new_usage_record(project_name, agent, runner, model, reasoning, f"{system_prefix}{prompt}")
     usage_record["user_prompt"] = run_prompt.strip()
     output_path = result_file_path(project_path, str(usage_record["id"]))
     read_only = agent == "ask"
@@ -6647,6 +6807,7 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         output_path,
         sandbox,
         permission_mode,
+        system_prompt=system_prefix,
     )
     mode_label = str(RUN_MODES[agent]["label"])
     runner_label = str(config["label"])
@@ -7107,6 +7268,66 @@ async def repair_missing_chat_section(
 def agent_chat_tail_since(project_path: Path, start_offset: int) -> str:
     content = read_agent_chat(project_path)
     return content[max(0, min(start_offset, len(content))):]
+
+
+def write_round_context(
+    project_path: Path,
+    round_no: int,
+    completed_step: str,
+    chat_delta: str,
+    tester_verdict: str = "",
+    tester_summary: str = "",
+    reviewer_verdict: str = "",
+    reviewer_summary: str = "",
+) -> None:
+    """Write .dualith/round_context.md after each agent step completes.
+
+    Called server-side (no LLM) so the next agent can read it as its first
+    context source instead of re-scanning SPEC/PLAN/AGENT_CHAT from scratch.
+    """
+    dualith_dir = project_path / ".dualith"
+    try:
+        dualith_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+
+    sections: list[str] = [f"# Round {round_no} context — after {completed_step}\n"]
+
+    # Distilled AGENT_CHAT delta from this step (capped — we only need the gist).
+    if chat_delta and chat_delta.strip():
+        delta_snippet = chat_delta.strip()
+        if len(delta_snippet) > 2000:
+            delta_snippet = delta_snippet[:1600].rstrip() + "\n\n[... truncated ...]"
+        sections.append(f"## What {completed_step} did\n\n{delta_snippet}\n")
+
+    # Tester verdict from this round.
+    if tester_verdict:
+        verdict_line = f"**Verdict:** {tester_verdict.upper()}"
+        if tester_summary:
+            verdict_line = f"{verdict_line} — {tester_summary}"
+        sections.append(f"## Tester\n\n{verdict_line}\n")
+
+    # Reviewer feedback from this round.
+    if reviewer_verdict:
+        rev_line = f"**Verdict:** {reviewer_verdict.upper()}"
+        if reviewer_summary:
+            rev_line = f"{rev_line} — {reviewer_summary}"
+        sections.append(f"## Reviewer\n\n{rev_line}\n")
+
+    sections.append(
+        "## Instructions for next agent\n\n"
+        "- Read this file first. Only open SPEC.md / PLAN.md / AGENT_CHAT.md if you need "
+        "detail beyond what's captured above.\n"
+        "- Focus on the files the previous step touched; skip broad repo scans unless you "
+        "encounter an import or symbol that isn't in the diff.\n"
+    )
+
+    try:
+        round_context_path(project_path).write_text(
+            "\n".join(sections), encoding="utf-8"
+        )
+    except OSError as exc:
+        log.warning("write_round_context: could not write round context: %s", exc)
 
 
 async def process_step_handoff(
@@ -7791,6 +8012,9 @@ async def run_pm_then_team(project_name: str, project_path: Path, runner_pref: s
 
 async def run_team(project_name: str, project_path: Path, runner_pref: str, model: str, reasoning: str, run_prompt: str, max_rounds: int, attachment_paths: list[str] | None = None, task_id: str | None = None, team_mode: str = "lean") -> None:
     team_mode = clean_team_mode(team_mode)
+    # Lean mode converges fast (early-exit on approval); cap its round budget lower
+    # than full mode so we don't pay for repeated full-context rounds that rarely run.
+    max_rounds = effective_max_rounds(team_mode, max_rounds)
     lead, teammate, reason = team_runners(runner_pref)
     runner_mode = team_runner_mode(runner_pref, lead, teammate)
     team_resume_events[project_name] = asyncio.Event()
@@ -7809,6 +8033,13 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
     set_task_status(task_id, "active", "lead", f"{team_mode.title()} team loop started.")
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
     compact_agent_chat_for_new_task(project_path)
+    # Clear stale round context from any previous task so round-1 agents start clean.
+    try:
+        rc = round_context_path(project_path)
+        if rc.exists():
+            rc.unlink()
+    except OSError:
+        pass
     log.info("team routed  project=%s mode=%s team_mode=%s lead=%s teammate=%s reason=%s",
              project_name, runner_mode, team_mode, RUNNER_COMMANDS[lead]['label'], RUNNER_COMMANDS[teammate]['label'], reason)
     record_event("TEAM_ROUTED", f"{relative_path(project_path)} :: {team_mode} :: {runner_mode} :: lead {RUNNER_COMMANDS[lead]['label']} :: teammate {RUNNER_COMMANDS[teammate]['label']} :: {reason}")
@@ -8035,6 +8266,14 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
             update_task_ownership_from_git(task_id, project_path, "Lead")
             set_task_phase(task_id, "lead", "done", lead_runner, f"Round {round_no}")
             await process_step_handoff(project_name, project_path, "lead", round_no, lead_chat_start)
+            # Write round context so the Tester (and next-round Lead) know exactly
+            # what changed without re-reading the full workspace.
+            write_round_context(
+                project_path,
+                round_no,
+                "Lead",
+                agent_chat_tail_since(project_path, lead_chat_start),
+            )
 
             # Lead may have HALTed by writing a question — loop back to the gate.
             if parse_human_input(project_path)["blocked"]:
@@ -8072,6 +8311,12 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                     continue
                 consecutive_test_failures = 0
                 set_task_phase(task_id, "tester", "done", tester_runner, f"Round {round_no}")
+                write_round_context(
+                    project_path, round_no, "Tester",
+                    chat_delta="",
+                    tester_verdict="passed",
+                    tester_summary=tester_summary,
+                )
             elif should_test:
                 # Pre-tester gate: run a cheap deterministic build/lint check before the
                 # agentic Tester subprocess. If the build already fails, skip the agentic Tester
@@ -8167,6 +8412,12 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 else:
                     consecutive_test_failures = 0
                     set_task_phase(task_id, "tester", "done", tester_runner, f"Round {round_no}")
+                    write_round_context(
+                        project_path, round_no, "Tester",
+                        chat_delta=agent_chat_tail_since(project_path, tester_chat_start),
+                        tester_verdict="passed",
+                        tester_summary=tester_summary,
+                    )
                     await maybe_bounce_question(
                         project_name, project_path, "tester", tester_handoff,
                         lead_runner, lead, model, reasoning, teammate, runner_pref, task_id, round_no,
@@ -9032,7 +9283,7 @@ async def route_preview(name: str, message: str = "") -> dict[str, Any]:
     if _is_obvious_question(message):
         intent = "ask"
         reason = "question fast-path"
-    workflow_id = workflow_for_intent(intent)
+    workflow_id = workflow_for_intent(intent, message)
     # Default team_mode for preview (lean is the common default)
     team_mode = "lean"
     calls = estimated_runner_calls_for_task(workflow_id, team_mode, message, project_path)
@@ -9422,9 +9673,11 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
             workflow_id = "pm-clarify"
             route_reason = "ambiguous change request → PM clarify"
         else:
-            workflow_id = workflow_for_intent(intent)
+            workflow_id = workflow_for_intent(intent, request.prompt)
     else:
-        workflow_id = workflow_for_intent(intent)
+        workflow_id = workflow_for_intent(intent, request.prompt)
+        if intent == "build" and workflow_id == "build-only":
+            route_reason = f"{route_reason}; simple build → single builder"
 
     if route_mode == "ask":
         workflow_id = "ask"

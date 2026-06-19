@@ -122,43 +122,24 @@ export function sortProjects(projects: ProjectRecord[]) {
   return [...projects].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export function appendTranscriptChunk(current: string, chunk: string) {
-  if (!chunk) return current;
-  return current.endsWith(chunk) ? current : `${current}${chunk}`;
-}
-
-// Incremental transcript parse cache. When the raw string grows by appended
-// content (the normal delta case), we parse only the new tail and concat onto
-// the previous result instead of re-splitting the full string.
-function makeTranscriptCache<T>(parse: (raw: string) => T[]): (raw: string) => T[] {
-  let cachedRaw = "";
-  let cachedResult: T[] = [];
-  return (raw: string): T[] => {
-    if (raw === cachedRaw) return cachedResult;
-    if (raw.startsWith(cachedRaw) && cachedRaw.length > 0) {
-      // Re-parse from the last complete ### boundary before the cached end so
-      // an in-progress section that grew mid-delta gets replaced cleanly.
-      const lastBoundary = cachedRaw.lastIndexOf("\n### ");
-      const safeBase = lastBoundary >= 0 ? cachedRaw.slice(0, lastBoundary) : "";
-      const safeMessages = safeBase ? parse(safeBase) : [];
-      const tail = raw.slice(safeBase.length);
-      const tailMessages = parse(tail);
-      cachedRaw = raw;
-      cachedResult = [...safeMessages, ...tailMessages];
-      return cachedResult;
-    }
-    // Full re-parse for snapshot reconcile, clear, or non-append edits.
-    cachedRaw = raw;
-    cachedResult = parse(raw);
-    return cachedResult;
-  };
+import {
+  appendTranscriptChunk as _appendTranscriptChunk,
+  makeTranscriptCache as _makeTranscriptCache,
+  parseChatHistory as _parseChatHistory,
+  sortChatMessages,
+} from "../lib/transcript";
+export { appendTranscriptChunk, makeTranscriptCache } from "../lib/transcript";
+const appendTranscriptChunk = _appendTranscriptChunk;
+const makeTranscriptCache = _makeTranscriptCache;
+function parseChatHistory(raw: string) {
+  return _parseChatHistory(raw, sanitizeRunnerOutput);
 }
 
 // Per-component hooks using the cache. Each call site gets its own cache
 // instance via useRef so the cache is stable across re-renders.
 export function useIncrementalChatHistory(raw: string): ChatMessage[] {
   const cache = useRef(makeTranscriptCache(parseChatHistory));
-  return useMemo(() => cache.current(raw), [raw]);
+  return useMemo(() => sortChatMessages(cache.current(raw)), [raw]);
 }
 
 export function useIncrementalAgentChat(raw: string): TeamMessage[] {
@@ -1759,44 +1740,6 @@ export function teamRoomStatus(message: TeamMessage) {
   return null;
 }
 
-function parseChatHistory(raw: string): ChatMessage[] {
-  const text = raw.replace(/^﻿/, "").trim();
-  if (!text) return [];
-  const messages: ChatMessage[] = [];
-  const sections = text.split(/^###\s+/m).filter((s) => s.trim());
-  for (const section of sections) {
-    const newline = section.indexOf("\n");
-    const header = (newline === -1 ? section : section.slice(0, newline)).trim();
-    const rawBody = (newline === -1 ? "" : section.slice(newline + 1)).trim();
-    const lower = header.toLowerCase();
-    const [, timestamp = ""] = header.split(/\s+-\s+/);
-    // Extract _Attached: file1, file2_ suffix written by the backend
-    const attachMatch = rawBody.match(/_Attached:\s*([^_]+)_\s*$/);
-    const attachments = attachMatch
-      ? attachMatch[1].split(",").map((s) => s.trim()).filter(Boolean)
-      : [];
-    const body = sanitizeRunnerOutput(attachMatch ? rawBody.slice(0, attachMatch.index).trim() : rawBody);
-    if (lower.startsWith("user query")) {
-      messages.push({ role: "user", title: "You", timestamp, body, attachments, kind: "ask" });
-    } else if (lower.startsWith("team kickoff")) {
-      messages.push({ role: "user", title: "Team kickoff", timestamp, body, attachments, kind: "kickoff" });
-    } else if (lower.startsWith("pipeline kickoff")) {
-      messages.push({ role: "user", title: "Pipeline kickoff", timestamp, body, attachments, kind: "kickoff" });
-    } else if (lower.startsWith("dualith answer")) {
-      messages.push({ role: "agent", title: "Dualith", timestamp, body, attachments: [], kind: "answer" });
-    } else if (lower.startsWith("plan")) {
-      messages.push({ role: "plan", title: "Plan", timestamp, body, attachments: [], kind: "plan" });
-    } else if (lower.startsWith("plan feedback")) {
-      messages.push({ role: "user", title: "Plan feedback", timestamp, body, attachments: [], kind: "kickoff" });
-    } else if (lower.startsWith("circuit breaker")) {
-      messages.push({ role: "circuit-breaker", title: "Circuit Breaker", timestamp, body, attachments: [], kind: "circuit-breaker" });
-    } else {
-      messages.push({ role: "agent", title: header.split(/\s+-\s+/)[0] || "Dualith", timestamp, body, attachments: [], kind: "answer" });
-    }
-  }
-  return messages;
-}
-
 export function promptWithAgenticChoice(choice: AgenticChoiceDraft, option: HumanInputOption) {
   return [
     choice.prompt,
@@ -2019,7 +1962,7 @@ export function quotaValueFromInput(value: string, max = 2_000_000_000) {
 }
 
 export function normalizeRunnerPolicy(value: unknown): RunnerPolicyId {
-  return runnerPolicies.some((policy) => policy.id === value) ? value as RunnerPolicyId : "codex-heavy";
+  return runnerPolicies.some((policy) => policy.id === value) ? value as RunnerPolicyId : "eco";
 }
 
 export function normalizeQuotaSettings(settings: Partial<QuotaSettings> | null | undefined): QuotaSettings {

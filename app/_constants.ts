@@ -35,10 +35,10 @@ export const runners: { id: RunnerId; label: string }[] = [
   { id: "claude", label: "Claude only" },
 ];
 export const runnerPolicies: { id: RunnerPolicyId; label: string; description: string }[] = [
+  { id: "eco", label: "Eco team", description: "Heavy roles (lead, architect, planner) use the pricier slot; light roles (tester, summarizer, reviewers) use the cheaper one." },
   { id: "codex-heavy", label: "Codex-heavy", description: "Codex leads implementation; Claude reviews when available." },
   { id: "claude-heavy", label: "Claude-heavy", description: "Claude leads implementation; Codex reviews when available." },
   { id: "balanced", label: "Balanced", description: "Auto picks the runner with the most quota headroom." },
-  { id: "eco", label: "Eco team", description: "Heavy roles (lead, architect, planner) use the pricier slot; light roles (tester, summarizer, reviewers) use the cheaper one." },
   { id: "auto", label: "Registry auto", description: "Use each agent's built-in runner default." },
 ];
 export const runnerPolicyLabels = Object.fromEntries(runnerPolicies.map((policy) => [policy.id, policy.label])) as Record<RunnerPolicyId, string>;
@@ -182,7 +182,7 @@ export const emptyUsage: UsageSnapshot = {
   active: [],
 };
 export const emptyQuotaSettings: QuotaSettings = {
-  runner_policy: "codex-heavy",
+  runner_policy: "eco",
   reserve_percent: 10,
   codex_monthly_tokens: 0,
   claude_five_hour_tokens: 0,

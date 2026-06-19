@@ -26,7 +26,7 @@ import {
   rosterAgentStatus,
   rosterStatusLabel,
 } from "../_helpers";
-import { ChatFeedMessage, TeamRoom } from "./chat";
+import { ChatFeedMessage, ChatWorkingPill, TeamRoom } from "./chat";
 import { AttentionPanel, DecisionPanel, IdleDigest } from "./task";
 
 export function SidebarColumn({
@@ -180,6 +180,10 @@ export function TeamRoomFull({
 
   // Auto-switch to Team tab only when a non-ask (team) run starts — never for
   // the Ask agent, which runs in the Chat tab and should not redirect the user.
+  // Live heartbeat for the Chat tab: any run in flight for this project (the Ask
+  // agent runs here; team runs auto-switch to the Team tab but still show here if
+  // the user navigates back). Most recent run wins so the pill tracks the active turn.
+  const chatLiveRun = liveRuns.filter((run) => run.project === project.name).slice(-1)[0] ?? null;
   const hasTeamLive = liveRuns.some((run) => run.agent !== "ask");
   const prevHasTeamLive = useRef(hasTeamLive);
   useEffect(() => {
@@ -202,7 +206,7 @@ export function TeamRoomFull({
     const target = scrollParent ?? el;
     const frame = window.requestAnimationFrame(() => { target.scrollTop = target.scrollHeight; });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeTab, chatAutoFollow, chatMessages.length]);
+  }, [activeTab, chatAutoFollow, chatMessages.length, chatLiveRun?.runId]);
   const handleChatScroll = () => {
     const el = chatThreadRef.current;
     if (!el) return;
@@ -235,6 +239,7 @@ export function TeamRoomFull({
               />
             ))
           )}
+          {chatLiveRun && <ChatWorkingPill key={`working-${chatLiveRun.runId}`} run={chatLiveRun} />}
         </div>
       )}
 

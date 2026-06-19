@@ -470,12 +470,12 @@ export type DirectoryInputProps = InputHTMLAttributes<HTMLInputElement> & {
 // --- Cross-cutting team-room types (used by both helpers and components) ---
 
 export type ChatMessage = {
-  role: "user" | "agent" | "plan" | "circuit-breaker";
+  role: "user" | "agent" | "plan" | "circuit-breaker" | "system";
   title: string;
   timestamp: string;
   body: string;
   attachments: string[]; // filenames extracted from _Attached: ..._ suffix
-  kind: "ask" | "kickoff" | "answer" | "plan" | "circuit-breaker";
+  kind: "ask" | "kickoff" | "answer" | "plan" | "circuit-breaker" | "system";
 };
 
 export type TeamMessageRole =

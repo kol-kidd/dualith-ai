@@ -52,6 +52,21 @@ REVIEW_AGENTS = {"auditor", "teammate", *SPECIALIST_REVIEWERS}
 
 PIPELINE_MAX_ITERATIONS = int(os.environ.get("DUALITH_PIPELINE_MAX_ITERATIONS", "6"))
 TEAM_MAX_ROUNDS = int(os.environ.get("DUALITH_TEAM_MAX_ROUNDS", "4"))
+# Lean mode converges in round 1 for most tasks (early-exit on approval), so the
+# default round cap is lower than full mode — the extra rounds were the main
+# source of repeated, full-context agent calls. Env-overridable.
+LEAN_TEAM_MAX_ROUNDS = int(os.environ.get("DUALITH_LEAN_TEAM_MAX_ROUNDS", "2"))
+
+
+def effective_max_rounds(team_mode: str | None, requested: int) -> int:
+    """Clamp the round budget for lean mode without lowering an explicit full run.
+
+    Full mode keeps the requested cap (up to TEAM_MAX_ROUNDS). Lean mode is capped
+    at LEAN_TEAM_MAX_ROUNDS unless the caller explicitly asked for fewer.
+    """
+    if clean_team_mode(team_mode) == "lean":
+        return max(1, min(requested or LEAN_TEAM_MAX_ROUNDS, LEAN_TEAM_MAX_ROUNDS))
+    return max(1, requested or TEAM_MAX_ROUNDS)
 
 ROUTE_MODE_VALUES = {"ask", "team", "auto"}
 TEAM_MODE_VALUES = {"lean", "full"}
@@ -487,8 +502,54 @@ def classify_orchestration_intent(prompt: str, project_path: Path) -> tuple[str,
 # Workflow / agent mapping
 # ---------------------------------------------------------------------------
 
-def workflow_for_intent(intent: str) -> str:
+# Signals that a build task is genuinely complex enough to warrant the full team
+# (multiple agents, reviewers, multiple rounds) rather than a single builder pass.
+# Kept env-overridable so power users can force the team on more tasks.
+_COMPLEX_TASK_TERMS = frozenset(
+    (os.environ.get("DUALITH_COMPLEX_TASK_TERMS") or "").lower().split(",")
+) - {""} or frozenset({
+    "architecture", "refactor", "migration", "schema", "database", "auth", "authentication",
+    "authorization", "payment", "security", "integrate", "integration", "rewrite", "redesign",
+    "multi-tenant", "tenant", "scale", "performance", "pipeline", "infrastructure", "deploy",
+    "system", "end-to-end", "e2e", "across", "multiple", "several", "entire", "whole app",
+})
+
+# Multi-file / multi-domain phrasing also implies real complexity.
+_COMPLEX_TASK_PATTERNS = (
+    re.compile(r"\b(and|then|also|plus)\b.*\b(and|then|also)\b"),  # 3+ chained asks
+    re.compile(r"\bnew\s+(feature|page|api|endpoint|service|model|table)\b"),
+)
+
+
+def task_complexity(prompt: str) -> str:
+    """Classify a build prompt as 'simple' or 'complex'.
+
+    Simple build tasks (a one-line tweak, a single-file fix) don't need the full
+    lead+tester+reviewers team across several rounds — that's the main token sink.
+    Complex tasks (architecture, auth, multi-domain, multi-step) keep the team.
+    Returns 'complex' when any complexity signal fires, else 'simple'.
+    """
+    text = re.sub(r"\s+", " ", (prompt or "").strip().lower())
+    if not text:
+        return "complex"  # empty/ambiguous: don't silently downgrade scope
+    words = re.findall(r"\b[\w'-]+\b", text)
+    # Long, detailed prompts tend to describe real multi-part work.
+    if len(words) >= 40:
+        return "complex"
+    if any(term in text for term in _COMPLEX_TASK_TERMS):
+        return "complex"
+    if any(pat.search(text) for pat in _COMPLEX_TASK_PATTERNS):
+        return "complex"
+    return "simple"
+
+
+def workflow_for_intent(intent: str, prompt: str = "") -> str:
     if intent == "build":
+        # Right-size: a simple build runs a single builder pass; complex work
+        # gets the full team. The prompt is optional so legacy callers that pass
+        # only the intent fall back to the team (safe default).
+        if prompt and task_complexity(prompt) == "simple":
+            return "build-only"
         return "auto-team"
     if intent == "review":
         return "review-only"
@@ -616,7 +677,7 @@ def workflow_for_agent(agent: str) -> str:
 def route_intent(prompt: str, project_path: Path) -> tuple[str, str]:
     """Return a legacy agent id for callers that still work in modes."""
     intent, reason = classify_orchestration_intent(prompt, project_path)
-    workflow_id = workflow_for_intent(intent)
+    workflow_id = workflow_for_intent(intent, prompt)
     workflow = ORCHESTRATION_WORKFLOWS[workflow_id]
     if workflow["kind"] == "single":
         return str(workflow["agent"]), reason
@@ -639,7 +700,7 @@ def chat_workflow_from_intent(intent: str, route_reason: str, prompt: str, plan_
         is_question = "?" in text
         if has_change_target and not is_question and len(text.split()) >= 3:
             return "pm-clarify", "ambiguous change request -> PM clarify"
-    return workflow_for_intent(intent), route_reason
+    return workflow_for_intent(intent, prompt), route_reason
 
 
 def orchestration_payload(plan: OrchestrationPlan, validation: PlanValidationResult) -> dict[str, Any]:

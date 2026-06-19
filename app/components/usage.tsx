@@ -676,7 +676,7 @@ function LogTab({ entries, commits }: { entries: ConsoleEntry[]; commits: string
   );
 }
 
-type WorkspaceRightTab = "artifacts" | "logs" | "quota" | "preview";
+type WorkspaceRightTab = "artifacts" | "logs" | "usage" | "preview";
 
 export function QuotaModal({
   usage,
@@ -774,6 +774,8 @@ export function WorkspaceRightPanel({
   entries,
   commits,
   usage,
+  quota,
+  providerSlots,
   appStatus,
   mobileView,
   onSendChat,
@@ -782,6 +784,7 @@ export function WorkspaceRightPanel({
   onApprovePlan,
   onDevServerAction,
   onOpenQuota,
+  onStatusRefresh,
   runnerHealth,
   initialTab,
   onClose,
@@ -791,6 +794,8 @@ export function WorkspaceRightPanel({
   entries: ConsoleEntry[];
   commits: string[];
   usage: UsageSnapshot;
+  quota: QuotaSnapshot;
+  providerSlots: ProviderSlots | null;
   appStatus: AppStatus;
   mobileView: MobileView;
   onSendChat: (projectName: string, options: { runner: RunnerId; model: string; reasoning: ReasoningLevel; prompt: string; attachmentPaths?: string[]; planMode?: boolean; routeMode?: RouteMode; teamMode?: TeamMode }) => Promise<void>;
@@ -799,6 +804,7 @@ export function WorkspaceRightPanel({
   onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
   onDevServerAction: (projectName: string, action: DevServerAction) => Promise<void>;
   onOpenQuota: () => void;
+  onStatusRefresh: (force?: boolean) => Promise<StatusRefreshState | void>;
   runnerHealth: RunnerHealth;
   initialTab?: WorkspaceRightTab;
   onClose?: () => void;
@@ -815,7 +821,7 @@ export function WorkspaceRightPanel({
   const tabs: { id: WorkspaceRightTab; label: string; badge?: string }[] = [
     { id: "artifacts", label: "Artifacts", badge: readyArtifacts ? String(readyArtifacts) : undefined },
     { id: "logs", label: "Logs", badge: entries.length ? String(entries.length) : undefined },
-    { id: "quota", label: "Quota", badge: activeRuns.length ? String(activeRuns.length) : undefined },
+    { id: "usage", label: "Usage", badge: activeRuns.length ? String(activeRuns.length) : undefined },
     { id: "preview", label: "Preview", badge: previewStatus !== "stopped" ? previewStatus : undefined },
   ];
 
@@ -828,7 +834,7 @@ export function WorkspaceRightPanel({
             type="button"
             role="tab"
             aria-selected={tab === item.id}
-            onClick={() => item.id === "quota" ? onOpenQuota() : setTab(item.id)}
+            onClick={() => setTab(item.id)}
             className={tab === item.id ? "is-active" : ""}
           >
             <span>{item.label}</span>
@@ -849,6 +855,26 @@ export function WorkspaceRightPanel({
           </div>
         )}
         {tab === "logs" && <LogTab entries={entries} commits={commits} />}
+        {tab === "usage" && (
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <UsageStatusTab
+              usage={usage}
+              quota={quota}
+              providerSlots={providerSlots}
+              onStatusRefresh={onStatusRefresh}
+            />
+            {/* Settings link for subscription users who need to configure token caps */}
+            <div className="shrink-0 border-t border-line-hard px-3 py-1.5 flex justify-end">
+              <button
+                type="button"
+                onClick={onOpenQuota}
+                className="text-[10px] text-text-faint outline-none hover:text-accent"
+              >
+                Quota settings…
+              </button>
+            </div>
+          </div>
+        )}
         {tab === "preview" && (
           <div className="dualith-right-stack">
             <ProjectPreviewPanel project={project} appStatus={appStatus} onDevServerAction={onDevServerAction} mobileActive={mobileView === "details"} />

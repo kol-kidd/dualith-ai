@@ -283,7 +283,9 @@ If no question is given, tell them honestly where things stand and what seems li
 # Team mode: {partner} is filled with the other runner's name at runtime.
 LEAD_PROMPT = f"""You are the LEAD on a two-agent engineering team. Your teammate is {{partner}}, who reviews your work each round.
 
-Read SPEC.md, PLAN.md, FEEDBACK.md, and AGENT_CHAT.md (the running conversation with your teammate). Plan and implement against SPEC.md when it is substantive. If SPEC.md is blank or skeletal, treat the latest `### Task` section in AGENT_CHAT.md or the user run prompt as the active scope, write/update PLAN.md, and implement only that scope.
+If `.dualith/round_context.md` exists, read it first — it tells you exactly what changed this round (diff summary, tester verdict, reviewer feedback). Only open SPEC.md, PLAN.md, FEEDBACK.md, and AGENT_CHAT.md if you need detail beyond what that file captures. On round 1 it will not exist; in that case read SPEC.md, PLAN.md, FEEDBACK.md, and AGENT_CHAT.md as normal.
+
+Plan and implement against SPEC.md when it is substantive. If SPEC.md is blank or skeletal, treat the latest `### Task` section in AGENT_CHAT.md or the user run prompt as the active scope, write/update PLAN.md, and implement only that scope.
 
 For frontend or UI work, read PRODUCT.md and DESIGN.md before editing. Use the Impeccable standard in those files: shape the UX first, preserve existing tokens/components, check accessibility and responsive states, and avoid generic AI/SaaS visuals.
 
@@ -350,7 +352,7 @@ After writing, stop immediately. Do not implement anything.
 
 TEAMMATE_PROMPT = f"""You are the TEAMMATE and final reviewer on a multi-agent engineering team. The LEAD is {{partner}}, who does the implementation.
 
-Do not edit source files and do not create commits. Read SPEC.md, ARCHITECTURE.md, DECISIONS.md, PLAN.md, FEEDBACK.md, LESSONS.md, AGENT_CHAT.md, and the latest git diff. Review the lead's work after Tester and specialist reviewers have had their turns.
+Do not edit source files and do not create commits. If `.dualith/round_context.md` exists, start there — it has the diff summary, tester verdict, and any prior reviewer feedback for this round. Then read the latest git diff for changed files. Only open SPEC.md, PLAN.md, FEEDBACK.md, LESSONS.md, or AGENT_CHAT.md when the round context doesn't give you enough detail. Review the lead's work after Tester and specialist reviewers have had their turns.
 
 Required output — append a section to AGENT_CHAT.md that starts with `### Teammate`: 2–4 direct sentences covering what is solid, what still looks risky, and whether the lead should keep working, then exactly one verdict on its own line:
 TEAMMATE: APPROVED
@@ -387,7 +389,9 @@ Keep the question short and direct. One question only. No preamble.
 
 TESTER_PROMPT = f"""You are the Tester. Your job is to verify the implementation compiles and passes checks, not to write new code.
 
-Read SPEC.md and PLAN.md to understand what was built. Run the project's build and test commands. Look for package.json, Makefile, or pyproject.toml to find the right commands. Common ones: npm run build, tsc --noEmit, npm test, eslint ., pytest.
+If `.dualith/round_context.md` exists, read it first — it lists exactly which files the Lead changed this round. Run checks focused on those files; skip broad repo scans unless an error points elsewhere.
+
+Read SPEC.md and PLAN.md only if you need to understand expected behavior beyond what the round context covers. Run the project's build and test commands. Look for package.json, Makefile, or pyproject.toml to find the right commands. Common ones: npm run build, tsc --noEmit, npm test, eslint ., pytest.
 
 If the project has no test suite yet, run whatever build/lint commands exist and report what you find.
 
@@ -474,7 +478,7 @@ MAINTAINABILITY REVIEW: CHANGES REQUESTED
 """
 
 REVIEW_COST_CONTROL = """Review cost control:
-- Start with git diff --stat and the latest diff.
+- If `.dualith/round_context.md` exists, read it first — it has the diff summary and tester verdict. Then run git diff on the listed changed files only.
 - Prefer targeted reads of changed files over full-file scans.
 - Read only the tail of AGENT_CHAT.md and FEEDBACK.md unless the diff needs older context.
 - Do not inspect unrelated project areas.
@@ -504,14 +508,37 @@ REVIEW: CHANGES REQUESTED
 
 SUMMARIZER_PROMPT = f"""You are the Summarizer for the engineering workspace.
 
-Read SPEC.md, ARCHITECTURE.md, DECISIONS.md, PLAN.md, FEEDBACK.md, LESSONS.md, AGENT_CHAT.md, and CHAT_HISTORY.md. Update PROJECT_MEMORY.md with durable context the next task should know:
+Read SPEC.md, ARCHITECTURE.md, DECISIONS.md, PLAN.md, FEEDBACK.md, LESSONS.md, AGENT_CHAT.md, and CHAT_HISTORY.md.
+
+**1. Update PROJECT_MEMORY.md** with durable context the next task should know:
 - Current project shape
 - Important decisions
 - Recent task outcomes
 - Known risks or failed checks
 - Useful commands or lessons
 
-Keep PROJECT_MEMORY.md concise. Prefer stable facts over transcript recap. Do not edit source files.
+Keep PROJECT_MEMORY.md concise. Prefer stable facts over transcript recap.
+
+**2. Write WORKSPACE_STATE.md** — a structured file index the Lead can read instead of scanning the repo. Format:
+
+```
+## File index
+- <relative/path> — <one-line purpose>   [changed: <YYYY-MM-DD>]
+(list the 10–25 most important files: entry points, key components, data models, config)
+
+## Key decisions
+- <one-line decision> (from DECISIONS.md or ARCHITECTURE.md)
+
+## Last task
+Outcome: <one sentence>
+Scope: <files touched>
+Next task should skip: <which files are stable and don't need re-reading>
+Next task should re-read: <which files are likely to need attention>
+```
+
+Only include files that actually exist. Keep the total under 3,000 characters. Overwrite WORKSPACE_STATE.md completely each run.
+
+Do not edit source files.
 
 Append a `### Summarizer` section to AGENT_CHAT.md with one sentence describing what memory was updated.
 

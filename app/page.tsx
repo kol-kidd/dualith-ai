@@ -717,6 +717,8 @@ function DualithApp() {
             entries={consoleEntries}
             commits={globalCommits}
             usage={usage}
+            quota={quota}
+            providerSlots={providerSlots}
             appStatus={appStatus}
             mobileView={mobileView}
             onSendChat={sendChat}
@@ -725,6 +727,7 @@ function DualithApp() {
             onApprovePlan={approvePlan}
             onDevServerAction={runDevServerAction}
             onOpenQuota={() => setQuotaModalOpen(true)}
+            onStatusRefresh={refreshStatus}
             runnerHealth={runnerHealth}
             initialTab="artifacts"
           />

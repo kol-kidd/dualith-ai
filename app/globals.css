@@ -3109,6 +3109,81 @@ select option:disabled {
 .team-live__line.is-progress { color: var(--dualith-text-soft); font-style: italic; }
 .team-live__line + .team-live__line { margin-top: 4px; }
 
+/* Chat tab: live "working…" heartbeat. One calm pill, not a full output tail. */
+.dualith-working-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 2px;
+  padding: 5px 11px 5px 9px;
+  border: 1px solid var(--dualith-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--dualith-surface) 72%, var(--dualith-bg));
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--dualith-text-soft);
+  width: fit-content;
+}
+
+.dualith-working-pill__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--dualith-cyan);
+  flex-shrink: 0;
+  animation: dualith-live-pulse 1.6s ease-out infinite;
+}
+
+.dualith-working-pill__text { color: var(--dualith-text); }
+
+.dualith-working-pill__time {
+  color: var(--dualith-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dualith-working-pill__dot { animation: none; opacity: 0.8; }
+}
+
+/* Chat tab: quiet collapsed marker for non-conversational transcript entries
+   (git ops, scaffold, unknown headers). Visually distinct from agent bubbles. */
+.dualith-system-note {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 4px 0;
+  padding: 3px 0 3px 10px;
+  border-left: 2px solid var(--dualith-line);
+  font-family: var(--dualith-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--dualith-text-faint);
+}
+
+.dualith-system-note__label { text-transform: uppercase; }
+.dualith-system-note__time { color: var(--dualith-text-faint); opacity: 0.8; }
+
+.dualith-system-note--expandable { display: block; }
+.dualith-system-note__summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+.dualith-system-note__summary::-webkit-details-marker { display: none; }
+.dualith-system-note--expandable[open] { padding-bottom: 8px; }
+.dualith-system-note__body {
+  margin-top: 6px;
+  padding-left: 2px;
+  font-family: var(--dualith-font-sans, inherit);
+  font-size: 12.5px;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--dualith-text-soft);
+}
+
 /* Translated run failure — replaces raw error blobs in the team room */
 .team-failure .agent-mascot {
   --agent-mascot-accent: var(--dualith-red);
