@@ -562,6 +562,11 @@ def _record_cache_usage(usage_record: dict[str, Any], u: dict[str, Any]) -> None
         usage_record["cache_creation_input_tokens"] = u.get("cache_creation_input_tokens")
 
 
+# Cap on agentic tool-use iterations per run; prevents a model that keeps calling
+# tools from looping forever. On hit, we finish with whatever text it has produced.
+MAX_TOOL_ITERATIONS = 25
+
+
 async def run_agent_via_api(
     *,
     project_name: str,
@@ -570,17 +575,24 @@ async def run_agent_via_api(
     model: str,
     run_prompt: str,
     system_prompt: str = "",
+    sandbox: str = "workspace-write",
+    project_path: Path | None = None,
     usage_record: dict[str, Any],
     publish_output_fn: Any,  # event_bus.publish_output
     publish_status_fn: Any,  # publish_agent_status
     finish_usage_fn: Any,    # finish_usage_record
     result_file_path: Path,
 ) -> dict[str, Any]:
-    """Call a provider's /chat/completions API and stream output as agent events.
+    """Call a provider's API in an agentic tool-use loop and stream output as events.
 
-    Returns a result dict with the same shape as run_agent_process() so callers
-    are transparent to the mode.
+    Unlike a single text completion, this runs a request -> tool_use -> tool_result
+    loop so the agent can actually read/edit files and run commands (via agent_tools),
+    sandboxed by a path-jail. The toolset offered is filtered by `sandbox` mode.
+
+    Returns a result dict with the same shape as run_agent_process() so callers are
+    transparent to the mode.
     """
+    from . import agent_tools
     from .runners import RUNNER_COMMANDS
     config = RUNNER_COMMANDS[runner]
     api_base: str = config.get("api_base") or ""
@@ -589,6 +601,10 @@ async def run_agent_via_api(
     extra_headers: dict = config.get("api_extra_headers") or {}
     provider: str = config.get("provider") or ""
     run_id = str(usage_record["id"])
+
+    # Tools run against the workspace. Without a project_path we can't sandbox file
+    # tools, so fall back to a text-only run (no tools) rather than risk an unscoped FS.
+    jail = project_path if isinstance(project_path, Path) else None
 
     # Native Anthropic Messages API supports explicit prompt caching via cache_control;
     # mark the stable system prefix ephemeral so repeated calls only pay for the suffix.
@@ -607,14 +623,18 @@ async def run_agent_via_api(
             if system_prompt.strip()
             else []
         )
-        payload: dict[str, Any] = {
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": run_prompt or system_prompt}
+        ]
+        base_payload: dict[str, Any] = {
             "model": api_model,
             "max_tokens": 8192,
-            "messages": [{"role": "user", "content": run_prompt or system_prompt}],
             "stream": True,
         }
         if system_blocks:
-            payload["system"] = system_blocks
+            base_payload["system"] = system_blocks
+        if jail is not None:
+            base_payload["tools"] = agent_tools.anthropic_tools(sandbox)
     else:
         endpoint = f"{api_base}/chat/completions"
         headers = {
@@ -625,75 +645,80 @@ async def run_agent_via_api(
         }
         # OpenAI-compatible providers (OpenAI, OpenRouter, Gemini-compat) auto-cache a
         # long, stable leading prefix; isolating it in a system message maximizes hits.
-        messages: list[dict[str, str]] = []
+        messages = []
         if system_prompt.strip():
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": run_prompt or system_prompt})
-        payload = {
+        base_payload = {
             "model": api_model,
-            "messages": messages,
             "stream": True,
         }
+        if jail is not None:
+            base_payload["tools"] = agent_tools.openai_tools(sandbox)
+            base_payload["tool_choice"] = "auto"
 
     collected: list[str] = []
-    status = "error"
     error = ""
 
     try:
         publish_status_fn(project_name, agent, runner, api_model, run_id, "running")
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=5.0)) as client:
-            async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
-                if resp.status_code not in (200, 201):
-                    # Read the streamed body so _http_error_message can surface the
-                    # provider's own detail; the actionable text (e.g. "rate limit"
-                    # on a 429) also lets main.py's fallback detector trigger.
-                    try:
-                        await resp.aread()
-                    except Exception:
-                        pass
-                    error = _http_error_message(resp.status_code, resp)
-                    finish_usage_fn(usage_record, "error", resp.status_code)
+            for _ in range(MAX_TOOL_ITERATIONS):
+                payload = {**base_payload, "messages": messages}
+                turn = await _stream_turn(
+                    client, endpoint, headers, payload, is_anthropic_native,
+                    project_name, run_id, agent, usage_record, publish_output_fn,
+                )
+                if turn.get("error"):
+                    error = turn["error"]
+                    finish_usage_fn(usage_record, "error", turn.get("status_code"))
                     return _api_error_record(usage_record, error)
 
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data = line[6:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    if is_anthropic_native:
-                        # Anthropic SSE: text arrives as content_block_delta.delta.text;
-                        # usage (incl. cache hits) rides message_start / message_delta.
-                        ctype = chunk.get("type")
-                        if ctype == "content_block_delta":
-                            delta_content = (chunk.get("delta") or {}).get("text") or ""
-                        else:
-                            delta_content = ""
-                            u = (chunk.get("message") or {}).get("usage") or chunk.get("usage") or {}
-                            if u:
-                                _record_cache_usage(usage_record, u)
-                    else:
-                        delta_content = (
-                            chunk.get("choices", [{}])[0]
-                            .get("delta", {})
-                            .get("content") or ""
+                text = turn["text"]
+                if text:
+                    collected.append(text)
+                tool_calls: list[dict[str, Any]] = turn["tool_calls"]
+                if not tool_calls:
+                    break  # end_turn / stop — model is done
+
+                # Run each requested tool (path-jailed) and feed results back.
+                if is_anthropic_native:
+                    messages.append({"role": "assistant", "content": turn["assistant_content"]})
+                    tool_results = []
+                    for call in tool_calls:
+                        name, args, tid = call["name"], call["input"], call["id"]
+                        publish_output_fn(
+                            project_name, run_id, agent, "output",
+                            f"\n→ {name}({_arg_hint(args)})\n",
                         )
-                        if chunk.get("usage"):
-                            _record_cache_usage(usage_record, chunk["usage"])
-                    if delta_content:
-                        collected.append(delta_content)
-                        publish_output_fn(project_name, run_id, agent, "output", delta_content)
+                        result, is_err = agent_tools.run_tool(name, args, jail)  # type: ignore[arg-type]
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tid,
+                            "content": result,
+                            "is_error": is_err,
+                        })
+                    messages.append({"role": "user", "content": tool_results})
+                else:
+                    messages.append(turn["assistant_message"])
+                    for call in tool_calls:
+                        name, args, tid = call["name"], call["input"], call["id"]
+                        publish_output_fn(
+                            project_name, run_id, agent, "output",
+                            f"\n→ {name}({_arg_hint(args)})\n",
+                        )
+                        result, _ = agent_tools.run_tool(name, args, jail)  # type: ignore[arg-type]
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tid,
+                            "content": result,
+                        })
 
         full_output = "".join(collected)
         result_file_path.parent.mkdir(parents=True, exist_ok=True)
         result_file_path.write_text(full_output, encoding="utf-8")
         usage_record["output_chars"] = len(full_output)
         usage_record["output_lines"] = full_output.count("\n")
-        status = "ok"
         finish_usage_fn(usage_record, "ok", 0)
         publish_status_fn(project_name, agent, runner, api_model, run_id, "done")
         return {
@@ -720,6 +745,146 @@ async def run_agent_via_api(
     finish_usage_fn(usage_record, "error", None)
     publish_status_fn(project_name, agent, runner, api_model, run_id, "error", error)
     return _api_error_record(usage_record, error)
+
+
+def _arg_hint(args: dict[str, Any]) -> str:
+    """Short, single-line hint of a tool call's primary arg for the live timeline."""
+    for key in ("path", "command"):
+        val = args.get(key)
+        if val:
+            s = str(val).splitlines()[0]
+            return s if len(s) <= 80 else s[:77] + "…"
+    return ""
+
+
+async def _stream_turn(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    is_anthropic_native: bool,
+    project_name: str,
+    run_id: str,
+    agent: str,
+    usage_record: dict[str, Any],
+    publish_output_fn: Any,
+) -> dict[str, Any]:
+    """Stream one model turn. Returns text, any tool calls, and the assistant turn
+    to append. On HTTP error returns {"error": ..., "status_code": ...}.
+
+    tool_calls is a list of {"name", "input", "id"}. For Anthropic, assistant_content
+    is the raw content blocks (text + tool_use) to append; for OpenAI, assistant_message
+    is the assistant message dict (content + tool_calls)."""
+    text_parts: list[str] = []
+    # Anthropic: accumulate tool_use blocks keyed by content-block index.
+    anth_blocks: dict[int, dict[str, Any]] = {}
+    # OpenAI: accumulate tool_calls keyed by their streamed index.
+    oai_calls: dict[int, dict[str, Any]] = {}
+
+    async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
+        if resp.status_code not in (200, 201):
+            try:
+                await resp.aread()
+            except Exception:
+                pass
+            return {
+                "error": _http_error_message(resp.status_code, resp),
+                "status_code": resp.status_code,
+            }
+
+        async for line in resp.aiter_lines():
+            if not line.startswith("data: "):
+                continue
+            data = line[6:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
+            if is_anthropic_native:
+                ctype = chunk.get("type")
+                if ctype == "content_block_start":
+                    block = chunk.get("content_block") or {}
+                    if block.get("type") == "tool_use":
+                        anth_blocks[chunk.get("index", 0)] = {
+                            "id": block.get("id", ""),
+                            "name": block.get("name", ""),
+                            "json": "",
+                        }
+                elif ctype == "content_block_delta":
+                    delta = chunk.get("delta") or {}
+                    if delta.get("type") == "input_json_delta":
+                        idx = chunk.get("index", 0)
+                        if idx in anth_blocks:
+                            anth_blocks[idx]["json"] += delta.get("partial_json") or ""
+                    else:
+                        piece = delta.get("text") or ""
+                        if piece:
+                            text_parts.append(piece)
+                            publish_output_fn(project_name, run_id, agent, "output", piece)
+                else:
+                    u = (chunk.get("message") or {}).get("usage") or chunk.get("usage") or {}
+                    if u:
+                        _record_cache_usage(usage_record, u)
+            else:
+                choice = (chunk.get("choices") or [{}])[0]
+                delta = choice.get("delta") or {}
+                piece = delta.get("content") or ""
+                if piece:
+                    text_parts.append(piece)
+                    publish_output_fn(project_name, run_id, agent, "output", piece)
+                for tc in delta.get("tool_calls") or []:
+                    idx = tc.get("index", 0)
+                    slot = oai_calls.setdefault(idx, {"id": "", "name": "", "args": ""})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["args"] += fn["arguments"]
+                if chunk.get("usage"):
+                    _record_cache_usage(usage_record, chunk["usage"])
+
+    text = "".join(text_parts)
+
+    if is_anthropic_native:
+        tool_calls = []
+        assistant_content: list[dict[str, Any]] = []
+        if text:
+            assistant_content.append({"type": "text", "text": text})
+        for _, blk in sorted(anth_blocks.items()):
+            args = _safe_json(blk["json"])
+            assistant_content.append({
+                "type": "tool_use", "id": blk["id"], "name": blk["name"], "input": args,
+            })
+            tool_calls.append({"name": blk["name"], "input": args, "id": blk["id"]})
+        return {"text": text, "tool_calls": tool_calls, "assistant_content": assistant_content}
+
+    tool_calls = []
+    msg_tool_calls = []
+    for _, slot in sorted(oai_calls.items()):
+        args = _safe_json(slot["args"])
+        tool_calls.append({"name": slot["name"], "input": args, "id": slot["id"]})
+        msg_tool_calls.append({
+            "id": slot["id"],
+            "type": "function",
+            "function": {"name": slot["name"], "arguments": slot["args"] or "{}"},
+        })
+    assistant_message: dict[str, Any] = {"role": "assistant", "content": text or None}
+    if msg_tool_calls:
+        assistant_message["tool_calls"] = msg_tool_calls
+    return {"text": text, "tool_calls": tool_calls, "assistant_message": assistant_message}
+
+
+def _safe_json(raw: str) -> dict[str, Any]:
+    try:
+        val = json.loads(raw) if raw.strip() else {}
+        return val if isinstance(val, dict) else {}
+    except json.JSONDecodeError:
+        return {}
 
 
 def _api_error_record(usage_record: dict[str, Any], error: str) -> dict[str, Any]:

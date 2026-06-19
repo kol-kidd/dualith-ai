@@ -701,7 +701,7 @@ export function ChatComposer({
     if (!images.length) return;
     setAttachments((prev) => [
       ...prev,
-      ...images.map((file) => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, name: file.name || "pasted-image.png", previewUrl: URL.createObjectURL(file), file })),
+      ...images.map((file) => ({ id: crypto.randomUUID(), name: file.name || "pasted-image.png", previewUrl: URL.createObjectURL(file), file })),
     ]);
   }, []);
 

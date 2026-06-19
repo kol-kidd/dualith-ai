@@ -6751,6 +6751,8 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             model=model or str(config.get("api_model") or ""),
             run_prompt=user_block,
             system_prompt=system_prefix,
+            sandbox=str(AGENT_REGISTRY.get(agent, {}).get("sandbox", "workspace-write")),
+            project_path=project_path,
             usage_record=usage_record,
             publish_output_fn=event_bus.publish_output,
             publish_status_fn=publish_agent_status,
