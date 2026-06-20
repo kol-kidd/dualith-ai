@@ -3,7 +3,7 @@
 // All hooks use React state/effects — this module must remain client-only.
 
 import { useState, useEffect, useRef, useMemo } from "react";
-import type { ChatMessage, TeamMessage } from "../app/_types";
+import type { ChatMessage, TeamMessage, UnifiedMessage } from "../app/_types";
 import {
   ThemeId,
   DensityId,
@@ -17,7 +17,7 @@ import {
   sortChatMessages,
 } from "./transcript";
 import { sanitizeRunnerOutput } from "./runner-output";
-import { parseAgentChat } from "./team-room";
+import { parseAgentChat, mergeUnifiedFeed } from "./team-room";
 
 function parseChatHistory(raw: string) {
   return _parseChatHistory(raw, sanitizeRunnerOutput);
@@ -31,6 +31,15 @@ export function useIncrementalChatHistory(raw: string): ChatMessage[] {
 export function useIncrementalAgentChat(raw: string): TeamMessage[] {
   const cache = useRef(makeTranscriptCache(parseAgentChat));
   return useMemo(() => cache.current(raw), [raw]);
+}
+
+export function useIncrementalUnifiedFeed(chatRaw: string, agentRaw: string): UnifiedMessage[] {
+  const chatCache = useRef(makeTranscriptCache(parseChatHistory));
+  const teamCache = useRef(makeTranscriptCache(parseAgentChat));
+  return useMemo(
+    () => mergeUnifiedFeed(sortChatMessages(chatCache.current(chatRaw)), teamCache.current(agentRaw)),
+    [chatRaw, agentRaw],
+  );
 }
 
 export function useRunHeartbeat(active: boolean) {

@@ -257,12 +257,10 @@ export function CommitPane({ commits }: { commits: string[] }) {
   );
 }
 
-export function MissionControl({ project, liveRuns = [], failures = [], activeTab = "chat", onTabChange, onClearChat }: {
+export function MissionControl({ project, liveRuns = [], failures = [], onClearChat }: {
   project: ProjectRecord;
   liveRuns?: LiveRun[];
   failures?: RunFailure[];
-  activeTab?: "chat" | "team";
-  onTabChange?: (tab: "chat" | "team") => void;
   onClearChat?: (projectName: string) => Promise<void>;
 }) {
   const task = selectedTask(project);

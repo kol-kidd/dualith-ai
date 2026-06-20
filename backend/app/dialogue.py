@@ -26,13 +26,18 @@ HANDOFF_PROMPT_TRAILER = """
 End your AGENT_CHAT.md section with one line:
 HANDOFF: @tester — <one sentence: what you did and what they should focus on>
 (target must be one of @lead @tester @reviewers @teammate @user @builder @auditor)
-If you genuinely need an answer from that agent before work continues, add one more line:
+If you genuinely need an answer before work can continue, add one more line:
 QUESTION: <your single direct question>
+If you disagree with the lead's approach and want them to reconsider without blocking the run, add instead:
+CHALLENGE: <your single direct pushback point>
 """
 
 _HANDOFF_BLOCK = re.compile(r"```handoff\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _HANDOFF_LINE = re.compile(r"^HANDOFF:\s*@(\w+)\s*[-—–:]\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 _QUESTION_LINE = re.compile(r"^QUESTION:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+# CHALLENGE: lets a reviewer push back on Lead without blocking the whole run.
+# Like QUESTION: but signals disagreement rather than a request for information.
+_CHALLENGE_LINE = re.compile(r"^CHALLENGE:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 
 
 @dataclass
@@ -41,6 +46,7 @@ class Handoff:
     note: str
     question: str
     synthesized: bool  # True when the agent didn't write a parseable block
+    challenge: str = ""  # CHALLENGE: line — reviewer pushes back without blocking the run
 
 
 def _first_sentences(text: str, limit: int = 240) -> str:
@@ -95,11 +101,13 @@ def parse_handoff(section_body: str, role: str) -> Handoff:
     if line_match:
         target = line_match.group(1).strip().lower()
         question_match = _QUESTION_LINE.search(section_body, line_match.end())
+        challenge_match = _CHALLENGE_LINE.search(section_body, line_match.end())
         return Handoff(
             to=target if target in VALID_TARGETS else default_target(role),
             note=line_match.group(2).strip(),
             question=question_match.group(1).strip() if question_match else "",
             synthesized=False,
+            challenge=challenge_match.group(1).strip() if challenge_match else "",
         )
 
     summary = _first_sentences(section_body) or "Finished this step."
@@ -111,12 +119,23 @@ def strip_handoff_block(section_body: str) -> str:
     return _HANDOFF_BLOCK.sub("", section_body).rstrip()
 
 
-def bounce_prompt(asker_role: str, asker_label: str, target_label: str, question: str) -> str:
+def bounce_prompt(asker_role: str, asker_label: str, target_label: str, question: str, is_challenge: bool = False) -> str:
+    if is_challenge:
+        return (
+            f"{asker_label} pushed back on your work:\n\n"
+            f"  \"{question.strip()}\"\n\n"
+            f"Reply briefly in a new AGENT_CHAT.md section titled "
+            f"'### {target_label} (reply to {asker_label}) - <UTC timestamp>'. "
+            f"Open the section with `re: {asker_label} · <short reference>` then say in one sentence "
+            f"whether you agree, pushed back, or deferred — and why. Do not start new implementation work. "
+            f"End the section with one line: HANDOFF: @{asker_role} — <your response in brief>."
+        )
     return (
         f"{asker_label} asked you a direct question during review:\n\n"
         f"  \"{question.strip()}\"\n\n"
         f"Answer briefly in a new AGENT_CHAT.md section titled "
         f"'### {target_label} (reply to {asker_label}) - <UTC timestamp>'. "
-        f"Answer only the question — do not start new implementation work. "
+        f"Open the section with `re: {asker_label} · <short reference>` then answer only the question "
+        f"— do not start new implementation work. "
         f"End the section with one line: HANDOFF: @{asker_role} — <your answer in brief>."
     )

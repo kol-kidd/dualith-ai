@@ -474,8 +474,9 @@ export type ChatMessage = {
   title: string;
   timestamp: string;
   body: string;
+  question?: string; // extracted QUESTION: line from a Dualith Answer, rendered distinctly
   attachments: string[]; // filenames extracted from _Attached: ..._ suffix
-  kind: "ask" | "kickoff" | "answer" | "plan" | "circuit-breaker" | "system";
+  kind: "ask" | "kickoff" | "answer" | "question" | "plan" | "circuit-breaker" | "system";
 };
 
 export type TeamMessageRole =
@@ -501,7 +502,12 @@ export type TeamMessage = {
   title: string;
   timestamp: string;
   body: string;
+  replyTo?: { role: string; ref: string }; // parsed from leading `re: <role> · <ref>` line
 };
+
+export type UnifiedMessage =
+  | (ChatMessage & { source: "chat" })
+  | (TeamMessage & { source: "team" });
 
 export type TeamTurnSource = "chat" | "relay";
 export type TeamTurnTone = "active" | "ok" | "warn" | "error" | "muted";

@@ -15,6 +15,7 @@ import type {
   ProjectRecord,
   ConsoleEntry,
   AgentResult,
+  ChatMessage,
   TeamMessage,
   TeamMessageRole,
   TeamTurnTone,
@@ -22,6 +23,7 @@ import type {
   RenderedTeamTurn,
   TeamRosterAgent,
   TeamState,
+  UnifiedMessage,
 } from "../app/_types";
 import { modeLabels, runnerLabels, taskPhaseOrder, taskWorkflowPhases } from "../app/_constants";
 import { sanitizeRunnerOutput } from "./runner-output";
@@ -824,16 +826,29 @@ export function turnAcks(
   task: DualithTask
 ): TurnAck[] | undefined {
   const message = visible[index];
-  if (!reviewerVerdict(message).changesRequested) return undefined;
+  const { changesRequested } = reviewerVerdict(message);
   const later = visible.slice(index + 1);
   const acks: TurnAck[] = [];
-  if (later.some((m) => m.role === "lead")) acks.push({ kind: "ack", text: "acked by ", who: "Lead" });
-  const reResolved = later.some(
-    (m) => m.role === message.role && reviewerVerdict(m).approved
-  );
-  if (!reResolved && (task.status === "active" || task.status === "blocked")) {
-    acks.push({ kind: "wait", text: "waiting on re-review" });
+
+  if (changesRequested) {
+    if (later.some((m) => m.role === "lead")) acks.push({ kind: "ack", text: "acked by ", who: "Lead" });
+    const reResolved = later.some(
+      (m) => m.role === message.role && reviewerVerdict(m).approved
+    );
+    if (!reResolved && (task.status === "active" || task.status === "blocked")) {
+      acks.push({ kind: "wait", text: "waiting on re-review" });
+    }
   }
+
+  // Also surface when a Lead turn directly replied to this reviewer via `re:` line.
+  const reviewerRoleLabel = message.title || message.role;
+  const leadReply = later.find(
+    (m) => m.role === "lead" && m.replyTo && m.replyTo.role.toLowerCase().includes(reviewerRoleLabel.toLowerCase().split(" ")[0])
+  );
+  if (leadReply && !acks.some((a) => a.who === "Lead")) {
+    acks.push({ kind: "ack", text: "Lead responded to ", who: reviewerRoleLabel });
+  }
+
   return acks.length ? acks : undefined;
 }
 
@@ -986,6 +1001,18 @@ function stripHandoffBlock(body: string) {
   return body.replace(/```handoff\s*\n[\s\S]*?```/gi, "").trim();
 }
 
+// Extract and strip a leading `re: <role> · <ref>` line written by agents per HANDOFF_CONVENTION.
+// Returns the parsed reference and the body with that line removed, so the renderer can display
+// it as a quoted-reply header rather than inline prose.
+export function parseReplyRef(body: string): { replyTo: { role: string; ref: string } | undefined; cleanBody: string } {
+  const match = body.match(/^re:\s+([^·\n]+)\s+·\s+([^\n]+)\n?/i);
+  if (!match) return { replyTo: undefined, cleanBody: body };
+  return {
+    replyTo: { role: match[1].trim(), ref: match[2].trim() },
+    cleanBody: body.slice(match[0].length).trim(),
+  };
+}
+
 export function teamRoomBody(message: TeamMessage) {
   if (message.role === "tester") {
     return sanitizeRunnerOutput(
@@ -1064,12 +1091,12 @@ export function parseAgentChat(raw: string): TeamMessage[] {
   for (const section of sections) {
     const newline = section.indexOf("\n");
     const header = (newline === -1 ? section : section.slice(0, newline)).trim();
-    const body = sanitizeRunnerOutput(
-      (newline === -1 ? "" : section.slice(newline + 1)).trim()
-    );
+    const rawBody = (newline === -1 ? "" : section.slice(newline + 1)).trim();
+    const { replyTo, cleanBody } = parseReplyRef(rawBody);
+    const body = sanitizeRunnerOutput(cleanBody);
     const { timestamp } = splitAgentHeader(header);
     const role = agentRoleFromHeader(header);
-    messages.push({ ...role, timestamp, body });
+    messages.push({ ...role, timestamp, body, ...(replyTo ? { replyTo } : {}) });
   }
   return messages;
 }
@@ -1212,3 +1239,18 @@ export function missionNarration(
 // ── Activity timeline (needs activityTimeline from runs) ─────────────────────
 
 import { activityTimeline } from "./runs";
+
+// ── Unified feed ──────────────────────────────────────────────────────────────
+
+import { timestampValue } from "./transcript";
+
+export function mergeUnifiedFeed(
+  chatMessages: ChatMessage[],
+  teamMessages: TeamMessage[],
+): UnifiedMessage[] {
+  const chat: UnifiedMessage[] = chatMessages.map((m) => ({ ...m, source: "chat" as const }));
+  const team: UnifiedMessage[] = teamMessages.map((m) => ({ ...m, source: "team" as const }));
+  return [...chat, ...team].sort(
+    (a, b) => timestampValue(a.timestamp) - timestampValue(b.timestamp),
+  );
+}

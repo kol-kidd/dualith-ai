@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from . import brain as brain_module
 from .dialogue import HANDOFF_PROMPT_TRAILER, Handoff, bounce_prompt, parse_handoff
 from .events import event_bus, narration_for
 from .failures import translate as translate_failure
@@ -3954,8 +3955,9 @@ def project_runtime_prompt_block(project_path: Path) -> str:
     )
 
 
-def agent_process_env(project_name: str, project_path: Path) -> dict[str, str]:
-    env = os.environ.copy()
+def agent_process_env(project_name: str, project_path: Path, runner: str = "claude") -> dict[str, str]:
+    from .providers import subscription_cli_env
+    env = subscription_cli_env(runner)
     state = dev_server_snapshot(project_name, project_path)
     port = state.get("port")
     env["DUALITH_RESERVED_PORTS"] = ",".join(str(value) for value in sorted(dualith_reserved_ports()))
@@ -5760,17 +5762,29 @@ def agent_prompt(agent: str, run_prompt: str = "", project_path: Path | None = N
     if project_path is not None:
         prompt = f"{project_runtime_prompt_block(project_path)}{prompt}"
         if _needs_memory and not is_review_agent:
-            doc_block = project_memory_prompt_block(project_path)
-            if doc_block:
-                prompt = f"{doc_block}{prompt}"
-                _attached_memory = True
-            # Structured workspace file-index from prior tasks (Summarizer-written).
-            # Only for roles that plan/implement — reviewers and tester work off the diff.
-            if agent in {"lead", "builder", "architect", "planner"}:
-                ws_block = workspace_state_prompt_block(project_path)
-                if ws_block:
-                    prompt = f"{ws_block}{prompt}"
+            # Retrieval-based brain takes precedence: the index (a cheap map) is always
+            # injected, plus only the notes relevant to this task — instead of blindly
+            # prepending the whole PROJECT_MEMORY/WORKSPACE_STATE blob. Falls back to the
+            # legacy blobs for projects that don't have a brain yet.
+            if brain_module.brain_exists(project_path):
+                brain_block = brain_module.brain_prompt_block(
+                    project_path, run_prompt, agent
+                )
+                if brain_block:
+                    prompt = f"{brain_block}{prompt}"
                     _attached_memory = True
+            else:
+                doc_block = project_memory_prompt_block(project_path)
+                if doc_block:
+                    prompt = f"{doc_block}{prompt}"
+                    _attached_memory = True
+                # Structured workspace file-index from prior tasks (Summarizer-written).
+                # Only for roles that plan/implement — reviewers and tester work off the diff.
+                if agent in {"lead", "builder", "architect", "planner"}:
+                    ws_block = workspace_state_prompt_block(project_path)
+                    if ws_block:
+                        prompt = f"{ws_block}{prompt}"
+                        _attached_memory = True
             if _needs_global_memory:
                 memory_block = memory_prompt_block(project_path)
                 if memory_block:
@@ -6761,8 +6775,10 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         )
         # Mirror the CLI path: write the answer to CHAT_HISTORY after the run.
         if agent == "ask" and result.get("status") == "ok" and result.get("content", "").strip():
-            append_chat_history(project_path, f"### Dualith Answer - {utc_now()}\n\n{result['content'].strip()}\n\n")
+            ask_content = result["content"].strip()
+            append_chat_history(project_path, f"### Dualith Answer - {utc_now()}\n\n{ask_content}\n\n")
             await broadcast("chat_event", record_event("CHAT_ANSWER", f"{relative_path(project_path)} :: ask answer"))
+            await handle_ask_handoff(ask_content, project_name, project_path, runner, model, reasoning, run_prompt)
         return result
 
     key = agent_run_key(project_name, agent)
@@ -6834,7 +6850,7 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
             errors="replace",
             bufsize=1,
             shell=False,
-            env=agent_process_env(project_name, project_path),
+            env=agent_process_env(project_name, project_path, runner),
         )
         active_agent_runs[key] = {
             "process": process,
@@ -6900,6 +6916,7 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         if agent == "ask" and status == "ok" and content.strip():
             append_chat_history(project_path, f"### Dualith Answer - {utc_now()}\n\n{content.strip()}\n\n")
             await broadcast("chat_event", record_event("CHAT_ANSWER", f"{relative_path(project_path)} :: ask answer"))
+            await handle_ask_handoff(content, project_name, project_path, runner, model, reasoning, run_prompt)
         if status == "stopped":
             action = "CODEX_STOPPED" if runner == "codex" else "CLAUDE_STOPPED"
             exit_message = error if idle_timeout else "stopped before a final answer"
@@ -6947,6 +6964,48 @@ async def run_agent_process(project_name: str, agent: str, runner: str, model: s
         event_bus.end_run(run_id)
         active_agent_runs.pop(key, None)
         await broadcast("agent_event")
+
+
+_HANDOFF_TO_LEAD_RE = re.compile(
+    r"^HANDOFF:\s*@lead\s*[-—–:]\s*(.+)$", re.IGNORECASE | re.MULTILINE
+)
+
+
+async def handle_ask_handoff(
+    content: str,
+    project_name: str,
+    project_path: Path,
+    runner: str,
+    model: str,
+    reasoning: str,
+    original_prompt: str,
+) -> bool:
+    """If the Ask agent's reply contains HANDOFF: @lead, write a Dualith section to
+    AGENT_CHAT.md and fire off an auto-team run with the original user prompt.
+    Returns True if a handoff was triggered."""
+    match = _HANDOFF_TO_LEAD_RE.search(content)
+    if not match:
+        return False
+    handoff_note = match.group(1).strip()
+    ts = utc_now()
+    append_agent_chat(
+        project_path,
+        f"### Dualith - {ts}\n\n{handoff_note}\n\nHANDOFF: @lead — {handoff_note}\n\n",
+    )
+    await broadcast("chat_event", record_event("ASK_HANDOFF", f"{relative_path(project_path)} :: handoff to lead"))
+    # Fire team run in background so Ask response is already written to chat first.
+    asyncio.create_task(
+        start_orchestration(
+            project_name,
+            project_path,
+            "auto-team",
+            runner,
+            model,
+            reasoning,
+            original_prompt,
+        )
+    )
+    return True
 
 
 async def run_agent_process_with_auto_fallback(
@@ -7373,21 +7432,25 @@ async def maybe_bounce_question(
     round_no: int,
 ) -> None:
     """One bounded Lead reply when a tester/reviewer handoff carries a direct
-    question addressed to @lead. The asker is not re-run (cost control); the
-    reply lands in AGENT_CHAT.md where the consolidating reviewer sees it."""
-    if not handoff.question or handoff.to != "lead":
+    question or challenge addressed to @lead. The asker is not re-run (cost
+    control); the reply lands in AGENT_CHAT.md where the consolidating reviewer
+    sees it. CHALLENGE: triggers the same cap as QUESTION: so lean runs stay
+    cheap — both count toward MAX_BOUNCES_PER_ROUND."""
+    point = handoff.question or handoff.challenge
+    if not point or handoff.to != "lead":
         return
     state = active_teams.get(project_name)
     if state is None:
         return
     bounces: dict[str, int] = state.setdefault("bounces", {}).setdefault(f"round_{round_no}", {})
     if bounces.get(asker_role, 0) >= 1 or sum(bounces.values()) >= MAX_BOUNCES_PER_ROUND:
-        record_event("BOUNCE_CAPPED", f"{relative_path(project_path)} :: {asker_role} question skipped (cap reached)")
+        record_event("BOUNCE_CAPPED", f"{relative_path(project_path)} :: {asker_role} question/challenge skipped (cap reached)")
         return
     bounces[asker_role] = bounces.get(asker_role, 0) + 1
 
     asker_label = str(RUN_MODES.get(asker_role, {}).get("label", asker_role.replace("_", " ").title()))
-    prompt = bounce_prompt(asker_role, asker_label, "Lead", handoff.question)
+    is_challenge = bool(handoff.challenge and not handoff.question)
+    prompt = bounce_prompt(asker_role, asker_label, "Lead", point, is_challenge=is_challenge)
     await set_team_state(project_name, project_path, "team_event", status="running", step="lead-reply", round=round_no)
     chat_start = agent_chat_size(project_path)
     result = await run_team_step(
@@ -8904,6 +8967,26 @@ async def stream_runner_prompt_sse(
     timeout_seconds: int = SPEC_REFINE_TIMEOUT_SECONDS,
     timeout_label: str = "Planning run",
 ) -> AsyncGenerator[str, None]:
+    # API-key mode: use HTTP provider instead of CLI subprocess
+    if RUNNER_COMMANDS[runner].get("use_http"):
+        from .providers import stream_prompt_via_http
+        try:
+            async for kind, value in stream_prompt_via_http(runner, prompt):
+                if kind == "chunk":
+                    chunks.append(value)
+                    yield f"data: {json.dumps({'chunk': value})}\n\n"
+                elif kind == "error":
+                    state["error"] = value
+                    yield f"data: {json.dumps({'error': value})}\n\n"
+                    return
+                elif kind == "done":
+                    yield 'data: {"done": true}\n\n'
+                    state["done"] = True
+        except Exception as exc:
+            state["error"] = str(exc)
+            yield f"data: {json.dumps({'error': state['error']})}\n\n"
+        return
+
     command, args, output_path = runner_prompt_process(runner, prompt, output_prefix)
 
     async def timeout_event() -> AsyncGenerator[str, None]:
@@ -8934,6 +9017,7 @@ async def stream_runner_prompt_sse(
         return
 
     try:
+        from .providers import subscription_cli_env
         process = await asyncio.to_thread(
             subprocess.Popen,
             [command, *args],
@@ -8945,6 +9029,7 @@ async def stream_runner_prompt_sse(
             errors="replace",
             bufsize=0,
             shell=False,
+            env=subscription_cli_env(runner),
         )
     except FileNotFoundError:
         state["error"] = f"{RUNNER_COMMANDS[runner]['label']} CLI not found - is it installed and on PATH?"
@@ -10066,10 +10151,9 @@ async def submit_human_input(name: str, request: HumanInputRequest) -> dict[str,
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     queue = event_bus.attach(websocket)
-    await websocket.send_json(await event_bus.snapshot_message())
     pump_task = asyncio.create_task(event_bus.pump(websocket, queue))
-
     try:
+        await websocket.send_json(await event_bus.snapshot_message())
         while True:
             raw = await websocket.receive_text()
             try:

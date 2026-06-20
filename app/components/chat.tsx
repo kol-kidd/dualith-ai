@@ -30,6 +30,7 @@ import type {
   ChatMessage,
   TeamMessageRole,
   TeamMessage,
+  UnifiedMessage,
   LiveRun,
   RunFailure,
   RenderedTeamTurn,
@@ -49,6 +50,7 @@ import {
   teamModeOptions,
 } from "../_constants";
 import {
+  slotLabel as resolveSlotLabel,
   timestampLabel,
   timestampValue,
   readErrorMessage,
@@ -109,6 +111,12 @@ function AgentChatBubble({ message, runner, live, lanes }: {
           {runner && <span className="agent-bubble__runner">{runner}</span>}
           {message.timestamp && <time className="agent-bubble__time">{timestampLabel(message.timestamp)}</time>}
         </div>
+        {message.replyTo && (
+          <div className="agent-bubble__reply-ref" aria-label={`Replying to ${message.replyTo.role}`}>
+            <span className="agent-bubble__reply-ref-tag">re: {message.replyTo.role}</span>
+            <span className="agent-bubble__reply-ref-ref">· {message.replyTo.ref}</span>
+          </div>
+        )}
         {body && (
           <div className="agent-bubble__body">
             <AgentProse body={body} />
@@ -259,6 +267,12 @@ export function ChatFeedMessage({
   return (
     <AgentBubble runner={latest?.runner} label={message.title} timestamp={message.timestamp}>
       <FormattedAgentOutput content={message.body} />
+      {message.kind === "question" && message.question && (
+        <div className="dualith-clarify-question" aria-label="Needs your input">
+          <span className="dualith-clarify-question__label">needs your input</span>
+          <span className="dualith-clarify-question__text">{message.question}</span>
+        </div>
+      )}
     </AgentBubble>
   );
 }
@@ -589,8 +603,84 @@ const AgentBubble = React.memo(function AgentBubble({ runner, label, timestamp, 
   );
 });
 
+// ── Unified room ──────────────────────────────────────────────────────────────
+
+// Git commit lines in AGENT_CHAT.md look like: "Committed abc1234 — message"
+const GIT_COMMIT_RE = /^committed\s+[0-9a-f]{5,}/i;
+
+function CommitChip({ message }: { message: TeamMessage }) {
+  const time = message.timestamp ? timestampLabel(message.timestamp) : "";
+  return (
+    <div className="dualith-system-note dualith-commit-chip">
+      <span className="dualith-system-note__label">⌗ {message.body.trim() || message.title}</span>
+      {time && <span className="dualith-system-note__time">{time}</span>}
+    </div>
+  );
+}
+
+export function UnifiedRoomThread({
+  messages,
+  project,
+  latest,
+  liveRuns,
+  onApprovePlan,
+  latestPlanIndex,
+}: {
+  messages: UnifiedMessage[];
+  project: ProjectRecord | null;
+  latest: AgentResult | null;
+  liveRuns: LiveRun[];
+  onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
+  latestPlanIndex: number;
+}) {
+  return (
+    <div className="dualith-unified-room">
+      {messages.map((msg, index) => {
+        if (msg.source === "chat") {
+          const chatMsg = msg as ChatMessage & { source: "chat" };
+          const isLatestPlan = chatMsg.role === "plan" && index === latestPlanIndex;
+          return (
+            <ChatFeedMessage
+              key={`chat-${chatMsg.timestamp}-${index}`}
+              message={chatMsg}
+              project={project}
+              latest={latest}
+              onApprovePlan={onApprovePlan}
+              isLatestPlan={isLatestPlan}
+            />
+          );
+        }
+        // source === "team"
+        const teamMsg = msg as TeamMessage & { source: "team" };
+        // Git commits → slim chip, not a full agent bubble
+        if (GIT_COMMIT_RE.test(teamMsg.title) || GIT_COMMIT_RE.test(teamMsg.body.slice(0, 80))) {
+          return <CommitChip key={`team-${teamMsg.timestamp}-${index}`} message={teamMsg} />;
+        }
+        // Skip empty system/task/note/plan entries that have no body
+        if (!teamMsg.body.trim() && ["task", "note", "plan"].includes(teamMsg.role)) {
+          return null;
+        }
+        const live = liveRuns.find((r) => r.agent === teamMsg.role) ?? null;
+        return (
+          <AgentChatBubble
+            key={`team-${teamMsg.role}-${teamMsg.timestamp}-${index}`}
+            message={teamMsg}
+            live={live ?? undefined}
+          />
+        );
+      })}
+      {/* Live pills for runs not yet in the feed */}
+      {liveRuns
+        .filter((run) => !messages.some((m) => m.source === "team" && (m as TeamMessage).role === run.agent))
+        .map((run) => (
+          <ChatWorkingPill key={run.runId} run={run} />
+        ))}
+    </div>
+  );
+}
+
 export function ChatComposer({
-  project, runSettings, onRunSettingsChange, onSendChat, onStopChat, runnerHealth, providerSlots, activeTab, onTabChange, onClearChat, fillPrompt,
+  project, runSettings, onRunSettingsChange, onSendChat, onStopChat, runnerHealth, providerSlots, onClearChat, fillPrompt,
 }: {
   project: ProjectRecord | null;
   runSettings: ChatRunSettings;
@@ -599,8 +689,6 @@ export function ChatComposer({
   onStopChat: (projectName: string) => Promise<void>;
   runnerHealth: RunnerHealth;
   providerSlots: ProviderSlots | null;
-  activeTab: "chat" | "team";
-  onTabChange: (tab: "chat" | "team") => void;
   onClearChat?: (projectName: string) => Promise<void>;
   fillPrompt?: string;
 }) {
@@ -627,7 +715,9 @@ export function ChatComposer({
         : runnerChoiceTitles.auto;
     }
     const slot = providerSlots?.[id];
-    return slot ? `${slot.label} only (${slot.mode === "api_key" ? "API key" : "subscription"}): every role uses ${slot.label}.` : runnerChoiceTitles[id];
+    // Bare slot label (provider config or neutral fallback) via shared helper.
+    const label = resolveSlotLabel(id, providerSlots);
+    return slot ? `${label} only (${slot.mode === "api_key" ? "API key" : "subscription"}): every role uses ${label}.` : runnerChoiceTitles[id];
   }, [providerSlots]);
 
   // Model dropdown for the active slot: prefer the model configured in setup,
@@ -665,7 +755,7 @@ export function ChatComposer({
   const activeRuns = project?.active_runs ?? [];
   const askRunning = activeRuns.some((run) => run.mode === "ask");
   const workRunning = Boolean(project?.pipeline) || Boolean(project?.team) || activeRuns.some((run) => run.mode !== "ask");
-  const isRunning = activeTab === "chat" ? askRunning : workRunning;
+  const isRunning = askRunning || workRunning;
 
   useEffect(() => {
     setErrorText(null);
@@ -876,7 +966,7 @@ export function ChatComposer({
             onChange={(event) => { setRunPrompt(event.target.value); setAgenticChoice(null); }}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
-            placeholder={project ? (activeTab === "team" ? "Brief the team..." : "Ask about this project...") : "Select a project first"}
+            placeholder={project ? "Ask or brief the team..." : "Select a project first"}
             rows={1}
             className="block max-h-44 min-h-[2.5rem] w-full resize-none bg-transparent px-2 py-2 leading-6 text-text outline-none placeholder:text-muted"
             spellCheck={false}
@@ -905,9 +995,7 @@ export function ChatComposer({
           )}
           {runPrompt.trim() && !agenticChoice && (
             <div className="dualith-composer-hint" aria-live="polite">
-              {activeTab === "chat"
-                ? "→ ask · 1 call"
-                : (() => {
+              {(() => {
                     const wf = likelyWorkflow(runPrompt, planMode);
                     if (wf === "ask") return "→ ask · 1 call";
                     if (wf === "git-direct") return "→ git · 1 call";
@@ -1002,7 +1090,7 @@ export function ChatComposer({
                   onClick={() => void send()}
                   className="h-8 rounded-full bg-accent/90 px-4 text-[12px] font-medium text-bg outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40"
                 >
-                  {pendingAction === "start" ? "..." : agenticChoice ? "Choose" : activeTab === "team" ? "Start team" : "Send chat"}
+                  {pendingAction === "start" ? "..." : agenticChoice ? "Choose" : "Send"}
                 </button>
               )}
             </div>

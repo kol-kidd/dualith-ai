@@ -13,7 +13,7 @@ import {
   modelChoices,
   reasoningChoices,
 } from "./_constants";
-import type { ChatRunSettings, ReasoningLevel, RunnerId } from "./_types";
+import type { ChatRunSettings, ReasoningLevel, RunnerId, RefineRunnerId, ProviderSlots } from "./_types";
 
 export {
   compactNumber,
@@ -125,6 +125,7 @@ export {
 export {
   useIncrementalChatHistory,
   useIncrementalAgentChat,
+  useIncrementalUnifiedFeed,
   useRunHeartbeat,
   useElapsedSeconds,
   useAppearance,
@@ -133,6 +134,22 @@ export {
 export { appendTranscriptChunk, makeTranscriptCache } from "../lib/transcript";
 
 // ── Functions that remain in this file (React JSX / no clear lib home) ───────
+
+// Neutral, provider-agnostic fallbacks for the two configurable runner slots.
+// Used when the user has not labelled a slot in provider-config.json — we never
+// surface the internal "codex"/"claude" ids in the UI.
+const runnerSlotFallback: Record<RefineRunnerId, string> = {
+  codex: "Runner A",
+  claude: "Runner B",
+};
+
+// Resolve the display label for a runner slot: prefer the user-configured
+// provider label, fall back to a neutral slot name. Mirrors the inline logic
+// the chat composer used for its run-mode picker (now shared, DRY).
+export function slotLabel(id: RunnerId, providerSlots: ProviderSlots | null): string {
+  if (id === "auto") return "Auto team";
+  return providerSlots?.[id]?.label || runnerSlotFallback[id] || runnerLabels[id];
+}
 
 export function renderMentions(text: string): React.ReactNode[] {
   const parts = text.split(/(@\w+)/g);

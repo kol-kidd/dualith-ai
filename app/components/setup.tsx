@@ -5,19 +5,16 @@
 import { useState, useEffect, useRef } from "react";
 import type { ReactNode, FormEvent, ChangeEvent } from "react";
 import type {
-  StackProfile,
   RefineRunnerId,
   IdeaRecord,
   RunnerHealth,
   SnapshotPayload,
-  SetupMode,
+  ProviderSlots,
   ImportFile,
 } from "../_types";
 import {
   apiBase,
   directoryInputProps,
-  runnerLabels,
-  stackProfileOptions,
   defaultSpec,
 } from "../_constants";
 import {
@@ -30,6 +27,7 @@ import {
   inferImportName,
   ideaStatusTone,
   ideaRunErrorText,
+  slotLabel,
 } from "../_helpers";
 import {
   Badge,
@@ -54,20 +52,12 @@ type SetupFormProps = {
   specLabel: string;
   specHeightClass: string;
   topSlot?: ReactNode;
-  onRefineSpec?: () => void;
-  refining?: boolean;
-  refineRunner?: RefineRunnerId;
-  onRefineRunnerChange?: (runner: RefineRunnerId) => void;
-  runnerHealth?: RunnerHealth;
 };
 
 function SetupForm({
   name, onNameChange, spec, onSpecChange, status, pending,
   onSubmit, submitLabel, pendingLabel, nameId, specId, specLabel, specHeightClass, topSlot,
-  onRefineSpec, refining, refineRunner, onRefineRunnerChange, runnerHealth,
 }: SetupFormProps) {
-  const refineRunners: RefineRunnerId[] = ["codex", "claude"];
-
   return (
     <form onSubmit={onSubmit} className="border-b border-line">
       {topSlot}
@@ -99,187 +89,19 @@ function SetupForm({
           spellCheck={false}
         />
       </div>
-      <div className={`grid items-center text-xs ${onRefineSpec ? "grid-cols-[1fr_auto_auto_auto]" : "grid-cols-[1fr_auto]"}`}>
+      <div className="grid grid-cols-[1fr_auto] items-center text-xs">
         <div role="status" aria-live="polite" className="truncate px-3 py-2 text-zinc-600">
           {status}
         </div>
-        {onRefineSpec && refineRunner && onRefineRunnerChange && (
-          <div className="flex h-9 border-l border-line">
-            {refineRunners.map((option) => {
-              const active = refineRunner === option;
-              const health = runnerHealth?.[option];
-              const title = health ? `${runnerLabels[option]} ${health.ready ? health.version || "ready" : health.error || "not ready"}` : runnerLabels[option];
-              return (
-                <button
-                  key={option}
-                  type="button"
-                  aria-pressed={active}
-                  title={title}
-                  disabled={refining || pending}
-                  onClick={() => onRefineRunnerChange(option)}
-                  className={`inline-flex h-9 items-center gap-1.5 border-r border-line px-3 outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-600 ${
-                    active ? "bg-zinc-900 text-zinc-100" : "text-zinc-500 hover:bg-zinc-950 hover:text-zinc-200"
-                  }`}
-                >
-                  <RunnerMascot runner={option} size={14} />
-                  <span>{runnerLabels[option]}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-        {onRefineSpec && (
-          <button
-            type="button"
-            disabled={refining || pending}
-            onClick={onRefineSpec}
-            className="h-9 border-l border-line px-4 text-warn outline-none transition-colors duration-150 hover:bg-zinc-900 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-600"
-          >
-            {refining ? "Refining…" : "Refine"}
-          </button>
-        )}
         <button
           type="submit"
-          disabled={pending || refining}
+          disabled={pending}
           className="h-9 border-l border-line px-4 text-accent outline-none transition-colors duration-150 hover:bg-zinc-900 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 disabled:text-zinc-600"
         >
           {pending ? pendingLabel : submitLabel}
         </button>
       </div>
     </form>
-  );
-}
-
-function ProjectCreateForm({ projectsRoot, onCreated, runnerHealth }: { projectsRoot: string; onCreated: (name: string) => Promise<void> | void; runnerHealth: RunnerHealth }) {
-  const [name, setName] = useState("");
-  const [spec, setSpec] = useState(defaultSpec);
-  const [status, setStatus] = useState("Ready");
-  const [pending, setPending] = useState(false);
-  const [refining, setRefining] = useState(false);
-  const [refineRunner, setRefineRunner] = useState<RefineRunnerId>("codex");
-  const [stackProfile, setStackProfile] = useState<StackProfile>("smart");
-  const abortRef = useRef<AbortController | null>(null);
-
-  const refineSpec = async () => {
-    const sourceGoal = spec.trim();
-    if (!sourceGoal) { setStatus("Type a rough idea first"); return; }
-
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    setRefining(true);
-    setStatus("Refining spec…");
-    setStatus(`Refining spec with ${runnerLabels[refineRunner]}...`);
-    setSpec("");
-
-    try {
-      const response = await fetch(`${apiBase}/api/refine-spec`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idea: sourceGoal, runner: refineRunner }),
-        signal: controller.signal,
-      });
-      if (!response.ok) throw new Error(await readErrorMessage(response));
-
-      const reader = response.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let hasContent = false;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const msg = JSON.parse(line.slice(6)) as { chunk?: string; error?: string; done?: boolean };
-            if (msg.error) { setSpec(sourceGoal); setStatus(`Error: ${msg.error}`); return; }
-            if (msg.chunk) { hasContent = true; setSpec((s) => s + msg.chunk); }
-            if (msg.done) setStatus("Refined — review and edit, then create");
-            if (msg.done) setStatus(`Refined with ${runnerLabels[refineRunner]} - review and edit, then create`);
-          } catch { /* non-JSON SSE comment, skip */ }
-        }
-      }
-
-      if (!hasContent) setStatus("Refine returned empty output — try a more detailed idea");
-      if (!hasContent) {
-        setSpec(sourceGoal);
-        setStatus("Refine returned empty output - try a more detailed goal");
-      }
-    } catch (err) {
-      if ((err as { name?: string }).name === "AbortError") {
-        setStatus("Refinement cancelled");
-      } else {
-        setSpec(sourceGoal);
-        setStatus("Refinement failed — check your connection and try again");
-      }
-    } finally {
-      setRefining(false);
-      abortRef.current = null;
-    }
-  };
-
-  const submitProject = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const projectName = name.trim();
-    if (!projectName) { setStatus("Add a project name"); return; }
-    if (safeProjectName(projectName) !== projectName) { setStatus("Use letters, numbers, dot, underscore, or hyphen"); return; }
-
-    setPending(true);
-    setStatus("Creating...");
-    try {
-      const response = await fetch(`${apiBase}/api/projects`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: projectName, spec, stack_profile: stackProfile }),
-      });
-      if (!response.ok) throw new Error(await readErrorMessage(response));
-      await onCreated(projectName);
-      setName(""); setSpec(defaultSpec); setStackProfile("smart"); setStatus("Created");
-    } catch (error) {
-      setStatus(`Error: ${error instanceof Error ? error.message : "unknown"}`);
-    } finally {
-      setPending(false);
-    }
-  };
-
-  const locationSlot = (
-    <>
-      <div className="grid grid-cols-[80px_1fr] border-b border-line-hard text-xs">
-        <span className="border-r border-line-hard px-3 py-2 text-zinc-500">Location</span>
-        <span className="truncate px-3 py-2 text-zinc-400">{displayProjectLocation(projectsRoot, name)}</span>
-      </div>
-      <label className="grid grid-cols-[80px_1fr] border-b border-line-hard text-xs">
-        <span className="border-r border-line-hard px-3 py-2 text-zinc-500">Stack</span>
-        <select
-          value={stackProfile}
-          onChange={(event) => setStackProfile(event.target.value as StackProfile)}
-          className="min-w-0 bg-transparent px-3 py-2 text-zinc-300 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
-        >
-          {stackProfileOptions.map((option) => (
-            <option key={option.id} value={option.id}>{option.label} - {option.detail}</option>
-          ))}
-        </select>
-      </label>
-    </>
-  );
-
-  return (
-    <SetupForm
-      name={name} onNameChange={setName} spec={spec} onSpecChange={setSpec}
-      status={status} pending={pending} onSubmit={submitProject}
-      submitLabel="Create project" pendingLabel="Creating..."
-      nameId="project-name" specId="project-spec"
-      specLabel="Project plan" specHeightClass="h-24"
-      topSlot={locationSlot}
-      onRefineSpec={refineSpec} refining={refining}
-      refineRunner={refineRunner} onRefineRunnerChange={setRefineRunner}
-      runnerHealth={runnerHealth}
-    />
   );
 }
 
@@ -370,87 +192,18 @@ function ProjectImportForm({ projectsRoot, onImported }: { projectsRoot: string;
   );
 }
 
-export function ProjectSetupModal({
-  open,
-  mode,
-  projectsRoot,
-  runnerHealth,
-  onModeChange,
-  onClose,
-  onCreated,
-  onImported,
-}: {
-  open: boolean;
-  mode: SetupMode;
-  projectsRoot: string;
-  runnerHealth: RunnerHealth;
-  onModeChange: (mode: SetupMode) => void;
-  onClose: () => void;
-  onCreated: (name: string) => Promise<void> | void;
-  onImported: (name: string) => Promise<void> | void;
-}) {
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 px-4 py-6">
-      <div className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden border border-line bg-bg shadow-2xl shadow-black/60">
-        <div className="flex h-11 shrink-0 items-center justify-between border-b border-line px-4">
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-widest text-zinc-200">Add project</div>
-            <div className="text-[10px] text-zinc-600">Create a workspace or import an existing folder.</div>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="h-8 px-3 text-xs text-zinc-500 outline-none hover:bg-zinc-900 hover:text-zinc-200 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
-          >
-            Close
-          </button>
-        </div>
-        <div className="grid grid-cols-2 border-b border-line-hard text-xs">
-          <button
-            type="button"
-            aria-pressed={mode === "new"}
-            onClick={() => onModeChange("new")}
-            className={`h-9 border-r border-line-hard px-4 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${
-              mode === "new" ? "bg-zinc-900 text-zinc-100" : "text-zinc-500 hover:bg-zinc-950"
-            }`}
-          >
-            New project
-          </button>
-          <button
-            type="button"
-            aria-pressed={mode === "import"}
-            onClick={() => onModeChange("import")}
-            className={`h-9 px-4 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${
-              mode === "import" ? "bg-zinc-900 text-zinc-100" : "text-zinc-500 hover:bg-zinc-950"
-            }`}
-          >
-            Import folder
-          </button>
-        </div>
-        <div className="min-h-0 overflow-auto">
-          {mode === "new" ? (
-            <ProjectCreateForm projectsRoot={projectsRoot} onCreated={onCreated} runnerHealth={runnerHealth} />
-          ) : (
-            <ProjectImportForm projectsRoot={projectsRoot} onImported={onImported} />
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 type IdeasDrawerProps = {
   ideas: IdeaRecord[];
   projectsRoot: string;
   runnerHealth: RunnerHealth;
+  providerSlots: ProviderSlots | null;
   onClose: () => void;
   onRefresh: (preferredName?: string) => Promise<void>;
   onSnapshot: (snapshot: SnapshotPayload, preferredName?: string) => void;
 };
 
-export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, onClose, onRefresh, onSnapshot }: IdeasDrawerProps) {
+export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, providerSlots, onClose, onRefresh, onSnapshot }: IdeasDrawerProps) {
+  const [view, setView] = useState<"plan" | "import">("plan");
   const [selectedId, setSelectedId] = useState<string | null>(ideas[0]?.id ?? null);
   const [seedIdea, setSeedIdea] = useState("");
   const [runner, setRunner] = useState<RefineRunnerId>("claude");
@@ -502,7 +255,7 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, onClose, onRefr
     setSelectedId(ideaId);
     setBusy("chat");
     setStreamingReply("");
-    setStatusText(`Planning with ${runnerLabels[runner]}...`);
+    setStatusText("Planning…");
     let output = "";
     let partialSaved = false;
     try {
@@ -516,6 +269,7 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, onClose, onRefr
         if (message.error) {
           if (message.partial) {
             partialSaved = true;
+            setStreamingReply("");
             setStatusText(message.error);
             return;
           }
@@ -531,6 +285,7 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, onClose, onRefr
       await onRefresh();
       if (partialSaved) setStatusText("Partial planning saved - send Continue to keep going");
     } catch (error) {
+      setStreamingReply("");
       setStatusText(`Error: ${ideaRunErrorText(error instanceof Error ? error.message : "unknown")}`);
     } finally {
       setBusy(null);
@@ -577,7 +332,7 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, onClose, onRefr
     setBusy("brief");
     setStreamingReply("");
     setBriefDraft("");
-    setStatusText(`Generating brief with ${runnerLabels[runner]}...`);
+    setStatusText("Generating brief…");
     let output = "";
     let partialSaved = false;
     try {
@@ -688,19 +443,20 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, onClose, onRefr
     <div className="dualith-ideas-runner" role="group" aria-label="Planning runner">
       {refineRunners.map((option) => {
         const health = runnerHealth[option];
+        const label = slotLabel(option, providerSlots);
         const active = runner === option;
         return (
           <button
             key={option}
             type="button"
             aria-pressed={active}
-            title={health ? `${runnerLabels[option]} ${health.ready ? health.version || "ready" : health.error || "not ready"}` : runnerLabels[option]}
+            title={health ? `${label} ${health.ready ? health.version || "ready" : health.error || "not ready"}` : label}
             disabled={busyStreaming}
             onClick={() => setRunner(option)}
             className={active ? "is-active" : ""}
           >
             <RunnerMascot runner={option} size={14} />
-            <span>{runnerLabels[option]}</span>
+            <span>{label}</span>
           </button>
         );
       })}
@@ -708,161 +464,230 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, onClose, onRefr
   );
 
   return (
-    <aside className="dualith-ideas-drawer" role="dialog" aria-modal="true" aria-label="Ideas">
-      <div className="dualith-ideas-head">
-        <div className="min-w-0">
-          <div className="dualith-ideas-title">Ideas</div>
-          <div className="dualith-ideas-subtitle">{ideas.length ? `${ideas.length} saved draft${ideas.length === 1 ? "" : "s"}` : "Projectless planning"}</div>
-        </div>
-        <button type="button" onClick={onClose} className="dualith-ideas-close">Close</button>
-      </div>
+    <div className="nw-backdrop" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }} aria-hidden="false">
+      <dialog className="nw-dialog" open aria-modal="true" aria-label="New workspace">
 
-      <div className="dualith-ideas-body">
-        <section className="dualith-ideas-rail" aria-label="Saved ideas">
-          <form onSubmit={startPlanning} className="dualith-ideas-start">
-            <textarea
-              value={seedIdea}
-              onChange={(event) => setSeedIdea(event.target.value)}
-              placeholder="Rough idea..."
-              aria-label="Rough idea"
-              spellCheck={false}
-            />
-            {runnerPicker}
-            <button type="submit" disabled={!seedIdea.trim() || busy !== null}>
-              {busy === "create" ? "Planning..." : busy !== null ? "Busy..." : "Start planning"}
-            </button>
-          </form>
-
-          <div className="dualith-ideas-list" role="list">
-            {ideas.length ? ideas.map((idea) => (
-              <button
-                key={idea.id}
-                type="button"
-                role="listitem"
-                aria-pressed={idea.id === selected?.id}
-                onClick={() => setSelectedId(idea.id)}
-                className={`dualith-ideas-item ${idea.id === selected?.id ? "is-active" : ""}`}
-              >
-                <span className="dualith-ideas-item__title">{idea.title || "Untitled idea"}</span>
-                <span className="dualith-ideas-item__meta">
-                  <Badge label={idea.status} tone={ideaStatusTone(idea.status)} />
-                  <em>{timestampLabel(idea.updated_at)}</em>
-                </span>
-              </button>
-            )) : (
-              <div className="dualith-ideas-empty-list">No drafts yet.</div>
+        {/* ── Header ─────────────────────────────────────────────── */}
+        <div className="nw-head">
+          <div className="nw-head__left">
+            <span className="nw-head__label">New workspace</span>
+            {ideas.length > 0 && (
+              <span className="nw-head__count">{ideas.length} draft{ideas.length === 1 ? "" : "s"}</span>
             )}
           </div>
-        </section>
+          <button type="button" onClick={onClose} className="nw-close" aria-label="Close">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+          </button>
+        </div>
 
-        <section className="dualith-ideas-main" aria-label="Idea workbench">
-          {selected ? (
-            <>
-              <div className="dualith-ideas-editor">
-                <div className="dualith-ideas-editor__title">
-                  <input value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} aria-label="Idea title" />
-                  <Badge label={selected.status} tone={ideaStatusTone(selected.status)} />
-                </div>
-                <textarea
-                  value={rawDraft}
-                  onChange={(event) => setRawDraft(event.target.value)}
-                  aria-label="Raw idea"
-                  spellCheck={false}
-                />
-                <div className="dualith-ideas-editor__actions">
-                  <span className={statusTone} role="status" aria-live="polite">{statusText}</span>
-                  <button type="button" onClick={saveIdea} disabled={Boolean(busy)}>
-                    {busy === "save" ? "Saving..." : "Save draft"}
+        {/* ── Body: sidebar + main ────────────────────────────────── */}
+        <div className="nw-body">
+
+          {/* Left sidebar: seed + draft list */}
+          <aside className="nw-sidebar" aria-label="Drafts">
+            <form onSubmit={startPlanning} className="nw-seed">
+              <div className="nw-seed__label">What do you want to build?</div>
+              <textarea
+                value={seedIdea}
+                onChange={(e) => setSeedIdea(e.target.value)}
+                placeholder="Describe a rough idea — anything goes…"
+                aria-label="Rough idea"
+                spellCheck={false}
+                className="nw-seed__textarea"
+                onFocus={() => setView("plan")}
+              />
+              {runnerPicker}
+              <button type="submit" disabled={!seedIdea.trim() || busy !== null} className="nw-btn nw-btn--primary">
+                {busy === "create" ? "Planning…" : busy !== null ? "Busy…" : "Start planning"}
+              </button>
+              <button
+                type="button"
+                className="nw-import-toggle"
+                aria-pressed={view === "import"}
+                onClick={() => setView((v) => (v === "import" ? "plan" : "import"))}
+              >
+                {view === "import" ? "← Back to planning" : "Import existing folder"}
+              </button>
+            </form>
+
+            {ideas.length > 0 && (
+              <div className="nw-drafts" role="list" aria-label="Saved drafts">
+                <div className="nw-drafts__label">Drafts</div>
+                {ideas.map((idea) => (
+                  <button
+                    key={idea.id}
+                    type="button"
+                    role="listitem"
+                    aria-pressed={idea.id === selected?.id}
+                    onClick={() => { setSelectedId(idea.id); setView("plan"); }}
+                    className={`nw-draft-item ${idea.id === selected?.id ? "is-active" : ""}`}
+                  >
+                    <span className="nw-draft-item__title">{idea.title || "Untitled idea"}</span>
+                    <span className="nw-draft-item__meta">
+                      <Badge label={idea.status} tone={ideaStatusTone(idea.status)} />
+                      <em>{timestampLabel(idea.updated_at)}</em>
+                    </span>
                   </button>
-                  <button type="button" onClick={deleteIdea} disabled={Boolean(busy)} className="is-danger">
-                    Delete
-                  </button>
-                </div>
+                ))}
               </div>
+            )}
+          </aside>
 
-              <div className="dualith-ideas-thread">
-                <SectionHeader title="Planning chat" meta={`${selected.messages.length} messages`} />
-                <div className="dualith-ideas-messages">
-                  {selected.messages.length ? selected.messages.map((message) => (
-                    <div key={message.id} className={`dualith-idea-message is-${message.role}`}>
-                      <div className="dualith-idea-message__meta">
-                        <span>{message.role === "assistant" ? (message.runner ? runnerLabels[message.runner] : "AI") : "You"}</span>
-                        <em>{timestampLabel(message.timestamp)}</em>
-                      </div>
-                      <div className="dualith-idea-message__body">
-                        {message.role === "assistant" ? <FormattedAgentOutput content={message.content} /> : message.content}
-                      </div>
-                    </div>
-                  )) : (
-                    <EmptyState message="Send the rough idea to begin narrowing." />
-                  )}
-                  {streamingReply && (
-                    <div className="dualith-idea-message is-assistant">
-                      <div className="dualith-idea-message__meta"><span>{runnerLabels[runner]}</span><em>streaming</em></div>
-                      <div className="dualith-idea-message__body"><FormattedAgentOutput content={streamingReply} /></div>
-                    </div>
-                  )}
-                </div>
-                <form onSubmit={sendPlanningMessage} className="dualith-ideas-composer">
-                  <textarea
-                    value={messageDraft}
-                    onChange={(event) => setMessageDraft(event.target.value)}
-                    placeholder="Answer, add constraints, or ask for alternatives..."
-                    aria-label="Planning message"
-                    spellCheck={false}
-                    disabled={busyStreaming}
+          {/* Right main: workbench */}
+          <main className="nw-main" aria-label="Idea workbench">
+            {view === "import" ? (
+              <div className="nw-import-wrap">
+                <ProjectImportForm projectsRoot={projectsRoot} onImported={async (name) => { await onRefresh(name); onClose(); }} />
+              </div>
+            ) : selected ? (
+              <div className="nw-workbench">
+
+                {/* ── Idea meta bar ── */}
+                <div className="nw-meta-bar">
+                  <input
+                    value={titleDraft}
+                    onChange={(e) => setTitleDraft(e.target.value)}
+                    aria-label="Idea title"
+                    className="nw-meta-bar__title"
+                    placeholder="Idea title"
                   />
-                  <button type="submit" disabled={!messageDraft.trim() || busyStreaming}>
-                    {busy === "chat" ? "Sending..." : "Send"}
-                  </button>
-                </form>
-              </div>
-
-              <div className="dualith-ideas-brief">
-                <div className="dualith-ideas-brief__head">
-                  <SectionHeader title="Brief">
-                    <button type="button" onClick={generateBrief} disabled={Boolean(busy)}>
-                      {busy === "brief" ? "Generating..." : "Generate brief"}
+                  <Badge label={selected.status} tone={ideaStatusTone(selected.status)} />
+                  <div className="nw-meta-bar__actions">
+                    <span className={`nw-status-text ${statusTone}`} role="status" aria-live="polite">{statusText}</span>
+                    <button type="button" onClick={saveIdea} disabled={Boolean(busy)} className="nw-btn">
+                      {busy === "save" ? "Saving…" : "Save draft"}
                     </button>
-                  </SectionHeader>
+                    <button type="button" onClick={deleteIdea} disabled={Boolean(busy)} className="nw-btn nw-btn--danger">
+                      Delete
+                    </button>
+                  </div>
                 </div>
-                <textarea
-                  value={briefDraft}
-                  onChange={(event) => setBriefDraft(event.target.value)}
-                  placeholder="# Project name..."
-                  aria-label="Build-ready brief"
-                  spellCheck={false}
-                />
-                <div className="dualith-ideas-promote">
-                  <label>
-                    <span>Project</span>
-                    <input
-                      value={projectNameDraft}
-                      onChange={(event) => setProjectNameDraft(event.target.value)}
-                      placeholder="project-name"
-                      aria-label="Project name"
-                      pattern="[A-Za-z0-9._-]+"
+
+                {/* ── Raw idea + planning chat ── */}
+                <div className="nw-chat-panel">
+                  <div className="nw-raw-idea">
+                    <div className="nw-panel-label">Your idea</div>
+                    <textarea
+                      value={rawDraft}
+                      onChange={(e) => setRawDraft(e.target.value)}
+                      aria-label="Raw idea"
                       spellCheck={false}
+                      className="nw-raw-idea__textarea"
                     />
-                  </label>
-                  <span className={validProjectName || !projectName ? "" : "is-error"}>
-                    {projectName ? displayProjectLocation(projectsRoot, projectName) : "Add a valid project name"}
-                  </span>
-                  <button type="button" onClick={promoteIdea} disabled={!canPromote}>
-                    {busy === "promote" ? "Creating..." : "Create project from brief"}
-                  </button>
+                  </div>
+
+                  <div className="nw-thread">
+                    <div className="nw-panel-label">
+                      Planning chat
+                      {selected.messages.length > 0 && <span className="nw-panel-label__count">{selected.messages.length}</span>}
+                    </div>
+                    <div className="nw-messages">
+                      {selected.messages.length ? selected.messages.map((message) => (
+                        <div key={message.id} className={`nw-message is-${message.role}`}>
+                          <div className="nw-message__who">
+                            {message.role === "assistant"
+                              ? (message.runner ? slotLabel(message.runner, providerSlots) : "AI")
+                              : "You"}
+                            <em>{timestampLabel(message.timestamp)}</em>
+                          </div>
+                          <div className="nw-message__body">
+                            {message.role === "assistant"
+                              ? <FormattedAgentOutput content={message.content} />
+                              : message.content}
+                          </div>
+                        </div>
+                      )) : (
+                        <div className="nw-messages__empty">The AI will ask clarifying questions here — or just generate a brief when ready.</div>
+                      )}
+                      {streamingReply && (
+                        <div className="nw-message is-assistant">
+                          <div className="nw-message__who">{slotLabel(runner, providerSlots)}<em>streaming…</em></div>
+                          <div className="nw-message__body"><FormattedAgentOutput content={streamingReply} /></div>
+                        </div>
+                      )}
+                    </div>
+                    <form onSubmit={sendPlanningMessage} className="nw-composer">
+                      <textarea
+                        value={messageDraft}
+                        onChange={(e) => setMessageDraft(e.target.value)}
+                        placeholder="Answer or add constraints…"
+                        aria-label="Planning message"
+                        spellCheck={false}
+                        disabled={busyStreaming}
+                        className="nw-composer__input"
+                      />
+                      <button type="submit" disabled={!messageDraft.trim() || busyStreaming} className="nw-btn">
+                        {busy === "chat" ? "…" : "Send"}
+                      </button>
+                    </form>
+                  </div>
                 </div>
+
+                {/* ── Brief + create ── */}
+                <div className="nw-brief-panel">
+                  <div className="nw-brief-head">
+                    <div className="nw-panel-label">Build-ready brief</div>
+                    <button type="button" onClick={generateBrief} disabled={Boolean(busy)} className="nw-btn">
+                      {busy === "brief" ? "Generating…" : "Generate brief"}
+                    </button>
+                  </div>
+                  <textarea
+                    value={briefDraft}
+                    onChange={(e) => setBriefDraft(e.target.value)}
+                    placeholder="# Project name&#10;&#10;Generate a brief above, or paste one here…"
+                    aria-label="Build-ready brief"
+                    spellCheck={false}
+                    className="nw-brief-textarea"
+                  />
+                  <div className="nw-promote">
+                    <label className="nw-promote__name-label">
+                      <span>Workspace name</span>
+                      <input
+                        value={projectNameDraft}
+                        onChange={(e) => setProjectNameDraft(e.target.value)}
+                        placeholder="project-name"
+                        aria-label="Project name"
+                        pattern="[A-Za-z0-9._-]+"
+                        spellCheck={false}
+                        className="nw-promote__name-input"
+                      />
+                    </label>
+                    <div className="nw-promote__path">
+                      <span className={validProjectName || !projectName ? "nw-promote__path-text" : "nw-promote__path-text is-error"}>
+                        {projectName ? displayProjectLocation(projectsRoot, projectName) : "Enter a workspace name to see where it will be created"}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={promoteIdea}
+                      disabled={!canPromote}
+                      className="nw-btn nw-btn--create"
+                    >
+                      {busy === "promote" ? "Creating…" : "Create workspace"}
+                    </button>
+                  </div>
+                </div>
+
               </div>
-            </>
-          ) : (
-            <div className="dualith-ideas-empty">
-              <div className="dualith-ideas-empty__label">No idea selected</div>
-              <div className="dualith-ideas-empty__text">Start planning from the rough idea field.</div>
-            </div>
-          )}
-        </section>
-      </div>
-    </aside>
+            ) : (
+              <div className="nw-empty">
+                <div className="nw-empty__icon" aria-hidden="true">
+                  <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                    <rect x="4" y="4" width="24" height="24" rx="3" stroke="currentColor" strokeWidth="1.5" opacity="0.3"/>
+                    <path d="M16 11v10M11 16h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                  </svg>
+                </div>
+                <div className="nw-empty__label">Describe your idea on the left to begin</div>
+                <div className="nw-empty__text">The planning AI will help you turn a rough idea into a build-ready brief.</div>
+              </div>
+            )}
+          </main>
+
+        </div>
+      </dialog>
+    </div>
   );
 }
 

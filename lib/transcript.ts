@@ -49,13 +49,20 @@ export function parseChatHistory(
     } else if (lower.startsWith("pipeline kickoff")) {
       messages.push({ role: "user", title: "Pipeline kickoff", timestamp, body, attachments, kind: "kickoff" });
     } else if (lower.startsWith("dualith answer")) {
-      messages.push({ role: "agent", title: "Dualith", timestamp, body, attachments: [], kind: "answer" });
+      const questionMatch = body.match(/\nQUESTION:\s*(.+)$/);
+      const cleanBody = questionMatch ? body.slice(0, questionMatch.index!).trim() : body;
+      const question = questionMatch ? questionMatch[1].trim() : undefined;
+      const kind = questionMatch ? "question" : "answer";
+      messages.push({ role: "agent", title: "Dualith", timestamp, body: cleanBody, question, attachments: [], kind });
     } else if (lower.startsWith("plan feedback")) {
       messages.push({ role: "user", title: "Plan feedback", timestamp, body, attachments: [], kind: "kickoff" });
     } else if (lower.startsWith("plan")) {
       messages.push({ role: "plan", title: "Plan", timestamp, body, attachments: [], kind: "plan" });
     } else if (lower.startsWith("circuit breaker")) {
       messages.push({ role: "circuit-breaker", title: "Circuit Breaker", timestamp, body, attachments: [], kind: "circuit-breaker" });
+    } else if (lower.startsWith("git operation") || lower.startsWith("scaffold")) {
+      // Structural operations — render as system notes (collapsed, not agent bubbles)
+      messages.push({ role: "system", title: header.split(/\s+-\s+/)[0] || "System", timestamp, body, attachments: [], kind: "system" });
     } else {
       messages.push({
         role: "system",

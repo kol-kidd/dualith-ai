@@ -27,7 +27,6 @@ import type {
   ProviderSlots,
   AppStatus,
   SnapshotPayload,
-  SetupMode,
   MobileView,
   LiveRun,
   RunFailure,
@@ -61,7 +60,6 @@ import {
 import {
   Badge,
   DualithLogo,
-  ProjectSetupModal,
   IdeasDrawer,
   SidebarColumn,
   ChatComposer,
@@ -92,8 +90,6 @@ function DualithApp() {
     teamMode: "lean",
   });
   const [chatRunSettingsLoaded, setChatRunSettingsLoaded] = useState(false);
-  const [setupOpen, setSetupOpen] = useState(false);
-  const [setupMode, setSetupMode] = useState<SetupMode>("new");
   const [ideasOpen, setIdeasOpen] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>("team");
   const [loading, setLoading] = useState(true);
@@ -523,22 +519,15 @@ function DualithApp() {
     return refreshState ?? "refreshed";
   }, [applySnapshot]);
 
-  const openSetup = useCallback((mode: SetupMode = "new") => {
-    setSetupMode(mode);
-    setSetupOpen(true);
-    setIdeasOpen(false);
+  const [projectsOpen, setProjectsOpen] = useState(false);
+
+  // Single entry point: every "create a workspace" trigger opens the idea-first
+  // drawer (which also hosts folder import). The old ProjectSetupModal is gone.
+  const openWorkspaceDrawer = useCallback(() => {
+    setIdeasOpen(true);
+    setProjectsOpen(false);
     setMobileView("projects");
   }, []);
-
-  const handleSetupCreated = useCallback(async (name: string) => {
-    await refreshProjects(name);
-    window.setTimeout(() => setSetupOpen(false), 0);
-  }, [refreshProjects]);
-
-  const handleSetupImported = useCallback(async (name: string) => {
-    await refreshProjects(name);
-    window.setTimeout(() => setSetupOpen(false), 0);
-  }, [refreshProjects]);
 
   const selectedProject = projects.find((p) => p.name === selectedName) ?? null;
   const addressNotesActionLabel = `Address with ${addressNotesRunnerLabel(chatRunSettings.runner)}`;
@@ -551,8 +540,6 @@ function DualithApp() {
   const live = socketStatus === "Live";
   const errored = socketStatus === "Connection error";
 
-  const [projectsOpen, setProjectsOpen] = useState(false);
-  const [roomTab, setRoomTab] = useState<"chat" | "team">("chat");
   const [composerFill, setComposerFill] = useState("");
 
   if (!setupChecked || wizardOpen) {
@@ -572,7 +559,7 @@ function DualithApp() {
             open={projectsOpen}
             setOpen={setProjectsOpen}
             onSelect={(name) => setSelectedName(name)}
-            onOpenSetup={() => openSetup("new")}
+            onOpenSetup={openWorkspaceDrawer}
           />
           {selectedProject?.team && (
             <Badge className="dualith-topbar-b__team-badge" label={`r${selectedProject.team.round} · ${teamModeLabel(selectedProject.team)}`} tone={selectedProject.team.status === "blocked" ? "amber" : selectedProject.team.status === "error" ? "red" : "cyan"} />
@@ -589,11 +576,12 @@ function DualithApp() {
 
       {ideasOpen && (
         <>
-          <button type="button" aria-label="Close ideas" className="dualith-drawer-backdrop" onClick={() => setIdeasOpen(false)} />
+          <button type="button" aria-label="Close new workspace" className="dualith-drawer-backdrop" onClick={() => setIdeasOpen(false)} />
           <IdeasDrawer
             ideas={ideas}
             projectsRoot={projectsRoot}
             runnerHealth={runnerHealth}
+            providerSlots={providerSlots}
             onClose={() => setIdeasOpen(false)}
             onRefresh={refreshProjects}
             onSnapshot={applySnapshot}
@@ -610,8 +598,8 @@ function DualithApp() {
           selectedProject={selectedProject}
           loading={loading}
           onSelect={(name) => setSelectedName(name)}
-          onOpenSetup={() => openSetup("new")}
-          onOpenIdeas={() => { setIdeasOpen(true); setSetupOpen(false); setProjectsOpen(false); }}
+          onOpenSetup={openWorkspaceDrawer}
+          onOpenIdeas={openWorkspaceDrawer}
           ideasCount={ideas.length}
         />
 
@@ -656,40 +644,19 @@ function DualithApp() {
                     });
                   }}
                   addressActionLabel={addressNotesActionLabel}
-                  activeTab={roomTab}
-                  onTabChange={setRoomTab}
                   onSuggestPrompt={setComposerFill}
                 />
               ) : (
                 <div className="dualith-room-empty">
-                  <span className="text-muted">No project selected — create or import one to start.</span>
+                  <button type="button" className="dualith-room-empty__cta" onClick={openWorkspaceDrawer}>
+                    New workspace
+                  </button>
                 </div>
               )}
             </div>
 
-            {/* Bottom bar: Chat / Team tabs + composer */}
+            {/* Bottom bar: composer */}
             <div className="dualith-bottom-bar border-t border-line">
-          <div className="dualith-bottom-tabs" role="tablist" aria-label="Workspace view">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={roomTab === "chat"}
-              onClick={() => setRoomTab("chat")}
-              className={`dualith-bottom-tab${roomTab === "chat" ? " is-active" : ""}`}
-            >Chat</button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={roomTab === "team"}
-              onClick={() => setRoomTab("team")}
-              className={`dualith-bottom-tab${roomTab === "team" ? " is-active" : ""}`}
-            >
-              Team
-              {Object.values(liveRuns).some((r) => r.project === selectedProject?.name) && (
-                <span className="room-tab__dot" aria-hidden="true" />
-              )}
-            </button>
-          </div>
           <div className="dualith-bottom-composer">
             <ChatComposer
               project={selectedProject}
@@ -699,8 +666,6 @@ function DualithApp() {
               onStopChat={stopChat}
               runnerHealth={runnerHealth}
               providerSlots={providerSlots}
-              activeTab={roomTab}
-              onTabChange={setRoomTab}
               onClearChat={clearChatHistory}
               fillPrompt={composerFill}
             />
@@ -750,17 +715,6 @@ function DualithApp() {
           />
         )}
       </main>{/* end dualith-shell-body */}
-
-      <ProjectSetupModal
-        open={setupOpen}
-        mode={setupMode}
-        projectsRoot={projectsRoot}
-        runnerHealth={runnerHealth}
-        onModeChange={setSetupMode}
-        onClose={() => setSetupOpen(false)}
-        onCreated={handleSetupCreated}
-        onImported={handleSetupImported}
-      />
     </div>
   );
 }

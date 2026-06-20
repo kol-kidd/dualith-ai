@@ -16,8 +16,7 @@ import { themeOptions, densityOptions } from "../_constants";
 import type { ThemeId, DensityId } from "../_constants";
 import {
   isRecent,
-  useIncrementalChatHistory,
-  useIncrementalAgentChat,
+  useIncrementalUnifiedFeed,
   projectStatus,
   projectStatusTone,
   selectedTask,
@@ -26,7 +25,7 @@ import {
   rosterAgentStatus,
   rosterStatusLabel,
 } from "../_helpers";
-import { ChatFeedMessage, ChatWorkingPill, TeamRoom } from "./chat";
+import { UnifiedRoomThread, TeamRoom } from "./chat";
 import { AttentionPanel, DecisionPanel, IdleDigest } from "./task";
 
 export function SidebarColumn({
@@ -64,7 +63,7 @@ export function SidebarColumn({
       <div className="dualith-sidebar__section">
         <div className="dualith-sidebar__label">
           <span>Workspace</span>
-          <button type="button" onClick={onOpenSetup} title="New project">+</button>
+          <button type="button" onClick={onOpenSetup} title="New workspace">+</button>
         </div>
       </div>
 
@@ -78,7 +77,7 @@ export function SidebarColumn({
           </div>
         ) : projects.length === 0 ? (
           <div style={{ padding: "10px 12px" }}>
-            <button type="button" className="dualith-sidebar__footer-btn" onClick={onOpenSetup}>+ New project</button>
+            <button type="button" className="dualith-sidebar__footer-btn" onClick={onOpenSetup}>+ New workspace</button>
           </div>
         ) : (
           projects.map((project) => {
@@ -128,15 +127,11 @@ export function SidebarColumn({
         </>
       )}
 
-      {/* Footer actions */}
+      {/* Footer action — single idea-first entry point */}
       <div className="dualith-sidebar__footer">
         <button type="button" className="dualith-sidebar__footer-btn" onClick={onOpenIdeas}>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Ideas{ideasCount ? ` (${ideasCount})` : ""}
-        </button>
-        <button type="button" className="dualith-sidebar__footer-btn" onClick={onOpenSetup}>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 0-14.14 0"/><path d="M4.93 19.07a10 10 0 0 0 14.14 0"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/></svg>
-          New Agent
+          New workspace{ideasCount ? ` (${ideasCount})` : ""}
         </button>
       </div>
     </aside>
@@ -155,8 +150,6 @@ export function TeamRoomFull({
   onApprovePlan,
   onAddressNotes,
   addressActionLabel,
-  activeTab = "chat",
-  onTabChange,
   onSuggestPrompt,
 }: {
   project: ProjectRecord;
@@ -168,98 +161,108 @@ export function TeamRoomFull({
   onApprovePlan?: (projectName: string, approved: boolean, comment?: string) => Promise<void>;
   onAddressNotes?: (projectName: string) => Promise<void>;
   addressActionLabel?: string;
-  activeTab?: "chat" | "team";
-  onTabChange?: (tab: "chat" | "team") => void;
   onSuggestPrompt?: (prompt: string) => void;
 }) {
   const project = rawProject as ProjectRecord & { team: TeamState };
   const task = selectedTask(project) as DualithTask;
-  const teamMessages = useIncrementalAgentChat(project.agent_chat ?? "");
-  const chatMessages = useIncrementalChatHistory(project.chat_history ?? "");
+  const unifiedMessages = useIncrementalUnifiedFeed(project.chat_history ?? "", project.agent_chat ?? "");
   const latest = latestResultForProject(project, results);
-  const latestPlanIndex = chatMessages
-    .map((m, i) => m.role === "plan" ? i : -1)
-    .filter((i) => i >= 0)
-    .slice(-1)[0] ?? -1;
+  const projectLiveRuns = liveRuns.filter((run) => run.project === project.name);
 
-  // Auto-switch to Team tab only when a non-ask (team) run starts — never for
-  // the Ask agent, which runs in the Chat tab and should not redirect the user.
-  // Live heartbeat for the Chat tab: any run in flight for this project (the Ask
-  // agent runs here; team runs auto-switch to the Team tab but still show here if
-  // the user navigates back). Most recent run wins so the pill tracks the active turn.
-  const chatLiveRun = liveRuns.filter((run) => run.project === project.name).slice(-1)[0] ?? null;
-  const hasTeamLive = liveRuns.some((run) => run.agent !== "ask");
-  const prevHasTeamLive = useRef(hasTeamLive);
-  useEffect(() => {
-    if (hasTeamLive && !prevHasTeamLive.current) onTabChange?.("team");
-    prevHasTeamLive.current = hasTeamLive;
-  }, [hasTeamLive, onTabChange]);
+  // latestPlanIndex in the unified feed (chat messages only, by position in merged array)
+  const latestPlanIndex = unifiedMessages.reduce((acc, m, i) =>
+    m.source === "chat" && m.role === "plan" ? i : acc, -1);
 
-  // Auto-scroll chat thread to bottom when new messages arrive
-  const chatThreadRef = useRef<HTMLDivElement>(null);
-  const [chatAutoFollow, setChatAutoFollow] = useState(true);
+  // Auto-scroll to bottom on new messages
+  const threadRef = useRef<HTMLDivElement>(null);
+  const [autoFollow, setAutoFollow] = useState(true);
+  useEffect(() => { setAutoFollow(true); }, [project.name]);
   useEffect(() => {
-    if (activeTab !== "chat") return;
-    setChatAutoFollow(true);
-  }, [project.name, activeTab]);
-  useEffect(() => {
-    if (activeTab !== "chat" || !chatAutoFollow) return;
-    const el = chatThreadRef.current;
+    if (!autoFollow) return;
+    const el = threadRef.current;
     if (!el) return;
     const scrollParent = el.closest(".dualith-room-scroll") as HTMLElement | null;
     const target = scrollParent ?? el;
     const frame = window.requestAnimationFrame(() => { target.scrollTop = target.scrollHeight; });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeTab, chatAutoFollow, chatMessages.length, chatLiveRun?.runId]);
-  const handleChatScroll = () => {
-    const el = chatThreadRef.current;
+  }, [autoFollow, unifiedMessages.length, projectLiveRuns.length]);
+  const handleScroll = () => {
+    const el = threadRef.current;
     if (!el) return;
     const scrollParent = el.closest(".dualith-room-scroll") as HTMLElement | null;
     const target = scrollParent ?? el;
-    const distanceFromBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
-    setChatAutoFollow(distanceFromBottom < 96);
+    setAutoFollow(target.scrollHeight - target.scrollTop - target.clientHeight < 96);
   };
+
+  // Collapsible crew header
+  const [headerOpen, setHeaderOpen] = useState(false);
+  const agents = rosterAgentsForTask(task);
 
   return (
     <div className="dualith-room-inner">
       <DecisionPanel project={project} task={task} onSubmit={onHumanAnswer} />
       <AttentionPanel project={project} onAddressNotes={onAddressNotes} addressActionLabel={addressActionLabel} />
 
-      {/* Chat tab */}
-      {activeTab === "chat" && (
-        <div ref={chatThreadRef} onScroll={handleChatScroll} className="room-chat-thread dualith-thread-measure">
-          {chatMessages.length === 0 ? (
-            <IdleDigest project={project} results={results} onSuggestPrompt={onSuggestPrompt} />
-          ) : (
-            chatMessages.map((message, index) => (
-              <ChatFeedMessage
-                key={message.timestamp ? `chat-${message.role}-${message.timestamp}` : `chat-${index}`}
-                message={message}
-                project={project}
-                latest={latest}
-                onApprovePlan={onApprovePlan}
-                isLatestPlan={index === latestPlanIndex}
-                onOpenTeam={onTabChange ? () => onTabChange("team") : undefined}
-              />
-            ))
+      {/* Collapsible crew header */}
+      {agents.length > 0 && (
+        <div className={`dualith-crew-header${headerOpen ? " is-open" : ""}`}>
+          <button
+            type="button"
+            className="dualith-crew-header__toggle"
+            onClick={() => setHeaderOpen((v) => !v)}
+            aria-expanded={headerOpen}
+          >
+            <div className="dualith-crew-header__avatars">
+              {agents.map((agent) => {
+                const status = rosterAgentStatus(task, agent);
+                const isActive = status === "running" || status === "active";
+                return (
+                  <span
+                    key={agent.id}
+                    className={`dualith-crew-avatar${isActive ? " is-active" : ""}`}
+                    title={agent.label}
+                    aria-label={`${agent.label} — ${rosterStatusLabel(status)}`}
+                  >
+                    {agent.label.slice(0, 2).toUpperCase()}
+                  </span>
+                );
+              })}
+            </div>
+            <span className="dualith-crew-header__caret" aria-hidden="true">{headerOpen ? "▲" : "▼"}</span>
+          </button>
+          {headerOpen && (
+            <div className="dualith-crew-header__detail">
+              {agents.map((agent) => {
+                const status = rosterAgentStatus(task, agent);
+                const isActive = status === "running" || status === "active";
+                return (
+                  <div key={agent.id} className="dualith-crew-header__agent">
+                    <span className={`dot${isActive ? " is-active" : ""}`} aria-hidden="true" />
+                    <span>{agent.label}</span>
+                    <span className={`status-label${isActive ? " is-active" : ""}`}>{rosterStatusLabel(status)}</span>
+                  </div>
+                );
+              })}
+            </div>
           )}
-          {chatLiveRun && <ChatWorkingPill key={`working-${chatLiveRun.runId}`} run={chatLiveRun} />}
         </div>
       )}
 
-      {/* Team tab */}
-      {activeTab === "team" && (
-        <TeamRoom
-          task={task}
-          messages={teamMessages}
-          project={project}
-          projectEvents={projectEvents}
-          results={results}
-          liveRuns={liveRuns}
-          failures={failures}
-          onApprovePlan={onApprovePlan}
-        />
-      )}
+      {/* Unified room thread */}
+      <div ref={threadRef} onScroll={handleScroll} className="room-chat-thread dualith-thread-measure">
+        {unifiedMessages.length === 0 && projectLiveRuns.length === 0 ? (
+          <IdleDigest project={project} results={results} onSuggestPrompt={onSuggestPrompt} />
+        ) : (
+          <UnifiedRoomThread
+            messages={unifiedMessages}
+            project={project}
+            latest={latest}
+            liveRuns={projectLiveRuns}
+            onApprovePlan={onApprovePlan}
+            latestPlanIndex={latestPlanIndex}
+          />
+        )}
+      </div>
     </div>
   );
 }

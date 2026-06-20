@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -314,6 +315,23 @@ def apply_provider_config(config: ProviderConfig) -> None:
     from .runners import RUNNER_COMMANDS
     _apply_slot(RUNNER_COMMANDS, "claude", config.runner_a)
     _apply_slot(RUNNER_COMMANDS, "codex", config.runner_b)
+
+
+def subscription_cli_env(runner: str) -> dict[str, str]:
+    """Return os.environ copy with the provider's API-key env var removed.
+
+    When a runner slot is set to subscription (CLI) mode the CLI authenticates
+    via its own stored session. If the host shell also has the provider's API
+    key env var set, the CLI will try to use that key instead — which fails when
+    the key is invalid or belongs to a different account. Strip it so the CLI
+    falls back to its session token.
+    """
+    provider = (PROVIDERS.get(runner) or {})
+    key_var = provider.get("api_key_env", "")
+    env = os.environ.copy()
+    if key_var:
+        env.pop(key_var, None)
+    return env
 
 
 def _apply_slot(runner_commands: dict, runner_id: str, slot: ProviderSlotConfig) -> None:
@@ -901,3 +919,90 @@ def _api_error_record(usage_record: dict[str, Any], error: str) -> dict[str, Any
         "checkpoint": None,
         "usage": usage_record,
     }
+
+
+async def stream_prompt_via_http(
+    runner: str,
+    prompt: str,
+) -> "AsyncGenerator[tuple[str, str], None]":
+    """Simple text-only streaming call for a runner in api_key mode.
+
+    Yields (kind, value) tuples:
+      ("chunk", text)   — incremental text
+      ("done", "")      — stream finished cleanly
+      ("error", msg)    — provider error; caller should stop iterating
+    """
+    from .runners import RUNNER_COMMANDS
+    config = RUNNER_COMMANDS[runner]
+    api_base: str = config.get("api_base") or ""
+    api_key: str = config.get("api_key") or ""
+    api_model: str = config.get("api_model") or ""
+    extra_headers: dict = config.get("api_extra_headers") or {}
+    provider: str = config.get("provider") or ""
+
+    is_anthropic_native = provider == "claude" and "anthropic.com" in api_base
+
+    if is_anthropic_native:
+        endpoint = f"{api_base}/messages"
+        headers = {
+            "x-api-key": api_key,
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            **extra_headers,
+        }
+        payload: dict[str, Any] = {
+            "model": api_model,
+            "max_tokens": 4096,
+            "stream": True,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    else:
+        endpoint = f"{api_base}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            **extra_headers,
+        }
+        payload = {
+            "model": api_model,
+            "stream": True,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
+            if resp.status_code not in (200, 201):
+                try:
+                    await resp.aread()
+                except Exception:
+                    pass
+                yield ("error", _http_error_message(resp.status_code, resp))
+                return
+
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:].strip()
+                if data == "[DONE]":
+                    break
+                chunk = _safe_json(data)
+                if is_anthropic_native:
+                    if chunk.get("type") == "content_block_delta":
+                        delta = (chunk.get("delta") or {})
+                        text = delta.get("text", "")
+                        if text:
+                            yield ("chunk", text)
+                    elif chunk.get("type") == "error":
+                        error_obj = chunk.get("error") or {}
+                        yield ("error", error_obj.get("message") or str(error_obj))
+                        return
+                else:
+                    choices = chunk.get("choices") or []
+                    for choice in choices:
+                        delta = (choice.get("delta") or {})
+                        text = delta.get("content", "")
+                        if text:
+                            yield ("chunk", text)
+
+    yield ("done", "")
