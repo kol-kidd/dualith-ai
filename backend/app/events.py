@@ -230,7 +230,7 @@ class EventBus:
 
     def _enqueue(self, message: dict[str, Any]) -> None:
         droppable = message.get("type") in DROPPABLE_TYPES
-        for websocket, queue in list(self._queues.items()):
+        for queue in list(self._queues.values()):
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:

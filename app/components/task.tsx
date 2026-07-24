@@ -3,7 +3,6 @@
 // Dualith team-room UI components. Extracted from page.tsx.
 
 import React, { useState, useEffect } from "react";
-import type { CSSProperties } from "react";
 import { humanizeStatus } from "../../lib/humanize";
 import type {
   DualithTask,
@@ -18,21 +17,10 @@ import {
   attentionBadge,
   selectedTask,
   latestResultForProject,
-  crewAgentsForTask,
-  crewAgentStatus,
-  crewAgentRunner,
-  crewMemberClass,
-  crewStatusLabel,
-  reviewHasConcern,
-  specialistReviewItems,
-  specialistReviewDisplay,
-  crewAgentActivity,
-  reviewerSummaryLabel,
   decisionHighlight,
   priorityLabel,
   priorityTone,
   attentionCountLabel,
-  missionNarration,
 } from "../_helpers";
 import { Badge, EmptyState } from "./primitives";
 
@@ -257,14 +245,13 @@ export function CommitPane({ commits }: { commits: string[] }) {
   );
 }
 
-export function MissionControl({ project, liveRuns = [], failures = [], onClearChat }: {
+export function MissionControl({ project, liveRuns = [], onClearChat }: {
   project: ProjectRecord;
   liveRuns?: LiveRun[];
   failures?: RunFailure[];
   onClearChat?: (projectName: string) => Promise<void>;
 }) {
   const task = selectedTask(project);
-  const narration = missionNarration(project, task, liveRuns, failures);
   const activeRuns = liveRuns.filter((run) => run.project === project.name);
   const hasLive = activeRuns.length > 0;
   const [menuOpen, setMenuOpen] = useState(false);
@@ -278,7 +265,6 @@ export function MissionControl({ project, liveRuns = [], failures = [], onClearC
     return () => document.removeEventListener("mousedown", handler);
   }, [menuOpen]);
 
-  const sessionTitle = task?.title || project.name;
   const teamStatus = project.team?.status;
   const badgeClass = hasLive
     ? "session-badge--active"

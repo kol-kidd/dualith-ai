@@ -6,7 +6,6 @@ from uuid import uuid4
 from .agents import AGENT_SPECS
 from .schema import OrchestrationNode, OrchestrationPlan, RequestType
 
-
 GIT_PATTERNS = (
     r"\bgit\b",
     r"\bcommit\b",

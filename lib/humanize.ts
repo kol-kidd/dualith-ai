@@ -45,13 +45,6 @@ export function humanizeStatus(status: string): string {
   return STATUS_LABELS[status] ?? status;
 }
 
-const WORKFLOW_LABELS: Record<string, string> = {
-  "auto-team": "Team run",
-  "plan-first": "Plan, then build",
-  "pm-clarify": "Clarify, then build",
-  "build-review-loop": "Build & review loop",
-};
-
 export function humanizeKickoffTitle(title: string): string {
   const lower = title.toLowerCase();
   if (lower.includes("kickoff")) return "Your brief";

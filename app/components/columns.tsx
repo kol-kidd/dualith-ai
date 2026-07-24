@@ -25,7 +25,7 @@ import {
   rosterAgentStatus,
   rosterStatusLabel,
 } from "../_helpers";
-import { UnifiedRoomThread, TeamRoom } from "./chat";
+import { UnifiedRoomThread } from "./chat";
 import { AttentionPanel, DecisionPanel, IdleDigest } from "./task";
 
 export function SidebarColumn({
@@ -142,10 +142,8 @@ export function SidebarColumn({
 
 export function TeamRoomFull({
   project: rawProject,
-  projectEvents,
   results = [],
   liveRuns = [],
-  failures = [],
   onHumanAnswer,
   onApprovePlan,
   onAddressNotes,

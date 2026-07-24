@@ -12,13 +12,14 @@ import logging
 import os
 import re
 import subprocess
+from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, model_validator
 
 try:
     import keyring

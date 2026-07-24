@@ -330,7 +330,7 @@ function SlotStep({
               <code style={{ background: "var(--dualith-surface-hover)", padding: "1px 5px", borderRadius: 3 }}>
                 {slot.provider === "claude" ? "claude" : "codex"}
               </code>{" "}
-              CLI — make sure you're logged in.
+              CLI — make sure you&apos;re logged in.
             </p>
           )}
         </div>

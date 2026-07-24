@@ -11,7 +11,6 @@ import {
   DENSITY_KEY,
 } from "../app/_constants";
 import {
-  appendTranscriptChunk,
   makeTranscriptCache,
   parseChatHistory as _parseChatHistory,
   sortChatMessages,

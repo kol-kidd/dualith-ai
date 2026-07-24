@@ -8,7 +8,6 @@ import type {
   ProjectRecord,
 } from "../app/_types";
 import { modeLabels, runnerLabels, defaultDualithReservedPorts } from "../app/_constants";
-import { sanitizeRunnerOutput } from "./runner-output";
 
 // ── Time helpers (module-internal) ───────────────────────────────────────────
 

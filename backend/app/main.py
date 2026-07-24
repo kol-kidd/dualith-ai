@@ -1,27 +1,37 @@
 from __future__ import annotations
 
 import asyncio
+import glob as glob_module
 import json
 import logging
 import logging.handlers
 import os
 import re
-import glob as glob_module
+import secrets
 import shlex
 import shutil
 import socket
 import subprocess
 from collections import deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, AsyncGenerator, Literal
 from uuid import uuid4
 
-from contextlib import asynccontextmanager
-
 import httpx
-import secrets
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Header, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -32,10 +42,74 @@ from . import brain as brain_module
 from .dialogue import HANDOFF_PROMPT_TRAILER, Handoff, bounce_prompt, parse_handoff
 from .events import event_bus, narration_for
 from .failures import translate as translate_failure
-from .orchestration.planner import plan_from_prompt
-from .orchestration.scheduler import plan_node_summary
-from .orchestration.schema import OrchestrationPlan, PlanValidationResult
-from .orchestration.validator import validate_plan
+from .prompts import (
+    ARCHITECT_PROMPT,
+    ARCHITECTURE_REVIEWER_PROMPT,
+    ASK_PROMPT,
+    AUDITOR_PROMPT,
+    BUILDER_PROMPT,
+    BUILDER_SKILL_TEXT,
+    CLAUDE_TEXT,
+    DECOMPOSER_PROMPT,
+    GIT_PROMPT,
+    IDEA_BRIEF_META_PROMPT,
+    IDEA_CHAT_META_PROMPT,
+    LEAD_PROMPT,
+    MAINTAINABILITY_REVIEWER_PROMPT,
+    MULTI_REVIEWER_PROMPT,
+    PERFORMANCE_REVIEWER_PROMPT,
+    PLANNER_PROMPT,
+    PM_PROMPT,
+    PROJECT_DESIGN_TEXT,
+    PROJECT_PRODUCT_TEXT,
+    REVIEW_COST_CONTROL,
+    SECURITY_REVIEWER_PROMPT,
+    SPEC_REFINE_META_PROMPT,
+    SUMMARIZER_PROMPT,
+    TEAMMATE_PROMPT,
+    TESTER_PROMPT,
+)
+from .providers import (
+    PROVIDERS,
+    ProviderConfig,
+    ProviderSlotConfig,
+    apply_provider_config,
+    delete_provider_config,
+    describe_provider_config,
+    list_provider_models,
+    load_provider_config,
+    provider_config_exists,
+    save_provider_config,
+    test_provider_slot,
+)
+from .routing import (
+    ORCHESTRATION_WORKFLOWS,
+    PIPELINE_MAX_ITERATIONS,
+    REVIEW_AGENTS,
+    ROUTE_MODE_VALUES,
+    SPECIALIST_REVIEWER_LABELS,
+    SPECIALIST_REVIEWER_VERDICTS,
+    SPECIALIST_REVIEWERS,
+    TEAM_MAX_ROUNDS,
+    TEAM_MODE_VALUES,
+    _is_obvious_question,
+    audit_passed,
+    classify_orchestration_intent,
+    classify_orchestration_intent_async,
+    clean_route_mode,
+    clean_team_mode,
+    dynamic_chat_workflow,
+    effective_max_rounds,
+    estimated_runner_calls_for_task,
+    feedback_verdict_summary,
+    is_direct_git_intent,
+    planned_agents_for_task,
+    preflight_task,
+    risk_reviewers_for_task,
+    workflow_for_agent,
+    workflow_for_intent,
+)
+from .runners import RUNNER_COMMANDS
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DUALITH_DIR = ROOT_DIR / ".dualith"
@@ -118,6 +192,12 @@ STATUS_REFRESH_TTL_SECONDS = int(os.environ.get("DUALITH_STATUS_REFRESH_TTL_SECO
 CLAUDE_STATUSLINE_TTL_SECONDS = int(os.environ.get("DUALITH_CLAUDE_STATUSLINE_TTL_SECONDS", "1800"))
 CODEX_APP_SERVER_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_CODEX_APP_SERVER_TIMEOUT_SECONDS", str(STATUS_TIMEOUT_SECONDS)))
 AGENT_IDLE_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_AGENT_IDLE_TIMEOUT_SECONDS", "600"))
+# Watchdog event types that represent a real workspace change. Everything else
+# it emits (`opened`, `closed`, `closed_no_write` on inotify) is read activity —
+# including our own snapshot reads — and must never drive a broadcast.
+WATCHED_FS_EVENTS = frozenset({"created", "modified", "deleted", "moved"})
+# Trailing window used to collapse a burst of filesystem events into one snapshot.
+FS_BROADCAST_DEBOUNCE_SECONDS = float(os.environ.get("DUALITH_FS_BROADCAST_DEBOUNCE_SECONDS", "0.25"))
 RESULT_LIMIT = 100
 RESULT_CONTENT_MAX_CHARS = 32_000
 APP_FEATURES = [
@@ -235,56 +315,7 @@ QUOTA_INTEGER_SETTINGS = {
     "claude_weekly_tokens",
 }
 IMPLEMENTATION_AGENTS = {"ask", "builder", "lead", "team", "git"}
-from .routing import (
-    SPECIALIST_REVIEWERS,
-    SPECIALIST_REVIEWER_LABELS,
-    SPECIALIST_REVIEWER_VERDICTS,
-    REVIEW_AGENTS,
-    PIPELINE_MAX_ITERATIONS,
-    TEAM_MAX_ROUNDS,
-    LEAN_TEAM_MAX_ROUNDS,
-    effective_max_rounds,
-    ROUTE_MODE_VALUES,
-    TEAM_MODE_VALUES,
-    ORCHESTRATION_WORKFLOWS,
-    GIT_MESSAGE_PHRASES,
-    GIT_DIRECT_PATTERNS,
-    latest_feedback_verdicts,
-    feedback_verdict_summary,
-    audit_passed,
-    last_session_intent,
-    is_direct_git_intent,
-    _is_obvious_question,
-    classify_intent_llm,
-    classify_orchestration_intent,
-    classify_orchestration_intent_async,
-    workflow_for_intent,
-    clean_team_mode,
-    clean_route_mode,
-    risk_reviewers_for_task,
-    planned_agents_for_task,
-    estimated_runner_calls_for_task,
-    preflight_task,
-    workflow_for_agent,
-    route_intent,
-    chat_workflow_from_intent,
-    orchestration_payload,
-    dynamic_chat_workflow,
-)
-from .runners import codex_fallback_path, RUNNER_COMMANDS
-from .providers import (
-    ProviderConfig,
-    ProviderSlotConfig,
-    apply_provider_config,
-    delete_provider_config,
-    describe_provider_config,
-    load_provider_config,
-    provider_config_exists,
-    save_provider_config,
-    test_provider_slot,
-    list_provider_models,
-    PROVIDERS,
-)
+
 TASK_STATUSES = {"pending", "active", "blocked", "completed", "failed"}
 TASK_PHASES = ("pm", "architect", "planner", "lead", "tester", "reviewer")
 TASK_EVENT_TYPES = {"conversation", "agent_activity", "decision", "system", "review", "queue_event"}
@@ -323,6 +354,9 @@ plan_approval_events: dict[str, asyncio.Event] = {}
 plan_approval_results: dict[str, dict[str, Any]] = {}
 active_dev_servers: dict[str, dict[str, Any]] = {}
 team_room_broadcast_pending = False
+fs_broadcast_pending = False
+fs_broadcast_latest: dict[str, str] | None = None
+project_commits_cache: dict[str, tuple[str, list[str]]] = {}
 status_refresh_lock: asyncio.Lock | None = None
 status_refresh_task: asyncio.Task[tuple[dict[str, Any], str]] | None = None
 runner_health: dict[str, dict[str, Any]] = {
@@ -578,36 +612,6 @@ IDEA_CODEX_SEARCH_ENABLED = os.environ.get("DUALITH_IDEA_CODEX_SEARCH", "1").low
 DUALITH_REVIEW_RUNNER = os.environ.get("DUALITH_REVIEW_RUNNER", "codex").strip().lower()
 if DUALITH_REVIEW_RUNNER not in {"codex", "claude", "auto"}:
     DUALITH_REVIEW_RUNNER = "codex"
-
-from .prompts import (
-    SPEC_REFINE_META_PROMPT,
-    IDEA_CHAT_META_PROMPT,
-    IDEA_BRIEF_META_PROMPT,
-    BUILDER_SKILL_TEXT,
-    PROJECT_PRODUCT_TEXT,
-    PROJECT_DESIGN_TEXT,
-    CLAUDE_TEXT,
-    HITL_INSTRUCTION,
-    HANDOFF_CONVENTION,
-    DECOMPOSER_PROMPT,
-    BUILDER_PROMPT,
-    AUDITOR_PROMPT,
-    ASK_PROMPT,
-    LEAD_PROMPT,
-    GIT_PROMPT,
-    ARCHITECT_PROMPT,
-    PLANNER_PROMPT,
-    TEAMMATE_PROMPT,
-    PM_PROMPT,
-    TESTER_PROMPT,
-    ARCHITECTURE_REVIEWER_PROMPT,
-    SECURITY_REVIEWER_PROMPT,
-    PERFORMANCE_REVIEWER_PROMPT,
-    MAINTAINABILITY_REVIEWER_PROMPT,
-    REVIEW_COST_CONTROL,
-    MULTI_REVIEWER_PROMPT,
-    SUMMARIZER_PROMPT,
-)
 
 
 async def check_runner_health() -> None:
@@ -4603,9 +4607,38 @@ async def run_backend_git_operation(
     return result
 
 
+def git_head_token(project_path: Path) -> str:
+    """Cheap fingerprint of a repo's current tip, read without spawning git.
+
+    Returns "" when it can't be determined, which disables caching for that
+    repo rather than risking a stale answer.
+    """
+    git_dir = project_path / ".git"
+    try:
+        head = git_dir / "HEAD"
+        raw = head.read_text(encoding="utf-8", errors="replace").strip()
+        parts = [raw, str(head.stat().st_mtime_ns)]
+        if raw.startswith("ref: "):
+            for candidate in (git_dir / raw[5:].strip(), git_dir / "packed-refs"):
+                if candidate.exists():
+                    parts.append(f"{candidate.name}:{candidate.stat().st_mtime_ns}")
+        return "|".join(parts)
+    except OSError:
+        return ""
+
+
 async def latest_project_commits(project_path: Path) -> list[str]:
     if not (project_path / ".git").exists():
         return []
+
+    # This runs once per project per snapshot, and snapshots are frequent.
+    # Skip the subprocess whenever the repo tip hasn't moved.
+    token = git_head_token(project_path)
+    cache_key = display_path(project_path)
+    if token:
+        cached = project_commits_cache.get(cache_key)
+        if cached is not None and cached[0] == token:
+            return cached[1]
 
     try:
         code, output = await run_git(project_path, "log", "--oneline", "-5")
@@ -4615,7 +4648,10 @@ async def latest_project_commits(project_path: Path) -> list[str]:
     if code != 0 or not output:
         return []
 
-    return output.splitlines()[:5]
+    commits = output.splitlines()[:5]
+    if token:
+        project_commits_cache[cache_key] = (token, commits)
+    return commits
 
 
 def path_belongs_to_project(entry_path: str, project_path: Path) -> bool:
@@ -4763,6 +4799,12 @@ async def collect_snapshot() -> dict[str, Any]:
 
 
 async def broadcast(message_type: str, event: dict[str, str] | None = None) -> None:
+    # collect_snapshot() is expensive — it walks every registered project and
+    # spawns a `git log` per repo. With no attached clients nothing can observe
+    # the payload, so skip the work entirely rather than burn it on the floor.
+    if event_bus.client_count == 0:
+        return
+
     payload = await collect_snapshot()
     if event:
         payload["event"] = event
@@ -4801,6 +4843,36 @@ async def _team_room_broadcast_soon() -> None:
     finally:
         team_room_broadcast_pending = False
     await broadcast("team_event")
+
+
+async def _fs_broadcast_soon() -> None:
+    """Coalesce a burst of filesystem events into a single snapshot broadcast."""
+    global fs_broadcast_pending, fs_broadcast_latest
+    try:
+        await asyncio.sleep(FS_BROADCAST_DEBOUNCE_SECONDS)
+        event = fs_broadcast_latest
+    finally:
+        fs_broadcast_pending = False
+        fs_broadcast_latest = None
+    await broadcast("fs_event", event)
+
+
+def schedule_fs_broadcast(event: dict[str, str]) -> None:
+    """Queue an fs-driven broadcast, at most one in flight at a time.
+
+    An agent run can touch hundreds of files in a second; without this every
+    one of them would trigger a full multi-project snapshot.
+    """
+    global fs_broadcast_pending, fs_broadcast_latest
+    fs_broadcast_latest = event
+    if not event_loop or fs_broadcast_pending:
+        return
+
+    fs_broadcast_pending = True
+    try:
+        asyncio.run_coroutine_threadsafe(_fs_broadcast_soon(), event_loop)
+    except RuntimeError:
+        fs_broadcast_pending = False
 
 
 def schedule_team_room_broadcast() -> None:
@@ -4863,6 +4935,13 @@ class WorkspaceEventHandler(FileSystemEventHandler):
         if event.is_directory:
             return
 
+        # Only react to events that actually change the workspace. inotify also
+        # emits `opened`/`closed`/`closed_no_write`, and reacting to those is a
+        # feedback loop: the snapshot this schedules reads CLAUDE_TODO.md, which
+        # re-fires `opened`, which schedules another snapshot, forever.
+        if event.event_type not in WATCHED_FS_EVENTS:
+            return
+
         src_path = Path(event.src_path)
         if ".git" in src_path.parts:
             return
@@ -4870,7 +4949,7 @@ class WorkspaceEventHandler(FileSystemEventHandler):
         last_fs_activity[self._root_key] = utc_now()
         action = f"FILE_{event.event_type.upper()}"
         entry = record_event(action, src_path)
-        schedule_broadcast("fs_event", entry)
+        schedule_fs_broadcast(entry)
 
 
 def clean_stack_profile(stack_profile: str | None) -> str:
@@ -6353,7 +6432,8 @@ def eco_runner_for_role(role: str) -> tuple[str, str]:
 
 async def refresh_eco_pricing() -> None:
     """Refresh the cached live prices for both slots. Best-effort, never raises."""
-    from .providers import fetch_model_price, ProviderSlotConfig as _Slot
+    from .providers import ProviderSlotConfig as _Slot
+    from .providers import fetch_model_price
     for runner_id in ("claude", "codex"):
         config = RUNNER_COMMANDS.get(runner_id, {})
         if not config.get("use_http"):
@@ -7469,6 +7549,7 @@ async def stop_team_after_failed_step(
     runner: str,
     result: dict[str, Any] | None,
     round_no: int,
+    task_id: str | None,
 ) -> None:
     role_label = str(RUN_MODES.get(role, {}).get("label", role.title()))
     runner_label = str(RUNNER_COMMANDS.get(runner, {}).get("label", runner))
@@ -8188,7 +8269,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                         lanes = parse_decomposer_file(project_path)
                         if len(lanes) >= 2:
                             set_task_lead_lanes(task_id, lanes)
-                            lane_labels = " · ".join(l["lane"] for l in lanes)
+                            lane_labels = " · ".join(lane["lane"] for lane in lanes)
                             append_agent_chat(project_path, f"### Decomposer - {utc_now()}\n\n{len(lanes)} parallel lanes: {lane_labels}\n\n")
                             record_event("DECOMPOSER_SPLIT", f"{relative_path(project_path)} :: {len(lanes)} lanes: {lane_labels}")
                         else:
@@ -8225,7 +8306,15 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 # Each lane gets its own Lead sub-agent run scoped to its domain files.
                 # We cap at 3 lanes (enforced by parse_decomposer_file).
 
-                async def run_lane(lane_info: dict[str, Any]) -> dict[str, Any]:
+                # lane_runner/lane_model are bound as defaults so every lane uses
+                # the runner selected for this round. `lead_runner`/`lead_model`
+                # are reassigned below once results come back, and a late-binding
+                # closure would silently pick up that new value instead.
+                async def run_lane(
+                    lane_info: dict[str, Any],
+                    lane_runner: str = lead_runner,
+                    lane_model: str = lead_model,
+                ) -> dict[str, Any]:
                     label = lane_info["lane"]
                     file_list = ", ".join(lane_info["files"]) if lane_info["files"] else "(no specific files)"
                     scope_note = lane_info.get("scope", "")
@@ -8242,8 +8331,8 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                     result = await run_agent_process_with_auto_fallback(
                         project_name,
                         "lead",
-                        lead_runner,
-                        lead_model,
+                        lane_runner,
+                        lane_model,
                         reasoning,
                         lane_prompt,
                         project_path,
@@ -8255,7 +8344,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                     update_task_lane_progress(task_id, label, "failed" if agent_result_failed(result) else "done", pct)
                     return result
 
-                lane_results = await asyncio.gather(*[run_lane(l) for l in lanes], return_exceptions=True)
+                lane_results = await asyncio.gather(*[run_lane(lane) for lane in lanes], return_exceptions=True)
                 for lane_result in lane_results:
                     if isinstance(lane_result, dict):
                         actual_lane_runner = agent_result_runner(lane_result, lead_runner)
@@ -8266,7 +8355,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
 
                 # Check for lane failures.
                 lane_failed = False
-                for lane_info, lane_result in zip(lanes, lane_results):
+                for lane_info, lane_result in zip(lanes, lane_results, strict=True):
                     if isinstance(lane_result, Exception):
                         lane_failed = True
                         append_agent_chat(project_path, f"### Lead:{lane_info['lane']} - {utc_now()}\n\nLane raised an exception: {lane_result}\n\n")
@@ -8277,15 +8366,15 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                     record_event("LANE_SERIALIZED", f"{relative_path(project_path)} :: lane failure — falling back to sequential Lead")
                     append_agent_chat(project_path, f"### Note - {utc_now()}\n\nOne or more parallel lanes failed; falling back to sequential Lead to ensure the build stays clean.\n\n")
                     # Clear lanes so the UI stops showing them as active.
-                    for l in lanes:
-                        update_task_lane_progress(task_id, l["lane"], "skipped", 0)
+                    for lane in lanes:
+                        update_task_lane_progress(task_id, lane["lane"], "skipped", 0)
                     # Run a sequential Lead merge/repair pass.
                     lead_chat_start = agent_chat_size(project_path)
                     lead_result = await run_team_step(project_name, "lead", lead_runner, lead, model, reasoning, project_path, teammate, runner_pref, task_id)
                     lead_runner = agent_result_runner(lead_result, lead_runner)
                     if agent_result_failed(lead_result):
                         set_task_phase(task_id, "lead", "failed", lead_runner, agent_result_error(lead_result))
-                        await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, lead_result, round_no)
+                        await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, lead_result, round_no, task_id)
                         return
                     if not agent_chat_section_added_since(project_path, "Lead", lead_chat_start):
                         await repair_missing_chat_section(project_name, project_path, "Lead", "lead", lead_chat_start, lead_result, round_no)
@@ -8304,7 +8393,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                     lead_runner = agent_result_runner(merge_result, lead_runner)
                     if agent_result_failed(merge_result):
                         set_task_phase(task_id, "lead", "failed", lead_runner, agent_result_error(merge_result))
-                        await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, merge_result, round_no)
+                        await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, merge_result, round_no, task_id)
                         return
                     if not agent_chat_section_added_since(project_path, "Lead", lead_chat_start):
                         await repair_missing_chat_section(project_name, project_path, "Lead", "lead", lead_chat_start, merge_result, round_no)
@@ -8315,7 +8404,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 lead_runner = agent_result_runner(lead_result, lead_runner)
                 if agent_result_failed(lead_result):
                     set_task_phase(task_id, "lead", "failed", lead_runner, agent_result_error(lead_result))
-                    await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, lead_result, round_no)
+                    await stop_team_after_failed_step(project_name, project_path, "lead", lead_runner, lead_result, round_no, task_id)
                     return
                 if not agent_chat_section_added_since(project_path, "Lead", lead_chat_start):
                     await repair_missing_chat_section(project_name, project_path, "Lead", "lead", lead_chat_start, lead_result, round_no)
@@ -8425,7 +8514,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 if agent_result_failed(tester_result):
                     append_agent_chat_section_if_missing(project_path, "Tester", tester_chat_start, f"{agent_result_error(tester_result)}\n\nTESTER: FAILED")
                     set_task_phase(task_id, "tester", "failed", tester_runner, agent_result_error(tester_result))
-                    await stop_team_after_failed_step(project_name, project_path, "tester", tester_runner, tester_result, round_no)
+                    await stop_team_after_failed_step(project_name, project_path, "tester", tester_runner, tester_result, round_no, task_id)
                     return
                 # Verdict: case-insensitive, FEEDBACK.md or the Tester's chat
                 # section; if the Tester wrote no verdict line at all, infer
@@ -8507,7 +8596,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
                 team_mode=team_mode,
             )
             if specialist_status == "failed":
-                await stop_team_after_failed_step(project_name, project_path, specialist_reviewer, specialist_runner or role_runner_for_pref(runner_pref, specialist_reviewer), {"error": specialist_summary, "status": "error"}, round_no)
+                await stop_team_after_failed_step(project_name, project_path, specialist_reviewer, specialist_runner or role_runner_for_pref(runner_pref, specialist_reviewer), {"error": specialist_summary, "status": "error"}, round_no, task_id)
                 return
             if specialist_status == "changes_requested":
                 append_agent_chat(
@@ -8545,7 +8634,7 @@ async def run_team(project_name: str, project_path: Path, runner_pref: str, mode
             teammate_runner = agent_result_runner(teammate_result, teammate_runner)
             if agent_result_failed(teammate_result):
                 set_task_phase(task_id, "reviewer", "failed", teammate_runner, agent_result_error(teammate_result))
-                await stop_team_after_failed_step(project_name, project_path, "teammate", teammate_runner, teammate_result, round_no)
+                await stop_team_after_failed_step(project_name, project_path, "teammate", teammate_runner, teammate_result, round_no, task_id)
                 return
             set_task_phase(task_id, "reviewer", "done", teammate_runner, f"Round {round_no}")
             teammate_handoff = await process_step_handoff(project_name, project_path, "teammate", round_no, teammate_chat_start)
@@ -8647,7 +8736,7 @@ async def startup() -> None:
 
 async def shutdown() -> None:
     """Invoked from lifespan() — @app.on_event is inert when lifespan= is set."""
-    for project_name, state in list(active_dev_servers.items()):
+    for state in list(active_dev_servers.values()):
         process = state.get("process")
         if process and process.poll() is None:
             await terminate_process_tree(process, timeout=2)
@@ -9288,7 +9377,7 @@ async def promote_idea(idea_id: str, request: IdeaPromoteRequest) -> dict[str, A
     if not brief:
         raise HTTPException(status_code=400, detail="Generate or write a brief before creating a project.")
 
-    project_path = await create_project_from_spec(project_name, brief, "idea", request.stack_profile)
+    await create_project_from_spec(project_name, brief, "idea", request.stack_profile)
 
     def mutate(idea_record: dict[str, Any]) -> None:
         idea_record["brief"] = brief

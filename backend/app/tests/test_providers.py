@@ -19,7 +19,6 @@ from pydantic import ValidationError  # noqa: E402
 
 from backend.app.providers import PROVIDERS, ProviderSlotConfig  # noqa: E402
 
-
 # ── Registry completeness ─────────────────────────────────────────────────────
 
 REQUIRED_KEYS = {

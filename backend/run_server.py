@@ -78,8 +78,9 @@ _resolve_tool(
     Path.home() / ".local" / "bin" / "claude.exe",
 )
 
-import uvicorn
-
+# Imported last on purpose: the sys.path setup above may be what puts uvicorn
+# (from .pythonlibs) on the path in the first place.
+import uvicorn  # noqa: E402
 
 if __name__ == "__main__":
     host = os.environ.get("DUALITH_API_HOST", "127.0.0.1")

@@ -3,7 +3,6 @@
 from .agents import AGENT_SPECS
 from .schema import OrchestrationNode, OrchestrationPlan, PlanValidationResult
 
-
 MAX_NODES = 12
 
 

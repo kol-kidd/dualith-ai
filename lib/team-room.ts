@@ -3,18 +3,15 @@
 
 import type {
   RunnerId,
-  RunRole,
   ActiveRun,
   AgenticChoiceDraft,
   HumanInputOption,
   LaneInfo,
-  TaskEvent,
   SpecialistReview,
   DualithTask,
   TaskPhaseName,
   ProjectRecord,
   ConsoleEntry,
-  AgentResult,
   ChatMessage,
   TeamMessage,
   TeamMessageRole,
@@ -25,9 +22,9 @@ import type {
   TeamState,
   UnifiedMessage,
 } from "../app/_types";
-import { modeLabels, runnerLabels, taskPhaseOrder, taskWorkflowPhases } from "../app/_constants";
+import { runnerLabels, taskPhaseOrder, taskWorkflowPhases } from "../app/_constants";
 import { sanitizeRunnerOutput } from "./runner-output";
-import { newestActiveRun, activeRunTimeValue, eventTimeValue } from "./runs";
+import { newestActiveRun } from "./runs";
 
 export const SPECIALIST_REVIEW_IDS = [
   "architecture_reviewer",

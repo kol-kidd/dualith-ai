@@ -54,16 +54,9 @@ import {
   timestampLabel,
   timestampValue,
   readErrorMessage,
-  activityTimeline,
-  isRunStale,
-  useRunHeartbeat,
-  newestActiveRun,
   latestResultForProject,
-  friendlyRunLabel,
   friendlyResultIntro,
   safeResultBody,
-  progressToneClass,
-  progressDotClass,
   turnRunner,
   useElapsedSeconds,
   formatElapsed,
@@ -205,7 +198,6 @@ export function ChatFeedMessage({
   latest,
   onApprovePlan,
   isLatestPlan,
-  onOpenTeam,
 }: {
   message: ChatMessage;
   project: ProjectRecord | null;
@@ -300,7 +292,6 @@ export function TeamRoom({
   results = [],
   liveRuns = [],
   failures = [],
-  onApprovePlan,
 }: {
   task: DualithTask | null;
   messages: TeamMessage[];
@@ -872,7 +863,7 @@ export function ChatComposer({
       setRunPrompt("");
       setAgenticChoice(null);
       clearAttachments();
-    } catch (error) {
+    } catch {
       setErrorText("Failed to send — check your connection and try again");
     } finally {
       setPendingAction(null);
@@ -896,7 +887,7 @@ export function ChatComposer({
       await onStopChat(project.name);
       // Keep "Stopping…" until the WebSocket confirms the run is gone.
       // pendingAction is cleared by the useEffect below once isRunning goes false.
-    } catch (error) {
+    } catch {
       setErrorText("Failed to stop run — try again or refresh");
       setPendingAction(null);
     }

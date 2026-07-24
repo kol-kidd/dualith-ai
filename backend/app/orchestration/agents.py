@@ -2,7 +2,6 @@
 
 from .schema import AgentSpec
 
-
 AGENT_SPECS: dict[str, AgentSpec] = {
     "ask": AgentSpec(
         id="ask",

@@ -23,11 +23,25 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      # Lint and test are independent: `continue-on-error` keeps a style
+      # regression from skipping the tests behind it (which is how the suite
+      # went unrun for three releases). The gate step below still fails the job.
       - name: Lint
+        id: lint
+        continue-on-error: true
         run: npm run lint
 
       - name: Test
+        id: test
+        continue-on-error: true
         run: npm test
+
+      - name: Gate
+        if: steps.lint.outcome == 'failure' || steps.test.outcome == 'failure'
+        run: |
+          echo "lint: ${{ steps.lint.outcome }}"
+          echo "test: ${{ steps.test.outcome }}"
+          exit 1
 
   backend:
     name: Backend (lint + test)
@@ -40,11 +54,24 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # Dev tools are pinned so a new ruff release cannot turn the build red
+      # on its own.
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest pytest-asyncio ruff
+        run: pip install -r requirements.txt pytest==9.1.1 pytest-asyncio==1.4.0 ruff==0.15.8
 
       - name: Lint
+        id: lint
+        continue-on-error: true
         run: ruff check backend/
 
       - name: Test
+        id: test
+        continue-on-error: true
         run: pytest backend/ -v
+
+      - name: Gate
+        if: steps.lint.outcome == 'failure' || steps.test.outcome == 'failure'
+        run: |
+          echo "lint: ${{ steps.lint.outcome }}"
+          echo "test: ${{ steps.test.outcome }}"
+          exit 1

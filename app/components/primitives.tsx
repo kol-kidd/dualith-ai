@@ -3,7 +3,7 @@
 // Dualith team-room UI components. Extracted from page.tsx.
 
 import React  from "react";
-import type { ReactNode, CSSProperties } from "react";
+import type { ReactNode } from "react";
 import { humanizeRoleKind } from "../../lib/humanize";
 import type { RunnerId, LaneInfo, TeamMessageRole, PixelMascotConfig } from "../_types";
 import {
@@ -14,7 +14,6 @@ import {
   splitOutputBlocks,
   teamRoomRoleKind,
 } from "../_helpers";
-import { TeamConversationPanel, TeamRoom } from "./chat";
 
 export function SectionHeader({ title, meta, children }: { title: string; meta?: string; children?: ReactNode }) {
   return (

@@ -72,15 +72,6 @@ import { CommitPane, ReviewPane } from "./task";
 // Module-level guard so the first mount triggers exactly one auto status refresh.
 let statusAutoRefreshRequested = false;
 
-function UsageStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0 border-r border-line-hard px-3 py-2 last:border-r-0">
-      <div className="truncate text-[10px] uppercase tracking-widest text-faint">{label}</div>
-      <div className="truncate text-xs text-text">{value}</div>
-    </div>
-  );
-}
-
 function QuotaLine({ label, period }: { label: string; period: QuotaPeriod }) {
   const hasLimit = quotaLimitKnown(period);
   const pct = quotaPercentValue(period);
@@ -770,7 +761,6 @@ export function QuotaModal({
 
 export function WorkspaceRightPanel({
   project,
-  results,
   entries,
   commits,
   usage,
@@ -778,14 +768,9 @@ export function WorkspaceRightPanel({
   providerSlots,
   appStatus,
   mobileView,
-  onSendChat,
-  onStopChat,
-  onHumanAnswer,
-  onApprovePlan,
   onDevServerAction,
   onOpenQuota,
   onStatusRefresh,
-  runnerHealth,
   initialTab,
   onClose,
 }: {

@@ -116,8 +116,8 @@ def _run_command(args: dict[str, Any], project_path: Path) -> str:
             text=True,
             timeout=RUN_COMMAND_TIMEOUT,
         )
-    except subprocess.TimeoutExpired:
-        raise ToolError(f"command timed out after {RUN_COMMAND_TIMEOUT}s")
+    except subprocess.TimeoutExpired as exc:
+        raise ToolError(f"command timed out after {RUN_COMMAND_TIMEOUT}s") from exc
     out = proc.stdout or ""
     err = proc.stderr or ""
     body = f"exit={proc.returncode}\n"

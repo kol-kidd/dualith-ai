@@ -41,7 +41,7 @@ export function ProjectPreviewPanel({
     try {
       await onDevServerAction(project.name, action);
       if (action !== "stop") setReloadKey((value) => value + 1);
-    } catch (error) {
+    } catch {
       setErrorText("Preview server action failed — try again");
     } finally {
       setPending(null);

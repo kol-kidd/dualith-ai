@@ -1,8 +1,10 @@
 # Dualith AI — Repository Audit
 
-_Date: 2026-07-24 · Commit: `9f294df` · Scope: full (correctness, security, performance, CI/process, dependencies, structure) · Deliverable: report only, no code changes._
+_Date: 2026-07-24 · Audited at: `9f294df` · Scope: full (correctness, security, performance, CI/process, dependencies, structure)._
 
 This audit supersedes the 2026-06-10 report. A status table for every prior finding is at the end.
+
+> **Remediation status:** the three HIGH findings were fixed in a follow-up commit on this branch; each is marked ✅ **FIXED** below with what changed. The MEDIUM/LOW findings are still open and remain the recommended next steps.
 
 ## Threat model
 
@@ -24,8 +26,10 @@ Dualith is a **local, single-user dev tool**: a Next.js UI + FastAPI backend tha
 
 ## Correctness
 
-### HIGH-1 — `stop_team_after_failed_step()` always raises `NameError`
+### HIGH-1 — `stop_team_after_failed_step()` always raises `NameError` — ✅ FIXED
 `backend/app/main.py:7465-7483`
+
+> **Resolved:** `task_id: str | None` added to the signature and threaded from all six call sites (each already had it in scope). Guarded by `test_main_regressions.py`, which asserts the parameter exists, that the function body loads no name missing at module scope, and that a full invocation sets the task to `failed` without raising. Original analysis below.
 
 `stop_team_after_failed_step` takes six parameters — `project_name`, `project_path`, `role`, `runner`, `result`, `round_no`. Line 7483 references `task_id`, which is neither a parameter nor a module global:
 
@@ -57,7 +61,7 @@ This is the circuit breaker. It has six call sites (7483 aside: lines 8288, 8307
 
 **Fix:** add `task_id: str | None` to the signature and thread it from all six call sites (each already has `task_id` in scope).
 
-### HIGH-2 — Filesystem watcher feedback loop pins the backend
+### HIGH-2 — Filesystem watcher feedback loop pins the backend — ✅ FIXED
 `backend/app/main.py:4862-4873` (`WorkspaceEventHandler.on_any_event`) + `4765-4773` (`broadcast`) + `4672` (`project_record`)
 
 `on_any_event` handles **every** watchdog event type — including the non-mutating `opened` and `closed_no_write` — and schedules a broadcast for each. `broadcast()` then calls `collect_snapshot()` unconditionally, which calls `project_record()` for every registered project, which reads `CLAUDE_TODO.md` (line 3676). That read re-fires `opened` + `closed_no_write`, and the cycle repeats:
@@ -82,8 +86,14 @@ Two independent defects compound here, and both are worth fixing:
 
 **Fix:** filter event types in `on_any_event`; early-return from `broadcast()` when the bus has no subscribers; debounce/coalesce fs-driven snapshots (a 250 ms trailing window would collapse a whole build into one); cache `latest_project_commits` against the repo HEAD.
 
-### HIGH-3 — CI has never passed; the test suites have never run
+> **Resolved:** all four applied — `WATCHED_FS_EVENTS` filters `on_any_event` to `created`/`modified`/`deleted`/`moved`; `broadcast()` returns early when `event_bus.client_count == 0`; a new `schedule_fs_broadcast`/`_fs_broadcast_soon` pair coalesces fs events on a 250 ms trailing window (`DUALITH_FS_BROADCAST_DEBOUNCE_SECONDS`); `latest_project_commits` caches against a `git_head_token` fingerprint read from `.git` without spawning git.
+>
+> Re-measured on the same reproduction — create one project, then idle 15 s with a WebSocket client attached: **4 frames total, 12 KB of logs, `/api/health` still 200** (was ~150,000 events, 26 MB, and an unresponsive server). Feature behaviour verified intact: a 50-file write burst now produces **1** coalesced snapshot instead of ~50, and a single file change still delivers a `FILE_MODIFIED` frame within the debounce window.
+
+### HIGH-3 — CI has never passed; the test suites have never run — ✅ FIXED
 `.github/workflows/ci.yml`
+
+> **Resolved:** `eslint` + `eslint-config-next` + `@eslint/eslintrc` added to `devDependencies`; `.eslintrc.json` migrated to a flat `eslint.config.mjs` and the `lint` script switched from the deprecated `next lint` to `eslint .`; the 51 dead-code errors ESLint found on its first real run were cleared; all 46 ruff findings cleared; `ruff`/`pytest`/`pytest-asyncio` pinned in CI; lint and test now run as independent steps behind a gate, so a style failure can never skip the tests again. Original analysis below.
 
 All three CI runs since the workflow was added (`ff35766`, `9cf7d66`, `9f294df`) ended in `failure`. In every run both jobs fail at the **Lint** step, and because lint fails, the **Test step is `skipped`**. The 80 backend tests and 28 frontend tests added specifically as a safety net have not executed once in CI.
 
@@ -94,7 +104,12 @@ Both suites do pass when run directly — `npx tsc --noEmit` clean, `vitest` 28/
 
 **Fix:** add `eslint` + `eslint-config-next` (or migrate to the ESLint CLI per the codemod) to `devDependencies`; clear the ruff findings; pin `ruff==<version>` in CI so a ruff release can't turn the build red on its own; run lint and test as independent steps (or `continue-on-error` on lint) so a style failure never masks a test failure again.
 
-### MEDIUM-1 — Ruff's remaining real findings
+> **Post-fix state:** `npx tsc --noEmit` clean · `eslint .` 0 errors (2 pre-existing warnings) · `vitest` 28/28 · `ruff check backend/` clean · `pytest backend/` 92/92 (80 existing + 12 new regression tests) · `next build` succeeds.
+
+### MEDIUM-1 — Ruff's remaining real findings — ✅ FIXED
+
+> **Resolved:** all 46 cleared. `AsyncGenerator` imported in `providers.py`; `run_lane` binds `lane_runner`/`lane_model` as defaults so lanes can't pick up a reassigned runner; `zip(..., strict=True)`; dead `project_path` assignment dropped; `raise ... from exc` in `agent_tools`; unused loop variables removed; `l` renamed to `lane`; unused imports deleted and the four late import blocks in `main.py` moved to the top (verified no import cycle — `providers.py`'s `from .main import DUALITH_DIR` is deferred inside a function). `run_server.py`'s late `import uvicorn` keeps a documented `# noqa: E402` because the `sys.path` setup above it is what puts uvicorn on the path. Original detail below.
+
 `ruff check backend/ --statistics` — 46 total. Beyond import hygiene (18 `F401`, 11 `I001`, 5 `E402` — mechanical, `--fix` clears 29), these are behavioural:
 
 | Rule | Location | Issue |
@@ -211,8 +226,8 @@ The existing `PERF_AUDIT_PLAN.md` covers token usage and UI latency; it does not
 ## Structure & testing
 
 - **`backend/app/main.py` is now 10,171 lines** — up from ~6,300 at the last audit despite the extraction of `routing`, `providers`, `prompts`, `runners`, `events`, `brain`, `agent_tools`, and `orchestration/`. The monolith is growing faster than the pieces being carved off it. It holds 250+ top-level functions spanning persistence, orchestration state machines, git operations, quota parsing, scaffolding templates, and the HTTP/WS layer.
-- **`main.py` has zero test coverage.** No test file imports it — `test_providers` and `test_routing` import their modules; `test_brain`, `test_tool_loop`, and `test_agent_tools` import nothing from `backend.app`. So 58% of the Python code, containing every orchestration state machine and all 38 endpoints, is untested. HIGH-1 is exactly the class of bug this leaves uncaught.
-- **Frontend is in good shape.** `app/page.tsx` is down from ~6,200 to 725 lines, helpers are split across `lib/`, and there is genuinely **no `any`** in the TypeScript (verified by grep — the only matches are `overflow-wrap: anywhere` in CSS). Note this is *despite* the ESLint rule never having run. Coverage is thin though: `__tests__/transcript.test.ts` covers `lib/transcript.ts` and nothing else — 12 other `lib/` modules and all components are untested.
+- **`main.py` had zero test coverage.** No test file imported it — `test_providers` and `test_routing` import their modules; `test_brain`, `test_tool_loop`, and `test_agent_tools` import nothing from `backend.app`. So 58% of the Python code, containing every orchestration state machine and all 38 endpoints, was untested. HIGH-1 is exactly the class of bug this leaves uncaught. `test_main_regressions.py` (12 tests) now covers the three fixed defects; the rest of the module remains untested.
+- **Frontend is in good shape.** `app/page.tsx` is down from ~6,200 to 725 lines, helpers are split across `lib/`, and there is genuinely **no `any`** in the TypeScript (verified by grep — the only matches are `overflow-wrap: anywhere` in CSS). Note this held *despite* the ESLint rule never having run — though once ESLint was actually wired up (HIGH-3) it surfaced 51 unused imports and dead locals left behind by the helpers split, all since removed. Coverage is thin though: `__tests__/transcript.test.ts` covers `lib/transcript.ts` and nothing else — 12 other `lib/` modules and all components are untested.
 - **`app/globals.css` is 7,076 lines** — nearly doubled since the last audit. Four themes with repeated token blocks; a candidate for generation from a single token map.
 - **38 `except Exception` blocks in `main.py`, 13 of them completely silent.** `collect_snapshot` (4697) is the worst: it swallows any `project_record` failure, logs nothing, and surfaces the string `"Project snapshot failed."` with no traceback. This audit hit that path on a freshly created project and had to reproduce it out-of-band to learn anything. Every one of these should log at `WARNING` with `exc_info=True`.
 
@@ -224,14 +239,13 @@ The existing `PERF_AUDIT_PLAN.md` covers token usage and UI latency; it does not
 
 ---
 
-## Top 6 remediation priorities
+## Remaining remediation priorities
 
-1. **Fix HIGH-1** — add `task_id` to `stop_team_after_failed_step` and thread it from the six call sites. One-line-per-site change that restores the circuit breaker.
-2. **Fix HIGH-3** — install `eslint`, clear the 46 ruff findings, pin ruff, and reorder CI so a lint failure cannot skip the tests. Nothing else on this list stays fixed until the gate works.
-3. **Fix HIGH-2** — filter watchdog event types, early-return from `broadcast()` with no subscribers, debounce fs-driven snapshots, cache `latest_project_commits`.
-4. **Close MEDIUM-2 and MEDIUM-3** — Origin check + token on `/ws`; gate the RFC-1918 CORS branch behind `LAN_MODE`; drop `allow_credentials`; stop handing the setup token to unauthenticated callers.
-5. **Start testing `main.py`** — begin with the pure functions that already burned you: the team state machine's task-status transitions, `parse_agent_args`, `tracked_project_path`, and the attachment path containment.
-6. **Bump `next`** to clear all three high-severity JS advisories at once.
+Items 1-3 (HIGH-1, HIGH-2, HIGH-3) and MEDIUM-1 are **done** — see the ✅ markers above. What's left, in order:
+
+1. **Close MEDIUM-2 and MEDIUM-3** — Origin check + token on `/ws`; gate the RFC-1918 CORS branch behind `LAN_MODE`; drop `allow_credentials`; stop handing the setup token to unauthenticated callers.
+2. **Keep growing `main.py` coverage** — `test_main_regressions.py` is a start (12 tests, first ever to touch the module). Next most valuable: `parse_agent_args`, `tracked_project_path`, and the attachment path containment.
+3. **Bump `next`** to clear all three high-severity JS advisories at once.
 
 ---
 
@@ -249,14 +263,15 @@ The existing `PERF_AUDIT_PLAN.md` covers token usage and UI latency; it does not
 | LOW-3 | `.env.local` not validated | ❌ **Open** |
 | Deps | postcss advisory via `next` | ❌ **Open and expanded** — 3 high across `next`, `postcss`, `sharp` |
 | Quality | Two ~6k-line monoliths | 🟡 **Half done** — `page.tsx` 6,200 → 725 ✅; `main.py` 6,300 → 10,171 ❌ |
-| Testing | Zero tests | 🟡 **Half done** — 108 tests exist ✅, but CI has never run them and `main.py` has none ❌ |
-| Process | No CI, no linter, no formatter | 🟡 **Half done** — all three configured ✅, none actually enforcing ❌ |
+| Testing | Zero tests | ✅ **Done** — 120 tests (92 backend + 28 frontend), CI now runs them, and `main.py` has its first coverage |
+| Process | No CI, no linter, no formatter | ✅ **Done** — all three configured *and* enforcing; CI green |
 
 ## Reproduction notes
 
 Everything asserted above was executed against commit `9f294df` in this environment (Linux, Python 3.11.15, Node 22, ruff 0.15.8, Starlette 0.46.2):
 
-- `npx tsc --noEmit` → clean · `npm test` → 28/28 · `pytest backend/` → 80/80 · `npm run lint` → **fails, ESLint not installed** · `ruff check backend/` → **46 errors**
+- At `9f294df` (pre-fix): `npx tsc --noEmit` → clean · `npm test` → 28/28 · `pytest backend/` → 80/80 · `npm run lint` → **fails, ESLint not installed** · `ruff check backend/` → **46 errors**
+- After the fixes: `npx tsc --noEmit` → clean · `eslint .` → 0 errors · `npm test` → 28/28 · `pytest backend/` → 92/92 · `ruff check backend/` → clean · `next build` → succeeds
 - HIGH-1 reproduced by direct invocation and confirmed via bytecode inspection (`LOAD_GLOBAL task_id`, no module attribute).
 - HIGH-2 reproduced by starting the backend, creating one empty project, and observing log growth and loss of liveness.
 - HIGH-3 confirmed via the GitHub Actions API: runs 1, 2, and 3 all `conclusion: failure`, Test step `skipped` in both jobs of each.

@@ -3,7 +3,7 @@
 // Consumers can migrate imports to the specific lib/ modules over time.
 
 import React from "react";
-import type { PixelMascotVariant, TeamMessageRole } from "./_types";
+import type { PixelMascotVariant } from "./_types";
 import {
   defaultModelByRunner,
   defaultReasoningByRunner,

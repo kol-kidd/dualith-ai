@@ -31,10 +31,8 @@ import {
 } from "../_helpers";
 import {
   Badge,
-  EmptyState,
   FormattedAgentOutput,
   RunnerMascot,
-  SectionHeader,
 } from "./primitives";
 
 type SetupFormProps = {
@@ -693,4 +691,3 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, providerSlots, 
 
 // Registry (left column)
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars

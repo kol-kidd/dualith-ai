@@ -23,7 +23,6 @@ from backend.app.routing import (  # noqa: E402
     workflow_for_intent,
 )
 
-
 # ── SPECIALIST_REVIEWERS ──────────────────────────────────────────────────────
 
 def test_specialist_reviewers_nonempty() -> None:
