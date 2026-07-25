@@ -51,3 +51,26 @@ def team_round(project_name: str) -> int:
         return int(team.get("round") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+class StatusRefresh:
+    """Singleflight state for the runner quota/status refresh.
+
+    A plain object rather than module globals: the refresh is kicked off from
+    `main` but its state is read by `quota`, and rebinding a module-level name
+    from another module needs `global`, which does not cross module boundaries.
+    """
+
+    lock: asyncio.Lock | None = None
+    task: asyncio.Task[Any] | None = None
+
+    def get_lock(self) -> asyncio.Lock:
+        if self.lock is None:
+            self.lock = asyncio.Lock()
+        return self.lock
+
+    def running(self) -> bool:
+        return bool(self.task and not self.task.done()) or self.get_lock().locked()
+
+
+status_refresh = StatusRefresh()

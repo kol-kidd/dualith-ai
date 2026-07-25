@@ -161,6 +161,19 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+# Upper bound on transcript text handed to callers; the full file stays on disk.
+CHAT_HISTORY_MAX_CHARS = 32_000
+
+
+def read_agent_chat(project_path: Path) -> str:
+    """Tail of AGENT_CHAT.md, bounded so a long run can't blow up a snapshot."""
+    path = agent_chat_path(project_path)
+    if not path.exists():
+        return ""
+    content = path.read_text(encoding="utf-8", errors="replace")
+    return content[-CHAT_HISTORY_MAX_CHARS:] if len(content) > CHAT_HISTORY_MAX_CHARS else content
+
+
 def read_limited_text(path: Path, limit: int = 12_000) -> str:
     if not path.exists():
         return ""

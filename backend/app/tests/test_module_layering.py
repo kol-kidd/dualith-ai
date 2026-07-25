@@ -100,7 +100,7 @@ def test_main_is_shrinking() -> None:
     main.py was 10,538 lines when the split started.
     """
     lines = len((PACKAGE / "main.py").read_text(encoding="utf-8").splitlines())
-    assert lines <= 9_400, (
-        f"main.py is {lines} lines; the ratchet is 9,400. "
+    assert lines <= 6_900, (
+        f"main.py is {lines} lines; the ratchet is 6,900. "
         "If this grew, extract before adding — see AUDIT.md."
     )

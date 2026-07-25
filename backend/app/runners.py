@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 from pathlib import Path
 
@@ -98,3 +99,9 @@ RUNNER_COMMANDS: dict[str, dict] = {
         "mode": "subscription",
     },
 }
+
+
+# Runner CLI args are configured as strings; split them the way a shell would
+# without ever handing the string to a shell.
+def parse_shell_words(raw_args: str) -> list[str]:
+    return [part for part in shlex.split(raw_args, posix=True) if part]

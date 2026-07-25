@@ -1,20 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import glob as glob_module
 import json
 import logging
 import logging.handlers
 import os
 import re
 import secrets
-import shlex
 import shutil
-import socket
 import subprocess
 import sys
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, AsyncGenerator, Literal
 from uuid import uuid4
@@ -39,10 +36,63 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from . import brain as brain_module
+from .attention import (
+    clear_human_input,
+    decision_from_human_answer,
+    extract_verdict,
+    infer_verdict_from_language,
+    parse_claude_todos,
+    parse_human_input,
+    parse_team_signoff,
+    project_attention,
+    review_observation_count,
+    write_human_answer,
+    write_human_question,
+)
+from .dev_servers import (
+    DevServerStartRequest,
+    command_display,
+    dev_server_snapshot,
+    dualith_reserved_ports,
+    package_scripts,
+    read_package_json,
+    start_project_dev_server,
+    stop_project_dev_server,
+    terminate_process_tree,
+)
 from .dialogue import HANDOFF_PROMPT_TRAILER, Handoff, bounce_prompt, parse_handoff
-from .env import INVALID_ENV_VALUES, env_float, env_int
+from .env import (
+    DUALITH_API_HOST,
+    DUALITH_API_PORT,
+    INVALID_ENV_VALUES,
+    LAN_MODE,
+    PROJECT_PREVIEW_PORT_START,
+    app_status_snapshot,
+    env_float,
+    env_int,
+)
 from .events import event_bus, narration_for
 from .failures import translate as translate_failure
+from .git_ops import (
+    append_checkpoint_note,
+    backend_git_checkpoint,
+    git_status_porcelain,
+    latest_project_commits,
+    perform_backend_git_operation,
+    run_git,
+    update_task_ownership_from_git,
+)
+from .ideas import (
+    append_idea_message,
+    idea_conversation_text,
+    idea_title_from_text,
+    mutate_idea,
+    normalize_idea_record,
+    read_ideas,
+    require_idea,
+    suggested_project_name,
+    write_ideas,
+)
 from .prompts import (
     ARCHITECT_PROMPT,
     ARCHITECTURE_REVIEWER_PROMPT,
@@ -83,6 +133,37 @@ from .providers import (
     save_provider_config,
     test_provider_slot,
 )
+from .quota import (
+    RESULT_LIMIT,
+    RUNNER_POLICIES,
+    STATUS_OUTPUT_LIMIT,
+    STATUS_TIMEOUT_SECONDS,
+    _month_start_hours,
+    _next_reset_label,
+    claude_rate_limits_fresh,
+    codex_rate_limit_period,
+    default_status_cache,
+    derived_limit_from_percentage,
+    finish_usage_record,
+    new_usage_record,
+    parse_rate_limit_percentage,
+    parse_status_limits,
+    parse_timestamp,
+    quota_period_headroom,
+    quota_snapshot,
+    read_claude_rate_limits,
+    read_claude_usage_from_jsonl,
+    read_codex_rate_limits_from_app_server,
+    read_codex_usage_from_jsonl,
+    read_status_cache,
+    status_cache_fresh,
+    status_entry_has_period_data,
+    statusline_reset_label,
+    update_usage_metrics,
+    usage_snapshot,
+    write_quota_settings,
+    write_status_cache,
+)
 from .routing import (
     ORCHESTRATION_WORKFLOWS,
     PIPELINE_MAX_ITERATIONS,
@@ -92,7 +173,6 @@ from .routing import (
     SPECIALIST_REVIEWERS,
     TEAM_MAX_ROUNDS,
     _is_obvious_question,
-    audit_passed,
     classify_orchestration_intent,
     classify_orchestration_intent_async,
     clean_route_mode,
@@ -100,7 +180,6 @@ from .routing import (
     dynamic_chat_workflow,
     effective_max_rounds,
     estimated_runner_calls_for_task,
-    feedback_verdict_summary,
     is_direct_git_intent,
     planned_agents_for_task,
     preflight_task,
@@ -108,7 +187,7 @@ from .routing import (
     workflow_for_agent,
     workflow_for_intent,
 )
-from .runners import RUNNER_COMMANDS
+from .runners import RUNNER_COMMANDS, parse_shell_words
 from .runtime import (
     active_agent_runs,
     active_dev_servers,
@@ -118,7 +197,7 @@ from .runtime import (
     pipeline_resume_events,
     plan_approval_events,
     plan_approval_results,
-    project_commits_cache,
+    status_refresh,
     team_resume_events,
     watch_handles,
 )
@@ -127,8 +206,8 @@ from .scaffolding import (
     scaffold_project_stack,
 )
 from .store import (
+    CHAT_HISTORY_MAX_CHARS,
     DEFAULT_QUOTA_SETTINGS,
-    DEFAULT_STATUS_CACHE,
     DUALITH_DIR,
     PROJECTS_ROOT,
     REGISTRY_PATH,
@@ -138,26 +217,22 @@ from .store import (
     architecture_path,
     central_memory_path,
     chat_history_path,
-    claude_rate_limits_path,
     decisions_path,
     display_path,
     ensure_dualith_store,
     feedback_path,
     human_input_path,
-    ideas_path,
     lessons_path,
     plan_path,
     project_memory_doc_path,
     project_memory_path,
-    quota_path,
+    read_agent_chat,
     read_json_object,
     read_limited_text,
     relative_path,
     result_file_path,
     results_path,
     round_context_path,
-    status_path,
-    usage_path,
     utc_now,
     workspace_state_path,
     write_json_atomic,
@@ -274,12 +349,6 @@ CODE_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".py", ".html", ".css", ".md"}
 SKIP_IMPORT_DIRS = {".git", "node_modules", ".next", "dist", "build", ".venv", "__pycache__", ".cache", ".turbo"}
 CHECKPOINT_EXCLUDE_PATHS = (*sorted(SKIP_IMPORT_DIRS - {".git"}), ".dualith", ".dualith-result")
 CHECKPOINT_MODES = {"builder", "lead"}
-USAGE_RUN_LIMIT = 500
-STATUS_OUTPUT_LIMIT = 8_000
-STATUS_TIMEOUT_SECONDS = env_int("DUALITH_STATUS_TIMEOUT_SECONDS", 15)
-STATUS_REFRESH_TTL_SECONDS = env_int("DUALITH_STATUS_REFRESH_TTL_SECONDS", 60)
-CLAUDE_STATUSLINE_TTL_SECONDS = env_int("DUALITH_CLAUDE_STATUSLINE_TTL_SECONDS", 1800)
-CODEX_APP_SERVER_TIMEOUT_SECONDS = env_int("DUALITH_CODEX_APP_SERVER_TIMEOUT_SECONDS", STATUS_TIMEOUT_SECONDS)
 AGENT_IDLE_TIMEOUT_SECONDS = env_int("DUALITH_AGENT_IDLE_TIMEOUT_SECONDS", 600)
 # Ceiling on how many projects may be mid-run at once. Each project is already
 # capped at one orchestration; this bounds the total so repeated start calls
@@ -370,7 +439,6 @@ NUMERIC_DUALITH_ENV_VARS = frozenset({
 WATCHED_FS_EVENTS = frozenset({"created", "modified", "deleted", "moved"})
 # Trailing window used to collapse a burst of filesystem events into one snapshot.
 FS_BROADCAST_DEBOUNCE_SECONDS = env_float("DUALITH_FS_BROADCAST_DEBOUNCE_SECONDS", 0.25)
-RESULT_LIMIT = 100
 RESULT_CONTENT_MAX_CHARS = 32_000
 APP_FEATURES = [
     "status-refresh",
@@ -395,13 +463,6 @@ APP_FEATURES = [
     "lean-team-mode",
     "smart-stack-scaffold",
 ]
-DUALITH_WEB_PORT = env_int("DUALITH_WEB_PORT", 3200)
-DUALITH_API_PORT = env_int("DUALITH_API_PORT", 4200)
-DUALITH_WEB_HOST = os.environ.get("DUALITH_WEB_HOST", "127.0.0.1")
-DUALITH_API_HOST = os.environ.get("DUALITH_API_HOST", "127.0.0.1")
-PROJECT_PREVIEW_PORT_START = env_int("DUALITH_PROJECT_PREVIEW_PORT_START", 5173)
-PROJECT_PREVIEW_HOST = os.environ.get("DUALITH_PROJECT_PREVIEW_HOST", "127.0.0.1")
-LAN_MODE = os.environ.get("DUALITH_LAN_MODE", "").lower() in {"1", "true", "yes", "on"}
 DEFAULT_RUNNER_MODELS = {
     "codex": "gpt-5.5",
     "claude": "sonnet",
@@ -410,29 +471,6 @@ DEFAULT_RUNNER_REASONING = {
     "codex": "extra-high",
     "claude": "medium",
 }
-RUNNER_POLICIES = {
-    "auto": {
-        "label": "Auto",
-        "description": "Use the default implementation runner with the configured review runner.",
-    },
-    "codex-heavy": {
-        "label": "Codex-heavy",
-        "description": "Use Codex as the main implementation runner and the configured review runner.",
-    },
-    "claude-heavy": {
-        "label": "Claude-heavy",
-        "description": "Use Claude as the main implementation runner and the configured review runner.",
-    },
-    "balanced": {
-        "label": "Balanced",
-        "description": "Pick the runner with the most quota headroom, then pair it with the other runner.",
-    },
-    "eco": {
-        "label": "Eco team",
-        "description": "Route heavy reasoning (lead, architect, planner) to the pricier slot and light roles (tester, summarizer, reviewers) to the cheaper one.",
-    },
-}
-
 # Roles that drive output quality and get the premium (pricier) slot under the
 # "eco" policy; everything else (tester, summarizer, reviewers/critics) runs on
 # the cheaper slot. See eco_team_pair() / eco_runner_for_role().
@@ -470,20 +508,10 @@ CLI_MODEL_PRICING: dict[str, float] = {
     "mini": 1e-6,
     "nano": 0.5e-6,
 }
-QUOTA_INTEGER_SETTINGS = {
-    "reserve_percent",
-    "codex_monthly_tokens",
-    "claude_five_hour_tokens",
-    "claude_weekly_tokens",
-}
 IMPLEMENTATION_AGENTS = {"ask", "builder", "lead", "team", "git"}
 
-IDEA_LIMIT = 100
-IDEA_MESSAGE_LIMIT = 80
 observer: Observer | None = None
 event_loop: asyncio.AbstractEventLoop | None = None
-status_refresh_lock: asyncio.Lock | None = None
-status_refresh_task: asyncio.Task[tuple[dict[str, Any], str]] | None = None
 runner_health: dict[str, dict[str, Any]] = {
     "codex": {"ready": False, "version": "", "error": ""},
     "claude": {"ready": False, "version": "", "error": ""},
@@ -725,11 +753,6 @@ class IdeaPromoteRequest(BaseModel):
     stack_profile: Literal["smart", "next-web", "fastify-api", "fastapi-api", "none"] = "smart"
 
 
-class DevServerStartRequest(BaseModel):
-    command: str = Field(default="", max_length=500)
-    port: int = Field(default=0, ge=0, le=65535)
-
-
 SPEC_REFINE_TIMEOUT_SECONDS = env_int("DUALITH_SPEC_REFINE_TIMEOUT", 120)
 IDEA_RUN_TIMEOUT_SECONDS = env_int("DUALITH_IDEA_RUN_TIMEOUT", 300)
 IDEA_CLAUDE_TOOLS = os.environ.get("DUALITH_IDEA_CLAUDE_TOOLS", "WebSearch,WebFetch")
@@ -885,66 +908,6 @@ app.add_middleware(
 )
 
 
-def dualith_reserved_ports() -> set[int]:
-    return {port for port in (DUALITH_WEB_PORT, DUALITH_API_PORT) if port > 0}
-
-
-def port_is_free(port: int, host: str = PROJECT_PREVIEW_HOST) -> bool:
-    if port in dualith_reserved_ports():
-        return False
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.25)
-        try:
-            sock.bind((host, port))
-            return True
-        except OSError:
-            return False
-
-
-def next_project_port(preferred: int = 0) -> int:
-    start = preferred if preferred > 0 else PROJECT_PREVIEW_PORT_START
-    for port in range(start, 65536):
-        if port_is_free(port):
-            return port
-    raise HTTPException(status_code=409, detail="No free project preview port found.")
-
-
-def local_lan_ip() -> str:
-    configured = os.environ.get("DUALITH_LAN_IP", "").strip()
-    if configured:
-        return configured
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            ip = sock.getsockname()[0]
-            if ip and not ip.startswith("127."):
-                return ip
-    except OSError:
-        pass
-    try:
-        hostname = socket.gethostname()
-        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            ip = str(info[4][0])
-            if ip.startswith(("10.", "192.168.")) or re.match(r"^172\.(1[6-9]|2\d|3[01])\.", ip):
-                return ip
-    except OSError:
-        pass
-    return "127.0.0.1"
-
-
-def app_status_snapshot() -> dict[str, Any]:
-    lan_ip = local_lan_ip()
-    api_host = lan_ip if LAN_MODE else DUALITH_API_HOST
-    web_host = lan_ip if LAN_MODE else DUALITH_WEB_HOST
-    return {
-        "lan_mode": LAN_MODE,
-        "lan_ip": lan_ip if LAN_MODE else "",
-        "web_url": f"http://{web_host}:{DUALITH_WEB_PORT}",
-        "api_url": f"http://{api_host}:{DUALITH_API_PORT}",
-        "phone_url": f"http://{lan_ip}:{DUALITH_WEB_PORT}" if LAN_MODE else "",
-    }
-
-
 def orchestration_manifest() -> dict[str, Any]:
     agents = []
     for agent_id, config in AGENT_REGISTRY.items():
@@ -989,11 +952,7 @@ def orchestration_manifest() -> dict[str, Any]:
 
 
 # HITL marker prefixes (kept as exact strings per spec).
-QUESTION_PREFIX = "🤖 QUESTION:"
-ANSWER_PREFIX = "✍️ ANSWER:"
-
 # Cap CHAT_HISTORY.md payload streamed to the UI so a long transcript can't bloat snapshots.
-CHAT_HISTORY_MAX_CHARS = 32_000
 # Smaller cap for the history tail *injected into agent prompts* — every agent call
 # re-sends this prefix, so keeping it tight is the single biggest token saver. The
 # Summarizer already distills durable context into PROJECT_MEMORY.md, so the raw
@@ -1037,26 +996,6 @@ def write_registry(projects: list[dict[str, str]]) -> None:
     ensure_dualith_store()
     payload = {"projects": sorted(projects, key=lambda item: item["name"].lower())}
     write_json_atomic(REGISTRY_PATH, payload)
-
-
-def read_usage_runs() -> list[dict[str, Any]]:
-    ensure_dualith_store()
-    try:
-        data = json.loads(usage_path().read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        data = {"runs": []}
-
-    runs = data.get("runs", [])
-    if not isinstance(runs, list):
-        return []
-
-    return [run for run in runs if isinstance(run, dict)][-USAGE_RUN_LIMIT:]
-
-
-def write_usage_runs(runs: list[dict[str, Any]]) -> None:
-    ensure_dualith_store()
-    payload = {"runs": runs[-USAGE_RUN_LIMIT:]}
-    write_json_atomic(usage_path(), payload)
 
 
 def read_results() -> list[dict[str, Any]]:
@@ -1113,174 +1052,6 @@ def typed_console_events() -> list[dict[str, str]]:
         }
         for entry in event_bus.console_events
     ]
-
-
-def idea_title_from_text(value: str) -> str:
-    for line in value.splitlines():
-        cleaned = line.strip().strip("#*- ")
-        if cleaned:
-            return cleaned[:96]
-    return "Untitled idea"
-
-
-def suggested_project_name(value: str) -> str:
-    base = value.strip().lower()
-    base = re.sub(r"[^a-z0-9._-]+", "-", base)
-    base = re.sub(r"-{2,}", "-", base).strip("-._")
-    if not base:
-        base = "project-idea"
-    if len(base) > 42:
-        base = base[:42].rstrip("-._")
-    return base or "project-idea"
-
-
-def normalize_idea_message(item: dict[str, Any]) -> dict[str, str] | None:
-    role = str(item.get("role", "")).strip().lower()
-    if role not in {"user", "assistant", "system"}:
-        return None
-    content = str(item.get("content", "")).strip()
-    if not content:
-        return None
-    return {
-        "id": str(item.get("id", "")) or uuid4().hex,
-        "role": role,
-        "content": content,
-        "runner": str(item.get("runner", "")),
-        "timestamp": str(item.get("timestamp", "")) or utc_now(),
-    }
-
-
-def normalize_idea_record(item: dict[str, Any]) -> dict[str, Any]:
-    now = utc_now()
-    raw_idea = str(item.get("raw_idea", "")).strip()
-    title = str(item.get("title", "")).strip() or idea_title_from_text(raw_idea)
-    status = str(item.get("status", "draft")).strip().lower()
-    if status not in {"draft", "planning", "briefed", "promoted"}:
-        status = "draft"
-    raw_messages = item.get("messages", [])
-    if not isinstance(raw_messages, list):
-        raw_messages = []
-    messages = [
-        message for raw in raw_messages
-        if isinstance(raw, dict) and (message := normalize_idea_message(raw))
-    ][-IDEA_MESSAGE_LIMIT:]
-    suggested = str(item.get("suggested_name", "")).strip() or suggested_project_name(title)
-    if not SAFE_NAME.fullmatch(suggested):
-        suggested = suggested_project_name(suggested)
-    return {
-        "id": str(item.get("id", "")) or uuid4().hex,
-        "title": title[:120],
-        "raw_idea": raw_idea,
-        "status": status,
-        "messages": messages,
-        "brief": str(item.get("brief", "")),
-        "suggested_name": suggested[:80],
-        "promoted_project": str(item.get("promoted_project", "")),
-        "created_at": str(item.get("created_at", "")) or now,
-        "updated_at": str(item.get("updated_at", "")) or now,
-    }
-
-
-def read_ideas() -> list[dict[str, Any]]:
-    ensure_dualith_store()
-    try:
-        data = json.loads(ideas_path().read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        data = {"ideas": []}
-    ideas = data.get("ideas", [])
-    if not isinstance(ideas, list):
-        return []
-    return [normalize_idea_record(item) for item in ideas if isinstance(item, dict)][-IDEA_LIMIT:]
-
-
-def write_ideas(ideas: list[dict[str, Any]]) -> None:
-    ensure_dualith_store()
-    normalized = [normalize_idea_record(idea) for idea in ideas]
-    payload = {
-        "ideas": sorted(normalized, key=lambda item: str(item.get("updated_at", "")), reverse=True)[:IDEA_LIMIT]
-    }
-    write_json_atomic(ideas_path(), payload)
-
-
-def idea_by_id(idea_id: str) -> dict[str, Any] | None:
-    for idea in read_ideas():
-        if idea["id"] == idea_id:
-            return idea
-    return None
-
-
-def require_idea(idea_id: str) -> dict[str, Any]:
-    idea = idea_by_id(idea_id)
-    if not idea:
-        raise HTTPException(status_code=404, detail="Idea not found.")
-    return idea
-
-
-def mutate_idea(idea_id: str, mutate: Any) -> dict[str, Any]:
-    ideas = read_ideas()
-    found: dict[str, Any] | None = None
-    for idea in ideas:
-        if idea["id"] == idea_id:
-            mutate(idea)
-            idea["updated_at"] = utc_now()
-            found = normalize_idea_record(idea)
-            break
-    if not found:
-        raise HTTPException(status_code=404, detail="Idea not found.")
-    write_ideas(ideas)
-    return found
-
-
-def append_idea_message(idea_id: str, role: str, content: str, runner: str = "") -> dict[str, Any]:
-    def mutate(idea: dict[str, Any]) -> None:
-        messages = list(idea.get("messages", []))
-        messages.append({
-            "id": uuid4().hex,
-            "role": role,
-            "content": content.strip(),
-            "runner": runner,
-            "timestamp": utc_now(),
-        })
-        idea["messages"] = messages[-IDEA_MESSAGE_LIMIT:]
-        if role == "user" and idea.get("status") == "draft":
-            idea["status"] = "planning"
-
-    return mutate_idea(idea_id, mutate)
-
-
-def idea_conversation_text(idea: dict[str, Any]) -> str:
-    lines: list[str] = []
-    for message in idea.get("messages", [])[-24:]:
-        role = str(message.get("role", "message")).title()
-        content = str(message.get("content", "")).strip()
-        if content:
-            lines.append(f"{role}: {content}")
-    return "\n\n".join(lines) or "(No conversation yet.)"
-
-
-def update_task_ownership_from_git(task_id: str | None, project_path: Path, owner: str = "Lead") -> None:
-    if not task_id or not (project_path / ".git").exists():
-        return
-    code, output = run_git_sync(project_path, ("status", "--short"))
-    if code != 0:
-        return
-    _, paths = git_status_paths(output)
-    if not paths:
-        return
-
-    def mutate(task: dict[str, Any]) -> None:
-        ownership = task.setdefault("ownership", {"mode": "sequential", "claimed_paths": []})
-        claimed = ownership.get("claimed_paths", [])
-        if not isinstance(claimed, list):
-            claimed = []
-        existing = {str(item.get("path", "")) for item in claimed if isinstance(item, dict)}
-        for path in paths[:40]:
-            if path in existing:
-                continue
-            claimed.append({"path": path, "owner": owner, "phase": "lead", "claimed_at": utc_now()})
-        ownership["claimed_paths"] = claimed[-80:]
-
-    update_task(task_id, mutate)
 
 
 def taskable_workflow(workflow_id: str) -> bool:
@@ -1437,411 +1208,6 @@ async def finish_task_and_start_next(
     await start_next_queued_task(project_name)
 
 
-def read_quota_settings() -> dict[str, Any]:
-    ensure_dualith_store()
-    try:
-        data = json.loads(quota_path().read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        data = {}
-
-    settings = dict(DEFAULT_QUOTA_SETTINGS)
-    if isinstance(data, dict):
-        policy = str(data.get("runner_policy", settings["runner_policy"]))
-        settings["runner_policy"] = policy if policy in RUNNER_POLICIES else DEFAULT_QUOTA_SETTINGS["runner_policy"]
-        for key in QUOTA_INTEGER_SETTINGS:
-            try:
-                settings[key] = max(0, int(data.get(key, settings[key])))
-            except (TypeError, ValueError):
-                settings[key] = DEFAULT_QUOTA_SETTINGS[key]
-
-    settings["reserve_percent"] = min(90, max(0, settings["reserve_percent"]))
-    return settings
-
-
-def write_quota_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    payload = dict(DEFAULT_QUOTA_SETTINGS)
-    policy = str(settings.get("runner_policy", payload["runner_policy"]))
-    payload["runner_policy"] = policy if policy in RUNNER_POLICIES else DEFAULT_QUOTA_SETTINGS["runner_policy"]
-    for key in QUOTA_INTEGER_SETTINGS:
-        try:
-            payload[key] = max(0, int(settings.get(key, payload[key])))
-        except (TypeError, ValueError):
-            payload[key] = DEFAULT_QUOTA_SETTINGS[key]
-
-    payload["reserve_percent"] = min(90, max(0, payload["reserve_percent"]))
-    ensure_dualith_store()
-    write_json_atomic(quota_path(), payload)
-    return payload
-
-
-def default_status_cache() -> dict[str, Any]:
-    return json.loads(json.dumps(DEFAULT_STATUS_CACHE))
-
-
-def read_status_cache() -> dict[str, Any]:
-    ensure_dualith_store()
-    try:
-        data = json.loads(status_path().read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        data = {}
-
-    cache = default_status_cache()
-    if not isinstance(data, dict):
-        return cache
-
-    for runner, default_entry in cache.items():
-        entry = data.get(runner, {})
-        if not isinstance(entry, dict):
-            continue
-        parsed = entry.get("parsed", default_entry["parsed"])
-        if not isinstance(parsed, dict):
-            parsed = default_entry["parsed"]
-        cache[runner] = {
-            "checked_at": str(entry.get("checked_at", "")),
-            "status": str(entry.get("status", default_entry["status"])),
-            "raw": str(entry.get("raw", ""))[-STATUS_OUTPUT_LIMIT:],
-            "error": str(entry.get("error", ""))[-1000:],
-            "exit_code": entry.get("exit_code"),
-            "parsed": {**default_entry["parsed"], **parsed},
-        }
-
-    return cache
-
-
-def write_status_cache(cache: dict[str, Any]) -> dict[str, Any]:
-    payload = default_status_cache()
-    for runner, default_entry in payload.items():
-        entry = cache.get(runner, {})
-        if not isinstance(entry, dict):
-            continue
-        parsed = entry.get("parsed", default_entry["parsed"])
-        if not isinstance(parsed, dict):
-            parsed = default_entry["parsed"]
-        payload[runner] = {
-            "checked_at": str(entry.get("checked_at", "")),
-            "status": str(entry.get("status", default_entry["status"])),
-            "raw": str(entry.get("raw", ""))[-STATUS_OUTPUT_LIMIT:],
-            "error": str(entry.get("error", ""))[-1000:],
-            "exit_code": entry.get("exit_code"),
-            "parsed": {**default_entry["parsed"], **parsed},
-        }
-
-    ensure_dualith_store()
-    write_json_atomic(status_path(), payload)
-    return payload
-
-
-NUMBER_PATTERN = r"(\d+(?:,\d{3})*(?:\.\d+)?)\s*([kKmMbB]?)"
-PAIR_RE = re.compile(rf"{NUMBER_PATTERN}\s*(?:tokens?|tok)?\s*(?:/|of)\s*{NUMBER_PATTERN}\s*(?:tokens?|tok)?", re.IGNORECASE)
-USED_RE = re.compile(rf"\bused\b[^0-9]{{0,40}}{NUMBER_PATTERN}", re.IGNORECASE)
-LIMIT_RE = re.compile(rf"\blimit\b[^0-9]{{0,40}}{NUMBER_PATTERN}", re.IGNORECASE)
-
-
-def parse_status_number(value: str, suffix: str = "") -> int:
-    normalized = value.replace(",", "")
-    amount = float(normalized)
-    multiplier = {"": 1, "k": 1_000, "m": 1_000_000, "b": 1_000_000_000}[suffix.lower()]
-    return int(amount * multiplier)
-
-
-def normalize_status_line(line: str) -> str:
-    cleaned = re.sub(r"\b5\s*[- ]?(?:h|hour|hours)\b", "five_hour", line, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b\d+(?:\.\d+)?\s*%", "", cleaned)
-    return cleaned
-
-
-def extract_status_period(line: str) -> dict[str, int] | None:
-    cleaned = normalize_status_line(line)
-    pair = PAIR_RE.search(cleaned)
-    if pair:
-        used = parse_status_number(pair.group(1), pair.group(2))
-        limit = parse_status_number(pair.group(3), pair.group(4))
-        if limit > 0:
-            return {"used": used, "limit": limit}
-
-    used_match = USED_RE.search(cleaned)
-    limit_matches = list(LIMIT_RE.finditer(cleaned))
-    limit_match = limit_matches[-1] if limit_matches else None
-    if used_match and limit_match:
-        used = parse_status_number(used_match.group(1), used_match.group(2))
-        limit = parse_status_number(limit_match.group(1), limit_match.group(2))
-        if limit > 0:
-            return {"used": used, "limit": limit}
-
-    return None
-
-
-def status_line_matches(line: str, *keywords: str) -> bool:
-    normalized = normalize_status_line(line).lower()
-    return all(keyword in normalized for keyword in keywords)
-
-
-def parse_status_limits(runner: str, raw_output: str) -> dict[str, Any]:
-    parsed: dict[str, Any]
-    if runner == "codex":
-        parsed = {"monthly": None}
-    else:
-        parsed = {"five_hour": None, "weekly": None}
-
-    for line in raw_output.splitlines():
-        if runner == "codex" and status_line_matches(line, "month"):
-            parsed["monthly"] = parsed["monthly"] or extract_status_period(line)
-        elif runner == "claude":
-            if status_line_matches(line, "five_hour"):
-                parsed["five_hour"] = parsed["five_hour"] or extract_status_period(line)
-            if status_line_matches(line, "week"):
-                parsed["weekly"] = parsed["weekly"] or extract_status_period(line)
-
-    return parsed
-
-
-def optional_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def codex_rate_limit_snapshot(response: dict[str, Any]) -> dict[str, Any]:
-    result = response.get("result", {})
-    if not isinstance(result, dict):
-        return {}
-
-    snapshot: Any = None
-    by_limit_id = result.get("rateLimitsByLimitId")
-    if isinstance(by_limit_id, dict):
-        snapshot = by_limit_id.get("codex")
-    if not isinstance(snapshot, dict):
-        snapshot = result.get("rateLimits")
-    if not isinstance(snapshot, dict):
-        return {}
-
-    primary = snapshot.get("primary")
-    primary = primary if isinstance(primary, dict) else {}
-    used_percentage = parse_rate_limit_percentage(primary.get("usedPercent"))
-    return {
-        "limit_id": str(snapshot.get("limitId") or ""),
-        "limit_name": str(snapshot.get("limitName") or ""),
-        "used_percentage": used_percentage,
-        "window_minutes": optional_int(primary.get("windowDurationMins")),
-        "resets_at": primary.get("resetsAt"),
-        "plan_type": str(snapshot.get("planType") or ""),
-        "rate_limit_reached_type": str(snapshot.get("rateLimitReachedType") or ""),
-    }
-
-
-async def stop_codex_app_server(process: asyncio.subprocess.Process | None) -> str:
-    if process is None:
-        return ""
-
-    try:
-        if process.stdin and not process.stdin.is_closing():
-            process.stdin.close()
-    except Exception:
-        pass
-
-    if process.returncode is None:
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=2)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-
-    if process.stderr:
-        try:
-            data = await asyncio.wait_for(process.stderr.read(), timeout=1)
-            return data.decode("utf-8", errors="replace")[-1000:]
-        except Exception:
-            return ""
-    return ""
-
-
-async def read_codex_rate_limits_from_app_server() -> dict[str, Any]:
-    command = str(RUNNER_COMMANDS["codex"]["status_command"])
-    raw_args = os.environ.get("DUALITH_CODEX_APP_SERVER_ARGS", "app-server")
-    args = parse_shell_words(raw_args) or ["app-server"]
-    timeout_seconds = max(1, CODEX_APP_SERVER_TIMEOUT_SECONDS)
-    process: asyncio.subprocess.Process | None = None
-    stdout_lines: list[str] = []
-    result: dict[str, Any] = {
-        "status": "error",
-        "snapshot": {},
-        "raw": "",
-        "error": "Codex app-server did not return rate limits.",
-    }
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            command,
-            *args,
-            cwd=ROOT_DIR,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        if not process.stdin or not process.stdout:
-            result["error"] = "Codex app-server stdio was not available."
-            return result
-
-        messages = (
-            {
-                "id": 0,
-                "method": "initialize",
-                "params": {
-                    "clientInfo": {
-                        "name": "dualith",
-                        "title": "Dualith",
-                        "version": "0.1.0",
-                    },
-                    "capabilities": {"experimentalApi": True},
-                },
-            },
-            {"method": "initialized", "params": {}},
-            {"id": 2, "method": "account/rateLimits/read", "params": None},
-        )
-        for message in messages:
-            process.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
-        await process.stdin.drain()
-
-        deadline = datetime.now(timezone.utc).timestamp() + timeout_seconds
-        while True:
-            remaining = deadline - datetime.now(timezone.utc).timestamp()
-            if remaining <= 0:
-                result["error"] = f"Codex app-server rate-limit read timed out after {timeout_seconds}s."
-                break
-            line_bytes = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
-            if not line_bytes:
-                result["error"] = "Codex app-server closed before returning rate limits."
-                break
-            line = line_bytes.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            stdout_lines.append(line)
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(message, dict) or message.get("id") != 2:
-                continue
-            if isinstance(message.get("error"), dict):
-                result["error"] = str(message["error"].get("message") or message["error"])
-                break
-            snapshot = codex_rate_limit_snapshot(message)
-            if snapshot:
-                result = {"status": "ok", "snapshot": snapshot, "raw": json.dumps({"rateLimits": snapshot})}
-            else:
-                result["error"] = "Codex app-server response did not include Codex rate limits."
-            break
-    except FileNotFoundError:
-        result["error"] = f"command not found: {command}"
-    except asyncio.TimeoutError:
-        result["error"] = f"Codex app-server rate-limit read timed out after {timeout_seconds}s."
-    except Exception as exc:
-        result["error"] = f"{type(exc).__name__}: {exc}"
-    finally:
-        stderr = await stop_codex_app_server(process)
-        if stderr and result["status"] != "ok":
-            result["error"] = f"{result['error']} :: {stderr}"
-        if stdout_lines and not result.get("raw"):
-            result["raw"] = "\n".join(stdout_lines)[-STATUS_OUTPUT_LIMIT:]
-
-    result["error"] = str(result.get("error", ""))[-1000:]
-    result["raw"] = str(result.get("raw", ""))[-STATUS_OUTPUT_LIMIT:]
-    return result
-
-
-def codex_rate_limit_period(snapshot: dict[str, Any], used: int, fallback_reset: str) -> dict[str, Any]:
-    period: dict[str, Any] = {"used": used, "limit": 0, "resets": fallback_reset}
-    if not snapshot:
-        return period
-
-    used_percentage = snapshot.get("used_percentage")
-    parsed_percentage = parse_rate_limit_percentage(used_percentage)
-    if parsed_percentage is not None:
-        period["used_percentage"] = parsed_percentage
-    window_minutes = optional_int(snapshot.get("window_minutes"))
-    if window_minutes is not None:
-        period["window_minutes"] = window_minutes
-    if snapshot.get("plan_type"):
-        period["plan_type"] = str(snapshot.get("plan_type"))
-    if snapshot.get("rate_limit_reached_type"):
-        period["rate_limit_reached_type"] = str(snapshot.get("rate_limit_reached_type"))
-
-    limit = derived_limit_from_percentage(used, parsed_percentage)
-    if limit <= 0:
-        return period
-
-    period["limit"] = limit
-    period["resets"] = statusline_reset_label(snapshot.get("resets_at"), fallback_reset)
-    period["limit_source"] = "rate_limit"
-    return period
-
-
-def read_claude_rate_limits() -> dict[str, Any]:
-    try:
-        data = json.loads(claude_rate_limits_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def claude_rate_limits_fresh(cache: dict[str, Any]) -> bool:
-    if CLAUDE_STATUSLINE_TTL_SECONDS <= 0:
-        return True
-    captured_at = parse_timestamp(str(cache.get("captured_at", "")))
-    if not captured_at:
-        return False
-    if captured_at.tzinfo is None:
-        captured_at = captured_at.replace(tzinfo=timezone.utc)
-    age_seconds = (datetime.now(timezone.utc) - captured_at).total_seconds()
-    return age_seconds <= CLAUDE_STATUSLINE_TTL_SECONDS
-
-
-def parse_rate_limit_percentage(value: Any) -> float | None:
-    if isinstance(value, (int, float)):
-        percentage = float(value)
-    elif isinstance(value, str):
-        match = re.search(r"-?\d+(?:\.\d+)?", value)
-        if not match:
-            return None
-        percentage = float(match.group(0))
-    else:
-        return None
-
-    if percentage <= 0 or percentage > 1000:
-        return None
-    return percentage
-
-
-def derived_limit_from_percentage(used: int, used_percentage: Any) -> int:
-    percentage = parse_rate_limit_percentage(used_percentage)
-    if used <= 0 or percentage is None:
-        return 0
-    return max(1, int((used * 100 / percentage) + 0.999999))
-
-
-def statusline_reset_label(value: Any, fallback: str) -> str:
-    reset_dt: datetime | None = None
-    if isinstance(value, (int, float)):
-        timestamp = float(value) / 1000 if value > 10_000_000_000 else float(value)
-        try:
-            reset_dt = datetime.fromtimestamp(timestamp, timezone.utc)
-        except (OSError, ValueError):
-            reset_dt = None
-    elif isinstance(value, str) and value.strip():
-        reset_dt = parse_timestamp(value.strip())
-
-    if not reset_dt:
-        return fallback
-    if reset_dt.tzinfo is None:
-        reset_dt = reset_dt.replace(tzinfo=timezone.utc)
-    hours = (reset_dt - datetime.now(timezone.utc)).total_seconds() / 3600
-    if hours <= 0:
-        return "now"
-    return _next_reset_label(hours)
-
-
 def claude_statusline_period(
     rate_limit_cache: dict[str, Any],
     key: str,
@@ -1869,237 +1235,6 @@ def claude_statusline_period(
     period["limit_source"] = "statusline"
     period["used_percentage"] = parse_rate_limit_percentage(used_percentage)
     return period
-
-
-def claude_home() -> Path:
-    """Return the ~/.claude directory."""
-    return Path.home() / ".claude"
-
-
-def jsonl_file_older_than(path: str, cutoff: datetime) -> bool:
-    """Use file mtime as a cheap guard before opening large session logs."""
-    try:
-        modified_at = datetime.fromtimestamp(os.path.getmtime(path), timezone.utc)
-    except OSError:
-        return False
-    return modified_at < cutoff
-
-
-def read_claude_usage_from_jsonl(window_hours: float) -> int:
-    """Sum tokens from Claude Code JSONL session files within the given rolling window."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-    total = 0
-    pattern = str(claude_home() / "projects" / "**" / "*.jsonl")
-    for path in glob_module.glob(pattern, recursive=True):
-        if jsonl_file_older_than(path, cutoff):
-            continue
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                for raw in f:
-                    raw = raw.strip()
-                    if not raw:
-                        continue
-                    try:
-                        entry = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    if entry.get("type") != "assistant":
-                        continue
-                    ts_str = entry.get("timestamp", "")
-                    if not ts_str:
-                        continue
-                    try:
-                        ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
-                    except ValueError:
-                        continue
-                    if ts < cutoff:
-                        continue
-                    usage = (entry.get("message") or {}).get("usage") or {}
-                    total += (
-                        int(usage.get("input_tokens") or 0)
-                        + int(usage.get("output_tokens") or 0)
-                        + int(usage.get("cache_creation_input_tokens") or 0)
-                        + int(usage.get("cache_read_input_tokens") or 0)
-                    )
-        except OSError:
-            continue
-    return total
-
-
-def codex_home() -> Path:
-    """Return the ~/.codex directory."""
-    return Path.home() / ".codex"
-
-
-def read_codex_usage_from_jsonl(window_hours: float) -> int:
-    """Sum per-turn tokens from Codex session JSONL files within the given rolling window.
-
-    Codex emits event_msg { type: token_count, info: { last_token_usage: { total_tokens } } }
-    after each turn. We sum last_token_usage.total_tokens for events within the window.
-    """
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-    total = 0
-    pattern = str(codex_home() / "sessions" / "**" / "*.jsonl")
-    for path in glob_module.glob(pattern, recursive=True):
-        if jsonl_file_older_than(path, cutoff):
-            continue
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                for raw in f:
-                    raw = raw.strip()
-                    if not raw:
-                        continue
-                    try:
-                        entry = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    if entry.get("type") != "event_msg":
-                        continue
-                    payload = entry.get("payload") or {}
-                    if payload.get("type") != "token_count":
-                        continue
-                    ts_str = entry.get("timestamp", "")
-                    if not ts_str:
-                        continue
-                    try:
-                        ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
-                    except ValueError:
-                        continue
-                    if ts < cutoff:
-                        continue
-                    last = (payload.get("info") or {}).get("last_token_usage") or {}
-                    total += int(last.get("total_tokens") or 0)
-        except OSError:
-            continue
-    return total
-
-
-def parse_timestamp(value: str) -> datetime | None:
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def elapsed_ms(started_at: str, ended_at: str | None = None) -> int:
-    started = parse_timestamp(started_at)
-    ended = parse_timestamp(ended_at or utc_now())
-    if not started or not ended:
-        return 0
-
-    return max(0, int((ended - started).total_seconds() * 1000))
-
-
-def usage_number(value: str) -> int:
-    return int(value.replace(",", "").replace("_", ""))
-
-
-def usage_decimal(value: str) -> float:
-    return float(value.replace(",", ""))
-
-
-def set_usage_max(record: dict[str, Any], key: str, value: int | float) -> None:
-    current = record.get(key)
-    if current is None or value > current:
-        record[key] = value
-
-
-def _update_usage_from_stream_json(record: dict[str, Any], text: str) -> bool:
-    """Pull structured token counts from a claude stream-json line.
-
-    The terminal {"type":"result"} line (and per-message assistant lines) carry a
-    structured `usage` object with input/output and — critically — cache token
-    counts. Parsing it lets the quota UI show cache reads on the CLI path, which the
-    regex fallback below can't see. Returns True if a usage object was consumed.
-    """
-    if '"usage"' not in text:
-        return False
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return False
-    if not isinstance(parsed, dict):
-        return False
-    usage = parsed.get("usage")
-    if not isinstance(usage, dict):
-        usage = (parsed.get("message") or {}).get("usage") if isinstance(parsed.get("message"), dict) else None
-    if not isinstance(usage, dict):
-        return False
-    for field in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
-        value = usage.get(field)
-        if isinstance(value, (int, float)) and value:
-            set_usage_max(record, field, int(value))
-    if record.get("input_tokens") is not None and record.get("output_tokens") is not None:
-        set_usage_max(record, "total_tokens", int(record["input_tokens"]) + int(record["output_tokens"]))
-    return True
-
-
-def update_usage_metrics(record: dict[str, Any], text: str) -> None:
-    # Prefer structured stream-json usage (carries cache token counts); fall back to
-    # regex scraping for CLIs/lines that only print human-readable token summaries.
-    if _update_usage_from_stream_json(record, text):
-        return
-    lower = text.lower()
-    patterns = (
-        ("input_tokens", r"\b(?:input|prompt)\s+tokens?\b[^0-9]{0,30}([0-9][0-9,_]*)"),
-        ("output_tokens", r"\b(?:output|completion|generated)\s+tokens?\b[^0-9]{0,30}([0-9][0-9,_]*)"),
-        ("total_tokens", r"\btotal\s+tokens?\b[^0-9]{0,30}([0-9][0-9,_]*)"),
-    )
-    for key, pattern in patterns:
-        for match in re.finditer(pattern, lower):
-            set_usage_max(record, key, usage_number(match.group(1)))
-
-    pair_patterns = (
-        r"\binput\b[^0-9]{0,20}([0-9][0-9,_]*)[^a-z0-9]{0,50}\boutput\b[^0-9]{0,20}([0-9][0-9,_]*)",
-        r"\bprompt\b[^0-9]{0,20}([0-9][0-9,_]*)[^a-z0-9]{0,50}\bcompletion\b[^0-9]{0,20}([0-9][0-9,_]*)",
-    )
-    for pattern in pair_patterns:
-        for match in re.finditer(pattern, lower):
-            set_usage_max(record, "input_tokens", usage_number(match.group(1)))
-            set_usage_max(record, "output_tokens", usage_number(match.group(2)))
-
-    if record.get("input_tokens") is not None and record.get("output_tokens") is not None:
-        set_usage_max(record, "total_tokens", int(record["input_tokens"]) + int(record["output_tokens"]))
-
-    for match in re.finditer(r"\b(?:total\s+)?cost(?:\s+usd)?\b[^0-9$]{0,20}\$?([0-9]+(?:\.[0-9]+)?)", lower):
-        set_usage_max(record, "cost_usd", round(usage_decimal(match.group(1)), 6))
-
-
-def new_usage_record(project_name: str, mode: str, runner: str, model: str, reasoning: str, prompt: str) -> dict[str, Any]:
-    return {
-        "id": uuid4().hex,
-        "project": project_name,
-        "mode": mode,
-        "runner": runner,
-        "model": model or "default",
-        "reasoning": reasoning or "medium",
-        "started_at": utc_now(),
-        "ended_at": "",
-        "duration_ms": 0,
-        "status": "running",
-        "exit_code": None,
-        "prompt_chars": len(prompt),
-        "output_lines": 0,
-        "output_chars": 0,
-        "input_tokens": None,
-        "output_tokens": None,
-        "total_tokens": None,
-        "cache_read_input_tokens": None,
-        "cache_creation_input_tokens": None,
-        "cost_usd": None,
-    }
-
-
-def finish_usage_record(record: dict[str, Any], status: str, exit_code: int | None) -> dict[str, Any]:
-    ended_at = utc_now()
-    record["ended_at"] = ended_at
-    record["duration_ms"] = elapsed_ms(str(record.get("started_at", "")), ended_at)
-    record["status"] = status
-    record["exit_code"] = exit_code
-    runs = read_usage_runs()
-    runs.append(record)
-    write_usage_runs(runs)
-    return record
 
 
 def text_from_json_value(value: Any) -> str:
@@ -2235,289 +1370,6 @@ def finish_result_record(
     return write_result(result)
 
 
-def summarize_usage(runs: list[dict[str, Any]]) -> dict[str, Any]:
-    token_runs = sum(
-        1
-        for run in runs
-        if run.get("total_tokens") is not None
-        or run.get("input_tokens") is not None
-        or run.get("output_tokens") is not None
-    )
-    return {
-        "runs": len(runs),
-        "duration_ms": sum(int(run.get("duration_ms") or 0) for run in runs),
-        "input_tokens": sum(int(run.get("input_tokens") or 0) for run in runs),
-        "output_tokens": sum(int(run.get("output_tokens") or 0) for run in runs),
-        "total_tokens": sum(int(run.get("total_tokens") or 0) for run in runs),
-        "cost_usd": round(sum(float(run.get("cost_usd") or 0) for run in runs), 6),
-        "token_runs": token_runs,
-        "unknown_token_runs": max(0, len(runs) - token_runs),
-        "prompt_chars": sum(int(run.get("prompt_chars") or 0) for run in runs),
-        "output_lines": sum(int(run.get("output_lines") or 0) for run in runs),
-        "output_chars": sum(int(run.get("output_chars") or 0) for run in runs),
-        "ok_runs": sum(1 for run in runs if str(run.get("status", "")) == "ok"),
-        "error_runs": sum(1 for run in runs if str(run.get("status", "")) == "error"),
-        "stopped_runs": sum(1 for run in runs if str(run.get("status", "")) == "stopped"),
-    }
-
-
-def current_month_start() -> datetime:
-    now = datetime.now(timezone.utc)
-    return datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-
-
-def runs_since(runs: list[dict[str, Any]], start: datetime, runner: str) -> list[dict[str, Any]]:
-    scoped = []
-    for run in runs:
-        if str(run.get("runner", "")) != runner:
-            continue
-        started = parse_timestamp(str(run.get("started_at", "")))
-        if started and started >= start:
-            scoped.append(run)
-
-    return scoped
-
-
-def quota_period(
-    limit: int,
-    used: int,
-    reserve_percent: int,
-    source: str,
-    checked_at: str = "",
-    limit_source: str = "",
-    resets: str = "",
-) -> dict[str, Any]:
-    limit_known = limit > 0
-    usable_limit = int(limit * max(0, 100 - reserve_percent) / 100) if limit else 0
-    remaining = max(0, limit - used) if limit else 0
-    usable_remaining = max(0, usable_limit - used) if usable_limit else 0
-    percent_used = round((used / limit) * 100, 1) if limit_known else None
-    percent_usable = round((used / usable_limit) * 100, 1) if usable_limit else None
-    if not limit_known:
-        state = "limit_unknown"
-    elif used >= usable_limit:
-        state = "over_reserve"
-    elif percent_usable is not None and percent_usable >= 90:
-        state = "near_limit"
-    elif percent_usable is not None and percent_usable >= 75:
-        state = "watch"
-    else:
-        state = "ok"
-    return {
-        "limit": limit,
-        "used": used,
-        "remaining": remaining,
-        "usable_limit": usable_limit,
-        "usable_remaining": usable_remaining,
-        "available": limit == 0 or used < usable_limit,
-        "source": source,
-        "limit_source": limit_source,
-        "limit_known": limit_known,
-        "usage_known": source == "status" or used > 0,
-        "percent_used": percent_used,
-        "percent_usable": percent_usable,
-        "state": state,
-        "resets": resets,
-        "checked_at": checked_at,
-    }
-
-
-def status_period(cache: dict[str, Any], runner: str, key: str) -> dict[str, Any] | None:
-    """Return period status if the cache has real data for this period, else None."""
-    entry = cache.get(runner, {})
-    if not isinstance(entry, dict):
-        return None
-    if entry.get("status") not in ("ok",):
-        return None
-    parsed = entry.get("parsed", {})
-    if not isinstance(parsed, dict):
-        return None
-    period = parsed.get(key)
-    if not isinstance(period, dict):
-        return None
-    try:
-        used = max(0, int(period.get("used", 0)))
-        limit = max(0, int(period.get("limit", 0)))
-    except (TypeError, ValueError):
-        return None
-    limit_source = str(period.get("limit_source", ""))
-    if limit_source not in {"status", "statusline", "rate_limit", "manual", ""}:
-        limit_source = ""
-    # Accept even when limit=0 (usage known but no cap configured)
-    return {"used": used, "limit": limit, "resets": str(period.get("resets", "")), "limit_source": limit_source}
-
-
-def merged_quota_period(
-    cache: dict[str, Any],
-    runner: str,
-    key: str,
-    local_used: int,
-    fallback_limit: int,
-    reserve_percent: int,
-) -> dict[str, Any]:
-    period = status_period(cache, runner, key)
-    checked_at = str(cache.get(runner, {}).get("checked_at", "")) if isinstance(cache.get(runner), dict) else ""
-    if period is not None:
-        # Use real measured usage from status; prefer provider limit over configured cap if available.
-        real_limit = period["limit"] if period["limit"] > 0 else fallback_limit
-        provider_limit_source = str(period.get("limit_source") or "status")
-        if provider_limit_source not in {"status", "statusline", "rate_limit"}:
-            provider_limit_source = "status"
-        limit_source = provider_limit_source if period["limit"] > 0 else "manual" if fallback_limit > 0 else ""
-        return quota_period(real_limit, period["used"], reserve_percent, "status", checked_at, limit_source, str(period.get("resets", "")))
-
-    return quota_period(
-        fallback_limit,
-        local_used,
-        reserve_percent,
-        "manual",
-        checked_at,
-        "manual" if fallback_limit > 0 else "",
-        "",
-    )
-
-
-def quota_snapshot() -> dict[str, Any]:
-    settings = read_quota_settings()
-    status_cache = read_status_cache()
-    runs = read_usage_runs()
-    now = datetime.now(timezone.utc)
-    reserve = settings["reserve_percent"]
-
-    codex_monthly = summarize_usage(runs_since(runs, current_month_start(), "codex"))
-    claude_five_hour = summarize_usage(runs_since(runs, now.replace(microsecond=0) - timedelta(hours=5), "claude"))
-    claude_weekly = summarize_usage(runs_since(runs, now.replace(microsecond=0) - timedelta(days=7), "claude"))
-
-    return {
-        "settings": settings,
-        "status": status_cache,
-        "codex": {
-            "monthly": merged_quota_period(
-                status_cache,
-                "codex",
-                "monthly",
-                int(codex_monthly["total_tokens"]),
-                settings["codex_monthly_tokens"],
-                reserve,
-            ),
-        },
-        "claude": {
-            "five_hour": merged_quota_period(
-                status_cache,
-                "claude",
-                "five_hour",
-                int(claude_five_hour["total_tokens"]),
-                settings["claude_five_hour_tokens"],
-                reserve,
-            ),
-            "weekly": merged_quota_period(
-                status_cache,
-                "claude",
-                "weekly",
-                int(claude_weekly["total_tokens"]),
-                settings["claude_weekly_tokens"],
-                reserve,
-            ),
-        },
-    }
-
-
-def usage_by_model(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[str, dict[str, Any]] = {}
-    for run in runs:
-        runner = str(run.get("runner", "") or "unknown")
-        model = str(run.get("model", "") or "default")
-        reasoning = str(run.get("reasoning", "") or "medium")
-        key = f"{runner}|{model}|{reasoning}"
-        if key not in grouped:
-            grouped[key] = {
-                "id": key,
-                "runner": runner,
-                "model": model,
-                "reasoning": reasoning,
-                **summarize_usage([]),
-            }
-
-        grouped[key]["runs"] += 1
-        grouped[key]["duration_ms"] += int(run.get("duration_ms") or 0)
-        grouped[key]["input_tokens"] += int(run.get("input_tokens") or 0)
-        grouped[key]["output_tokens"] += int(run.get("output_tokens") or 0)
-        grouped[key]["total_tokens"] += int(run.get("total_tokens") or 0)
-        grouped[key]["cost_usd"] = round(float(grouped[key]["cost_usd"]) + float(run.get("cost_usd") or 0), 6)
-        grouped[key]["prompt_chars"] += int(run.get("prompt_chars") or 0)
-        grouped[key]["output_lines"] += int(run.get("output_lines") or 0)
-        grouped[key]["output_chars"] += int(run.get("output_chars") or 0)
-        if (
-            run.get("total_tokens") is not None
-            or run.get("input_tokens") is not None
-            or run.get("output_tokens") is not None
-        ):
-            grouped[key]["token_runs"] += 1
-        else:
-            grouped[key]["unknown_token_runs"] += 1
-        status = str(run.get("status", ""))
-        if status == "ok":
-            grouped[key]["ok_runs"] += 1
-        elif status == "error":
-            grouped[key]["error_runs"] += 1
-        elif status == "stopped":
-            grouped[key]["stopped_runs"] += 1
-        grouped[key]["last_started_at"] = str(run.get("started_at", "")) or str(grouped[key].get("last_started_at", ""))
-        grouped[key]["last_status"] = status or str(grouped[key].get("last_status", ""))
-
-    return sorted(
-        grouped.values(),
-        key=lambda item: (int(item["total_tokens"]), int(item["duration_ms"]), int(item["runs"])),
-        reverse=True,
-    )[:10]
-
-
-def usage_snapshot() -> dict[str, Any]:
-    runs = read_usage_runs()
-    today = datetime.now(timezone.utc).date()
-    today_runs = []
-    for run in runs:
-        started = parse_timestamp(str(run.get("started_at", "")))
-        if started and started.date() == today:
-            today_runs.append(run)
-
-    active = []
-    for key, state in active_agent_runs.items():
-        project_name, mode = key.split(":", 1)
-        started_at = str(state.get("started_at", ""))
-        active.append(
-            {
-                "id": str(state.get("usage_id", key)),
-                "project": project_name,
-                "mode": mode,
-                "runner": str(state.get("runner", "")),
-                "model": str(state.get("model", "")) or "default",
-                "reasoning": str(state.get("reasoning", "")) or "medium",
-                "started_at": started_at,
-                "ended_at": "",
-                "last_output_at": str(state.get("last_output_at", "")),
-                "duration_ms": elapsed_ms(started_at),
-                "status": "running",
-                "exit_code": None,
-                "prompt_chars": int(state.get("prompt_chars") or 0),
-                "output_lines": int(state.get("output_lines") or 0),
-                "output_chars": int(state.get("output_chars") or 0),
-                "input_tokens": state.get("input_tokens"),
-                "output_tokens": state.get("output_tokens"),
-                "total_tokens": state.get("total_tokens"),
-                "cost_usd": state.get("cost_usd"),
-            }
-        )
-
-    return {
-        "totals": summarize_usage(runs),
-        "today": summarize_usage(today_runs),
-        "by_model": usage_by_model(runs),
-        "recent": list(reversed(runs[-12:])),
-        "active": active,
-    }
-
-
 def registry_entry(name: str) -> dict[str, str] | None:
     for project in read_registry():
         if project["name"] == name:
@@ -2593,640 +1445,6 @@ def project_name_for_path(project_path: Path) -> str:
         except (KeyError, OSError):
             continue
     return ""
-
-
-def read_package_json(project_path: Path) -> dict[str, Any]:
-    path = project_path / "package.json"
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def package_scripts(package: dict[str, Any]) -> dict[str, str]:
-    scripts = package.get("scripts", {})
-    if not isinstance(scripts, dict):
-        return {}
-    return {str(key): str(value) for key, value in scripts.items()}
-
-
-def package_manager_for(project_path: Path) -> str:
-    if (project_path / "pnpm-lock.yaml").exists():
-        return "pnpm"
-    if (project_path / "yarn.lock").exists():
-        return "yarn"
-    if (project_path / "bun.lockb").exists() or (project_path / "bun.lock").exists():
-        return "bun"
-    return "npm"
-
-
-def workspace_package_jsons(project_path: Path, root_package: dict[str, Any]) -> list[Path]:
-    patterns: list[str] = []
-    workspaces = root_package.get("workspaces")
-    if isinstance(workspaces, list):
-        patterns = [str(item) for item in workspaces]
-    elif isinstance(workspaces, dict) and isinstance(workspaces.get("packages"), list):
-        patterns = [str(item) for item in workspaces["packages"]]
-    if not patterns:
-        patterns = ["apps/*", "packages/*"]
-
-    paths: list[Path] = []
-    for pattern in patterns:
-        for package_path in project_path.glob(f"{pattern}/package.json"):
-            if "node_modules" not in package_path.parts:
-                paths.append(package_path)
-    return sorted(set(paths))
-
-
-def package_framework(package: dict[str, Any]) -> str:
-    deps: dict[str, Any] = {}
-    for key in ("dependencies", "devDependencies"):
-        value = package.get(key, {})
-        if isinstance(value, dict):
-            deps.update(value)
-    scripts = " ".join(package_scripts(package).values()).lower()
-    if "next" in deps or re.search(r"(^|\s)next(\s|$)", scripts):
-        return "next"
-    if "vite" in deps or re.search(r"(^|\s)vite(\s|$)", scripts):
-        return "vite"
-    return ""
-
-
-def framework_for_script(project_path: Path, root_package: dict[str, Any], script_name: str) -> str:
-    scripts = package_scripts(root_package)
-    command = scripts.get(script_name, "").lower()
-    root_framework = package_framework(root_package)
-    if root_framework:
-        return root_framework
-    if "next" in command:
-        return "next"
-    if "vite" in command:
-        return "vite"
-
-    workspace_match = re.search(r"(?:-w|--workspace)\s+([^\s]+)", command)
-    workspace_name = workspace_match.group(1).strip("\"'") if workspace_match else ""
-    workspace_paths = workspace_package_jsons(project_path, root_package)
-    for package_path in workspace_paths:
-        package = read_package_json(package_path.parent)
-        package_name = str(package.get("name", ""))
-        if workspace_name and package_name != workspace_name:
-            continue
-        framework = package_framework(package)
-        if framework:
-            return framework
-
-    web_first = [path for path in workspace_paths if "web" in display_path(path.parent).lower()]
-    for package_path in [*web_first, *workspace_paths]:
-        framework = package_framework(read_package_json(package_path.parent))
-        if framework:
-            return framework
-    return ""
-
-
-def workspace_target_for_script(command: str) -> tuple[str, str] | None:
-    npm_match = re.search(r"npm\s+run\s+([^\s]+).*?(?:-w|--workspace)\s+([^\s]+)", command)
-    if npm_match:
-        return npm_match.group(2).strip("\"'"), npm_match.group(1).strip("\"'")
-    yarn_match = re.search(r"yarn\s+workspace\s+([^\s]+)\s+(?:run\s+)?([^\s]+)", command)
-    if yarn_match:
-        return yarn_match.group(1).strip("\"'"), yarn_match.group(2).strip("\"'")
-    pnpm_match = re.search(r"pnpm\s+(?:--filter|-F)\s+([^\s]+)\s+run\s+([^\s]+)", command)
-    if pnpm_match:
-        return pnpm_match.group(1).strip("\"'"), pnpm_match.group(2).strip("\"'")
-    return None
-
-
-def preferred_dev_script(package: dict[str, Any]) -> str:
-    scripts = package_scripts(package)
-    for candidate in ("dev:web", "web:dev", "dev", "start:web", "start"):
-        if candidate in scripts:
-            return candidate
-    for name in scripts:
-        lower = name.lower()
-        if "dev" in lower and ("web" in lower or "front" in lower):
-            return name
-    for name in scripts:
-        if "dev" in name.lower():
-            return name
-    return ""
-
-
-def dev_server_command(project_path: Path, port: int, custom_command: str = "") -> tuple[list[str], str, str]:
-    host = PROJECT_PREVIEW_HOST
-    if custom_command.strip():
-        command = [part.replace("{port}", str(port)).replace("{host}", host) for part in shlex.split(custom_command)]
-        if not command:
-            raise HTTPException(status_code=400, detail="Preview command is empty.")
-        return command, custom_command, "custom"
-
-    package = read_package_json(project_path)
-    script = preferred_dev_script(package)
-    if not script:
-        raise HTTPException(status_code=404, detail="No package.json dev script found for this project.")
-
-    manager = package_manager_for(project_path)
-    manager_cmd = shutil.which(manager) or manager
-    scripts = package_scripts(package)
-    workspace_target = workspace_target_for_script(scripts.get(script, ""))
-    framework = framework_for_script(project_path, package, script)
-    flags: list[str] = []
-    if framework == "next":
-        flags = ["--hostname", host, "--port", str(port)]
-    elif framework == "vite":
-        flags = ["--host", host, "--port", str(port)]
-
-    if workspace_target:
-        workspace_name, workspace_script = workspace_target
-        if manager == "yarn":
-            command = [manager_cmd, "workspace", workspace_name, "run", workspace_script]
-            if flags:
-                command.extend(flags)
-        elif manager == "pnpm":
-            command = [manager_cmd, "--filter", workspace_name, "run", workspace_script]
-            if flags:
-                command.extend(["--", *flags])
-        else:
-            command = [manager_cmd, "run", workspace_script, "-w", workspace_name]
-            if flags:
-                command.extend(["--", *flags])
-        return command, f"{manager} workspace {workspace_name} run {workspace_script}{(' ' + ' '.join(flags)) if flags else ''}", framework or "generic"
-
-    if manager == "yarn":
-        command = [manager_cmd, script]
-        if flags:
-            command.extend(flags)
-    elif manager == "bun":
-        command = [manager_cmd, "run", script]
-        if flags:
-            command.extend(flags)
-    else:
-        command = [manager_cmd, "run", script]
-        if flags:
-            command.extend(["--", *flags])
-
-    return command, f"{manager} run {script}{(' -- ' + ' '.join(flags)) if flags else ''}", framework or "generic"
-
-
-def project_preview_url(port: int) -> str:
-    return f"http://{PROJECT_PREVIEW_HOST}:{port}"
-
-
-def command_display(command: list[str]) -> str:
-    return " ".join(shlex.quote(part) for part in command)
-
-
-def dev_server_snapshot(project_name: str, project_path: Path) -> dict[str, Any]:
-    state = active_dev_servers.get(project_name, {})
-    process = state.get("process")
-    if process and process.poll() is not None and state.get("status") in {"starting", "running"}:
-        exit_code = process.poll()
-        state["status"] = "error" if exit_code else "stopped"
-        if exit_code:
-            state["last_error"] = state.get("last_error") or f"Preview server exited with code {exit_code}."
-
-    port = int(state.get("port") or 0)
-    package = read_package_json(project_path)
-    suggested_script = preferred_dev_script(package)
-    return {
-        "status": str(state.get("status", "stopped")),
-        "port": port or None,
-        "url": str(state.get("url", "")) if port else "",
-        "command": str(state.get("command", "")),
-        "framework": str(state.get("framework", "")),
-        "reserved_ports": sorted(dualith_reserved_ports()),
-        "last_error": str(state.get("last_error", "")),
-        "started_at": str(state.get("started_at", "")),
-        "suggested_script": suggested_script,
-        "suggested_port": PROJECT_PREVIEW_PORT_START,
-    }
-
-
-async def wait_for_port(project_name: str, project_path: Path, port: int) -> None:
-    for _ in range(60):
-        state = active_dev_servers.get(project_name)
-        if not state or state.get("status") == "stopped":
-            return
-        process = state.get("process")
-        if process and process.poll() is not None:
-            return
-        try:
-            with socket.create_connection((PROJECT_PREVIEW_HOST, port), timeout=0.25):
-                state["status"] = "running"
-                entry = record_event("DEV_SERVER_READY", f"{relative_path(project_path)} :: {project_preview_url(port)}")
-                await broadcast("dev_server_event", entry)
-                return
-        except OSError:
-            await asyncio.sleep(0.5)
-    state = active_dev_servers.get(project_name)
-    if state and state.get("status") == "starting":
-        state["status"] = "running"
-        entry = record_event("DEV_SERVER_READY", f"{relative_path(project_path)} :: {project_preview_url(port)}")
-        await broadcast("dev_server_event", entry)
-
-
-async def _auto_npm_install(project_name: str, project_path: Path) -> None:
-    """Run npm install in the background and restart the dev server when done."""
-    entry = record_event("DEV_SERVER_LOG", f"{relative_path(project_path)} :: missing modules detected — running npm install...")
-    await broadcast("dev_server_event", entry)
-    result = await asyncio.to_thread(
-        subprocess.run,
-        ["npm", "install"],
-        cwd=project_path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        err_entry = record_event("DEV_SERVER_ERR", f"{relative_path(project_path)} :: npm install failed: {result.stderr.strip()[:240]}")
-        await broadcast("dev_server_event", err_entry)
-        return
-    ok_entry = record_event("DEV_SERVER_LOG", f"{relative_path(project_path)} :: npm install done — restarting dev server...")
-    await broadcast("dev_server_event", ok_entry)
-    # Stop the crashed server and restart it
-    state = active_dev_servers.get(project_name, {})
-    process = state.get("process")
-    if process:
-        await terminate_process_tree(process)
-    req = DevServerStartRequest(port=state.get("port", 0), command=state.get("command", ""))
-    try:
-        active_dev_servers.pop(project_name, None)
-        await start_project_dev_server(project_name, project_path, req)
-    except Exception as exc:
-        err2 = record_event("DEV_SERVER_ERR", f"{relative_path(project_path)} :: restart failed: {exc}")
-        await broadcast("dev_server_event", err2)
-
-
-_npm_install_triggered: set[str] = set()
-
-
-async def stream_dev_server_output(project_name: str, project_path: Path, stream: Any, action: str) -> None:
-    if not stream:
-        return
-    state = active_dev_servers.get(project_name, {})
-    key = "stderr_tail" if action.endswith("_ERR") else "stdout_tail"
-    while line := await asyncio.to_thread(stream.readline):
-        text = str(line).strip()
-        if not text:
-            continue
-        tail = list(state.get(key, []))
-        tail.append(text)
-        state[key] = tail[-20:]
-        if action.endswith("_ERR"):
-            state["last_error"] = text[:500]
-            # Auto-heal: missing npm module → run npm install then restart
-            if (
-                "MODULE_NOT_FOUND" in text
-                and project_name not in _npm_install_triggered
-                and (project_path / "package.json").exists()
-            ):
-                _npm_install_triggered.add(project_name)
-                asyncio.create_task(_auto_npm_install(project_name, project_path))
-                continue  # suppress the raw MODULE_NOT_FOUND noise from the log
-        entry = record_event(action, f"{relative_path(project_path)} :: {text[:240]}")
-        await broadcast("dev_server_event", entry)
-
-
-async def terminate_process_tree(process: subprocess.Popen[Any], timeout: float = 5) -> None:
-    if process.poll() is not None:
-        return
-    if os.name == "nt":
-        # taskkill /T kills the entire process tree; /F forces immediate termination.
-        # We fire it and then wait for the process to actually exit — without the wait
-        # the caller returns while the process is still alive, causing collect_snapshot()
-        # to still see it in active_agent_runs and the UI stays stuck on "Stopping…".
-        await asyncio.to_thread(
-            subprocess.run,
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        try:
-            await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=timeout)
-        except asyncio.TimeoutError:
-            try:
-                process.kill()
-                await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=timeout)
-            except Exception:
-                pass  # taskkill already sent; process will exit shortly on its own
-        return
-    process.terminate()
-    try:
-        await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=timeout)
-    except asyncio.TimeoutError:
-        process.kill()
-        await asyncio.to_thread(process.wait)
-
-
-async def start_project_dev_server(project_name: str, project_path: Path, request: DevServerStartRequest) -> dict[str, Any]:
-    current = active_dev_servers.get(project_name, {})
-    process = current.get("process")
-    if process and process.poll() is None:
-        return dev_server_snapshot(project_name, project_path)
-
-    requested_port = request.port if request.port not in dualith_reserved_ports() else 0
-    port = next_project_port(requested_port)
-    command, display, framework = dev_server_command(project_path, port, request.command)
-    env = os.environ.copy()
-    env.update(
-        {
-            "PORT": str(port),
-            "HOST": PROJECT_PREVIEW_HOST,
-            "HOSTNAME": PROJECT_PREVIEW_HOST,
-            "DUALITH_RESERVED_PORTS": ",".join(str(value) for value in sorted(dualith_reserved_ports())),
-            "DUALITH_PROJECT_PREVIEW_URL": project_preview_url(port),
-            "DUALITH_PROJECT_PREVIEW_PORT": str(port),
-            "NEXT_PUBLIC_API_BASE_URL": app_status_snapshot()["api_url"],
-        }
-    )
-
-    shell = os.name == "nt" and Path(command[0]).suffix.lower() in {".cmd", ".bat"}
-    popen_args: list[str] | str = subprocess.list2cmdline(command) if shell else command
-    try:
-        process = await asyncio.to_thread(
-            subprocess.Popen,
-            popen_args,
-            cwd=project_path,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            shell=shell,
-            env=env,
-        )
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Preview command not found: {command[0]}") from exc
-
-    active_dev_servers[project_name] = {
-        "process": process,
-        "status": "starting",
-        "port": port,
-        "url": project_preview_url(port),
-        "command": display or command_display(command),
-        "framework": framework,
-        "last_error": "",
-        "started_at": utc_now(),
-        "stdout_tail": [],
-        "stderr_tail": [],
-    }
-    entry = record_event("DEV_SERVER_STARTED", f"{relative_path(project_path)} :: {project_preview_url(port)} :: {display or command_display(command)}")
-    await broadcast("dev_server_event", entry)
-    asyncio.create_task(stream_dev_server_output(project_name, project_path, process.stdout, "DEV_SERVER_LOG"))
-    asyncio.create_task(stream_dev_server_output(project_name, project_path, process.stderr, "DEV_SERVER_ERR"))
-    asyncio.create_task(wait_for_port(project_name, project_path, port))
-    return dev_server_snapshot(project_name, project_path)
-
-
-async def stop_project_dev_server(project_name: str, project_path: Path) -> dict[str, Any]:
-    state = active_dev_servers.get(project_name)
-    if not state:
-        raise HTTPException(status_code=404, detail="Project preview is not running.")
-
-    process = state.get("process")
-    if process and process.poll() is None:
-        state["status"] = "stopping"
-        await terminate_process_tree(process)
-
-    state["status"] = "stopped"
-    _npm_install_triggered.discard(project_name)
-    entry = record_event("DEV_SERVER_STOPPED", project_path)
-    await broadcast("dev_server_event", entry)
-    return dev_server_snapshot(project_name, project_path)
-
-
-def attention_empty(status: str = "none") -> dict[str, Any]:
-    return {
-        "status": status,
-        "source": "",
-        "summary": "No AI notes yet." if status == "none" else status.title(),
-        "items": [],
-        "priority_counts": {"p0": 0, "p1": 0, "p2": 0, "p3": 0, "other": 0},
-        "updated_at": "",
-    }
-
-
-def clean_note_text(text: str) -> str:
-    cleaned = text.strip().lstrip("\ufeff").strip()
-    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
-    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
-    cleaned = re.sub(r"\*([^*]+)\*", r"\1", cleaned)
-    cleaned = cleaned.replace("**", "").replace("__", "")
-    return cleaned.strip()
-
-
-def parse_attention_item(line: str) -> dict[str, str]:
-    text = clean_note_text(line.lstrip("-* ").strip())
-    priority = "other"
-    title_source = re.sub(r"\s+Suggested command:.*$", "", text, flags=re.IGNORECASE).strip()
-    match = re.match(r"^(P[0-3])\s*[-:]\s*(.+)$", text, flags=re.IGNORECASE)
-    if match:
-        priority = match.group(1).lower()
-        title_source = re.sub(r"\s+Suggested command:.*$", "", match.group(2).strip(), flags=re.IGNORECASE).strip()
-    elif re.match(r"^\[x\]\s*", text, flags=re.IGNORECASE):
-        title_source = re.sub(r"^\[x\]\s*", "", title_source, flags=re.IGNORECASE).strip()
-    elif re.match(r"^\[\s\]\s*", text):
-        title_source = re.sub(r"^\[\s\]\s*", "", title_source).strip()
-    title = re.split(r"(?<=\.)\s+", title_source, maxsplit=1)[0].strip()
-
-    suggested = ""
-    suggested_match = re.search(r"Suggested command:\s*([^.\n]+)", text, flags=re.IGNORECASE)
-    if suggested_match:
-        suggested = suggested_match.group(1).strip()
-
-    return {
-        "priority": priority,
-        "title": title[:140],
-        "text": text[:900],
-        "suggested_command": suggested[:160],
-    }
-
-
-def latest_completed_task_time(project_name: str) -> str:
-    completed = [
-        str(task.get("completed_at", "") or task.get("updated_at", ""))
-        for task in project_tasks(project_name)
-        if str(task.get("status", "")) == "completed"
-    ]
-    return max(completed) if completed else ""
-
-
-def project_attention(project_path: Path, project_name: str) -> dict[str, Any]:
-    source = feedback_path(project_path)
-    source_label = "FEEDBACK.md"
-    if not source.exists():
-        source = project_path / "CLAUDE_TODO.md"
-        source_label = "CLAUDE_TODO.md"
-    if not source.exists():
-        return attention_empty("none")
-
-    content = source.read_text(encoding="utf-8", errors="replace")
-    updated_at = datetime.fromtimestamp(source.stat().st_mtime, timezone.utc).isoformat()
-    items = []
-    for line in content.splitlines():
-        stripped = line.strip().lstrip("\ufeff")
-        if stripped.startswith(("-", "*")):
-            item = parse_attention_item(stripped)
-            if item["text"]:
-                items.append(item)
-
-    counts = {"p0": 0, "p1": 0, "p2": 0, "p3": 0, "other": 0}
-    for item in items:
-        priority = item.get("priority", "other")
-        counts[priority if priority in counts else "other"] += 1
-
-    upper = content.upper()
-    has_positive_verdict, has_blocking_verdict = feedback_verdict_summary(content)
-    if audit_passed(content):
-        status = "clean"
-        summary = "AI notes are clean."
-    else:
-        has_unresolved_items = bool(items) and not has_positive_verdict
-        has_findings = has_blocking_verdict or has_unresolved_items or any(flag in upper for flag in ("TESTER: FAILED", "CHANGES REQUESTED", "BLOCKED", "TODO", "CRITIQUE"))
-        status = "attention" if has_findings else "none"
-        summary = "AI notes need work." if status == "attention" else "No active AI notes."
-
-    latest_completed = latest_completed_task_time(project_name)
-    if status == "attention" and latest_completed and updated_at < latest_completed:
-        status = "stale"
-        summary = "Review notes may be stale."
-
-    return {
-        "status": status,
-        "source": source_label,
-        "summary": summary,
-        "items": items[:40],
-        "priority_counts": counts,
-        "updated_at": updated_at,
-    }
-
-
-def parse_claude_todos(project_path: Path) -> tuple[list[str], str]:
-    attention = project_attention(project_path, project_path.name)
-    todos = [str(item.get("text", "")) for item in attention.get("items", []) if str(item.get("text", "")).strip()]
-    status = str(attention.get("status", "none"))
-    if status == "clean":
-        return todos, "CLEAN"
-    if status in {"attention", "stale"}:
-        return todos, "ATTENTION"
-    return todos, "PENDING"
-
-
-def parse_hitl_options(question: str) -> tuple[str, list[dict[str, Any]], str]:
-    options: list[dict[str, Any]] = []
-    default_option = ""
-    question_lines: list[str] = []
-    in_options = False
-
-    for raw_line in question.splitlines():
-        line = raw_line.strip()
-        if not line:
-            if not in_options:
-                question_lines.append(raw_line)
-            continue
-        if line.upper() == "OPTIONS:":
-            in_options = True
-            continue
-        default_match = re.match(r"^DEFAULT:\s*(.+)$", line, flags=re.IGNORECASE)
-        if default_match:
-            default_option = default_match.group(1).strip()
-            continue
-        option_match = re.match(r"^\[([A-Za-z0-9_-]+)\]\s*(.+)$", line)
-        if option_match:
-            option_id = option_match.group(1).strip()
-            body = option_match.group(2).strip()
-            label = body
-            description = ""
-            if " - " in body:
-                label, description = body.split(" - ", 1)
-            options.append({
-                "id": option_id,
-                "label": label.strip(),
-                "description": description.strip(),
-                "recommended": "recommended" in body.lower() or option_id == default_option,
-            })
-            in_options = True
-            continue
-        if not in_options:
-            question_lines.append(raw_line)
-
-    if default_option:
-        for option in options:
-            option["recommended"] = bool(option.get("recommended")) or str(option.get("id", "")) == default_option
-
-    cleaned_question = "\n".join(line for line in question_lines).strip()
-    return cleaned_question or question.strip(), options, default_option
-
-
-def parse_human_input(project_path: Path) -> dict[str, Any]:
-    """Read HUMAN_INPUT.md. Blocked when a question is present with no answer after it."""
-    path = human_input_path(project_path)
-    empty = {"blocked": False, "question": "", "answer": "", "options": [], "default_option": ""}
-    if not path.exists():
-        return empty
-
-    content = path.read_text(encoding="utf-8", errors="replace")
-    q_index = content.find(QUESTION_PREFIX)
-    if q_index == -1:
-        return empty
-
-    a_index = content.find(ANSWER_PREFIX, q_index)
-    question_raw = content[q_index + len(QUESTION_PREFIX) : (a_index if a_index != -1 else len(content))].strip()
-    question, options, default_option = parse_hitl_options(question_raw)
-    answer = content[a_index + len(ANSWER_PREFIX) :].strip() if a_index != -1 else ""
-    return {
-        "blocked": a_index == -1,
-        "question": question,
-        "answer": answer,
-        "options": options,
-        "default_option": default_option,
-    }
-
-
-def decision_from_human_answer(answer: str, human_input: dict[str, Any]) -> tuple[str, str, str]:
-    clean = answer.strip()
-    options = human_input.get("options", [])
-    if not isinstance(options, list):
-        options = []
-    match = re.match(r"^\[([A-Za-z0-9_-]+)\]\s*(.+?)(?:\s+-\s+(.+))?$", clean, flags=re.DOTALL)
-    option_id = match.group(1) if match else ""
-    option = next((item for item in options if isinstance(item, dict) and str(item.get("id", "")) == option_id), None)
-    if option:
-        selected = str(option.get("label", "")).strip() or (match.group(2).strip() if match else clean)
-        reason = str(option.get("description", "")).strip() or str(human_input.get("question", "")).strip()
-        return "Agentic choice", selected, reason
-    if options:
-        return "Agentic choice", clean, str(human_input.get("question", "")).strip()
-    return "Human input", clean, str(human_input.get("question", "")).strip()
-
-
-def write_human_question(project_path: Path, question: str, options: list[dict[str, str]], default_option: str = "1") -> None:
-    lines = [f"{QUESTION_PREFIX} {question.strip()}", "", "OPTIONS:"]
-    for index, option in enumerate(options, start=1):
-        option_id = str(option.get("id", "")).strip() or str(index)
-        label = str(option.get("label", "")).strip() or f"Option {option_id}"
-        description = str(option.get("description", "")).strip()
-        suffix = f" - {description}" if description else ""
-        lines.append(f"[{option_id}] {label}{suffix}")
-    if default_option:
-        lines.extend(["", f"DEFAULT: {default_option}"])
-    human_input_path(project_path).write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
-
-
-def write_human_answer(project_path: Path, text: str) -> None:
-    path = human_input_path(project_path)
-    existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
-    separator = "" if existing.endswith("\n") or not existing else "\n"
-    path.write_text(f"{existing}{separator}{ANSWER_PREFIX} {text.strip()}\n", encoding="utf-8")
-
-
-def clear_human_input(project_path: Path) -> None:
-    human_input_path(project_path).write_text("", encoding="utf-8")
 
 
 def load_memory(project_path: Path) -> dict[str, Any]:
@@ -3393,14 +1611,6 @@ def clear_chat_history(project_path: Path) -> None:
     chat_history_path(project_path).write_text("", encoding="utf-8")
 
 
-def read_agent_chat(project_path: Path) -> str:
-    path = agent_chat_path(project_path)
-    if not path.exists():
-        return ""
-    content = path.read_text(encoding="utf-8", errors="replace")
-    return content[-CHAT_HISTORY_MAX_CHARS:] if len(content) > CHAT_HISTORY_MAX_CHARS else content
-
-
 def project_artifacts(project_path: Path) -> dict[str, str]:
     return {
         "spec": read_limited_text(project_path / "SPEC.md"),
@@ -3484,452 +1694,6 @@ def clear_agent_chat(project_path: Path, *, notify: bool = True) -> None:
         schedule_team_room_broadcast()
 
 
-def review_observation_count(section: str) -> int:
-    relevant_lines = []
-    for line in section.splitlines():
-        cleaned = line.strip().strip("-* ")
-        upper = cleaned.upper()
-        if not cleaned or cleaned.startswith("#") or "APPROVED" in upper or "CHANGES REQUESTED" in upper:
-            continue
-        relevant_lines.append(cleaned)
-    sentence_count = len(re.findall(r"[.!?](?:\s|$)", " ".join(relevant_lines)))
-    return max(len(relevant_lines), sentence_count)
-
-
-_VERDICT_POSITIVE_WORDS = r"(?:APPROVED|PASSED|OK|CLEAN)"
-_VERDICT_NEGATIVE_WORDS = r"(?:CHANGES\s+REQUESTED|NEEDS\s+CHANGES|FAILED|REJECTED)"
-_VERDICT_SEP = r"\s*[:\-—–]+\s*"
-
-_NEGATIVE_LANGUAGE = re.compile(
-    r"\b(must fix|blocker|critical issue|changes? (?:are )?(?:required|requested)|failing|fails\b|broken|regression|vulnerabilit)",
-    re.IGNORECASE,
-)
-
-
-def extract_verdict(marker: str, *texts: str) -> str:
-    """Latest verdict for a role marker across the given texts.
-
-    Tolerant of casing and separators ("Tester: Passed", "TESTER — FAILED",
-    "security review: changes requested"). Returns "positive", "negative",
-    or "missing"; when both appear, the later occurrence wins.
-    """
-    blob = "\n\n".join(text for text in texts if text)
-    if not blob:
-        return "missing"
-    pattern = re.escape(marker).replace(r"\ ", r"\s+")
-    positive = [m.start() for m in re.finditer(f"{pattern}{_VERDICT_SEP}{_VERDICT_POSITIVE_WORDS}\\b", blob, re.IGNORECASE)]
-    negative = [m.start() for m in re.finditer(f"{pattern}{_VERDICT_SEP}{_VERDICT_NEGATIVE_WORDS}", blob, re.IGNORECASE)]
-    if not positive and not negative:
-        return "missing"
-    return "positive" if max(positive, default=-1) > max(negative, default=-1) else "negative"
-
-
-def infer_verdict_from_language(text: str) -> str:
-    """Best-effort verdict when an agent wrote prose but no verdict line."""
-    return "negative" if _NEGATIVE_LANGUAGE.search(text) else "positive"
-
-
-
-
-def parse_team_signoff(project_path: Path) -> bool:
-    """True when the latest Teammate verdict in AGENT_CHAT.md is an approval.
-
-    Case-insensitive and separator-tolerant; the former ≥2-observation gate is
-    gone — observation count is advisory only (it silently demoted approvals
-    written as bullet lists, killing otherwise-successful runs).
-    """
-    return extract_verdict("TEAMMATE", read_agent_chat(project_path)) == "positive"
-
-
-def run_git_sync(project_path: Path, args: tuple[str, ...]) -> tuple[int, str]:
-    process = subprocess.run(
-        ["git", *args],
-        cwd=project_path,
-        capture_output=True,
-        text=True,
-        shell=False,
-        check=False,
-    )
-    output = "\n".join(part for part in (process.stdout, process.stderr) if part)
-    return process.returncode, output.strip()
-
-
-async def run_git(project_path: Path, *args: str) -> tuple[int, str]:
-    return await asyncio.to_thread(run_git_sync, project_path, args)
-
-
-def git_output_tail(output: str, limit: int = 220) -> str:
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    return (lines[-1] if lines else output.strip())[:limit]
-
-
-def strip_wrapping_quotes(value: str) -> str:
-    text = value.strip()
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
-        return text[1:-1].strip()
-    return text
-
-
-def direct_git_operation(prompt: str) -> str:
-    text = re.sub(r"\s+", " ", prompt.strip().lower())
-    has_commit = bool(re.search(r"\bcommit\b|\bsave\s+(?:the\s+)?(?:changes?|diff|workspace|working tree)\b", text))
-    has_push = bool(re.search(r"\bpush\b", text))
-    if has_commit and has_push:
-        return "commit-push"
-    if has_commit:
-        return "commit"
-    if has_push:
-        return "push"
-    if re.search(r"\bstash\b", text):
-        return "stash"
-    if re.search(r"\btag\b|\brelease\b", text):
-        return "tag"
-    return "status"
-
-
-def git_message_from_prompt(prompt: str, fallback: str) -> str:
-    patterns = (
-        r"(?:^|\s)(?:-m|--message)\s+(?P<message>\"[^\"]+\"|'[^']+'|.+)$",
-        r"\bmessage\s*[:=]\s*(?P<message>.+)$",
-        r"\bwith\s+(?:the\s+)?message\s+(?P<message>.+)$",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, prompt.strip(), flags=re.IGNORECASE)
-        if not match:
-            continue
-        message = strip_wrapping_quotes(match.group("message")).strip()
-        if message:
-            return message[:180]
-    return fallback
-
-
-def git_status_paths(status_output: str) -> tuple[list[str], list[str]]:
-    codes: list[str] = []
-    paths: list[str] = []
-    for line in status_output.splitlines():
-        if len(line) < 4:
-            continue
-        code = line[:2]
-        raw_path = line[3:].strip()
-        if " -> " in raw_path:
-            raw_path = raw_path.split(" -> ", 1)[1].strip()
-        path = strip_wrapping_quotes(raw_path)
-        if not path:
-            continue
-        codes.append(code)
-        paths.append(path.replace("\\", "/"))
-    return codes, paths
-
-
-def generated_commit_message(status_output: str) -> str:
-    codes, paths = git_status_paths(status_output)
-    if not paths:
-        return "Update project files"
-
-    top_levels: list[str] = []
-    for path in paths:
-        top = path.split("/", 1)[0]
-        if top and top not in top_levels:
-            top_levels.append(top)
-
-    if all(code.strip() in {"A", "??"} for code in codes):
-        verb = "Add"
-    elif all("D" in code and not any(marker in code for marker in ("M", "A", "R", "C", "?")) for code in codes):
-        verb = "Remove"
-    else:
-        verb = "Update"
-
-    if len(top_levels) == 1:
-        target = top_levels[0]
-    elif len(top_levels) == 2:
-        target = f"{top_levels[0]} and {top_levels[1]}"
-    elif len(top_levels) == 3:
-        target = f"{top_levels[0]}, {top_levels[1]}, and {top_levels[2]}"
-    else:
-        target = "project files"
-    return f"{verb} {target}"[:72]
-
-
-def branch_from_push_prompt(prompt: str, current_branch: str) -> str:
-    text = prompt.strip()
-    patterns = (
-        r"\bpush\s+(?:to\s+)?origin[/\s]+(?P<branch>[A-Za-z0-9._/-]+)\b",
-        r"\bpush\s+(?:to\s+)?(?P<branch>[A-Za-z0-9._/-]+)\b",
-    )
-    ignored = {"this", "the", "current", "branch", "changes", "diff", "it", "workspace"}
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if not match:
-            continue
-        branch = match.group("branch").strip()
-        if branch.lower() not in ignored:
-            return branch
-    return current_branch
-
-
-def tag_from_prompt(prompt: str) -> str:
-    patterns = (
-        r"\b(?:tag|release)\s+(?:the\s+)?(?:release\s+)?(?P<tag>v?[0-9][A-Za-z0-9._/-]*)\b",
-        r"\btag\s+(?P<tag>[A-Za-z0-9][A-Za-z0-9._/-]*)\b",
-    )
-    ignored = {"release", "this", "the", "current", "branch", "changes", "diff", "it"}
-    for pattern in patterns:
-        match = re.search(pattern, prompt.strip(), flags=re.IGNORECASE)
-        if not match:
-            continue
-        tag = match.group("tag").strip().rstrip(".,;:")
-        if tag.lower() not in ignored:
-            return tag
-    return ""
-
-
-async def git_status_porcelain(project_path: Path) -> tuple[int, str]:
-    if not (project_path / ".git").exists():
-        return 128, "not a git repository"
-    return await run_git(project_path, "status", "--porcelain")
-
-
-def checkpoint_message(mode: str, runner: str) -> str:
-    label = "lead" if mode == "lead" else "builder"
-    return f"Dualith checkpoint: {label} via {runner}"
-
-
-def checkpoint_note(checkpoint: dict[str, str]) -> str:
-    status = checkpoint.get("status", "")
-    message = checkpoint.get("message", "")
-    if status == "committed":
-        sha = checkpoint.get("commit", "")
-        return f"Dualith checkpoint committed {sha}: {message}.".strip()
-    if status == "no_changes":
-        return "Dualith checkpoint skipped: no file changes to commit."
-    if status == "skipped":
-        return f"Dualith checkpoint skipped: {message}"
-    if status == "error":
-        return f"Dualith checkpoint failed: {message}"
-    return ""
-
-
-def append_checkpoint_note(content: str, checkpoint: dict[str, str] | None) -> str:
-    if not checkpoint:
-        return content
-    note = checkpoint_note(checkpoint)
-    if not note:
-        return content
-    separator = "\n\n" if content.strip() else ""
-    return f"{content.rstrip()}{separator}---\n\n{note}\n"
-
-
-async def backend_git_checkpoint(
-    project_path: Path,
-    mode: str,
-    runner: str,
-    pre_run_status: str,
-) -> dict[str, str]:
-    if not (project_path / ".git").exists():
-        checkpoint = {"status": "skipped", "message": "project is not a Git repository."}
-        entry = record_event("GIT_SKIP", f"{relative_path(project_path)} :: {checkpoint['message']}")
-        await broadcast("git_event", entry)
-        return checkpoint
-
-    if pre_run_status.strip():
-        checkpoint = {
-            "status": "skipped",
-            "message": "working tree was already dirty before this run, so automatic checkpointing did not mix pre-existing changes.",
-        }
-        entry = record_event("GIT_SKIP", f"{relative_path(project_path)} :: pre-existing dirty working tree")
-        await broadcast("git_event", entry)
-        return checkpoint
-
-    code, status_output = await git_status_porcelain(project_path)
-    if code != 0:
-        checkpoint = {"status": "error", "message": f"git status failed: {git_output_tail(status_output)}"}
-        entry = record_event("GIT_ERR", f"{relative_path(project_path)} :: {checkpoint['message']}")
-        await broadcast("git_event", entry)
-        return checkpoint
-
-    if not status_output.strip():
-        checkpoint = {"status": "no_changes", "message": "no file changes to commit."}
-        entry = record_event("GIT_SKIP", f"{relative_path(project_path)} :: no file changes to commit")
-        await broadcast("git_event", entry)
-        return checkpoint
-
-    excludes = [f":(exclude){path}" for path in CHECKPOINT_EXCLUDE_PATHS]
-    code, output = await run_git(project_path, "add", "-A", "--", ".", *excludes)
-    if code != 0:
-        checkpoint = {"status": "error", "message": f"git add failed: {git_output_tail(output)}"}
-        entry = record_event("GIT_ERR", f"{relative_path(project_path)} :: {checkpoint['message']}")
-        await broadcast("git_event", entry)
-        return checkpoint
-
-    code, output = await run_git(project_path, "diff", "--cached", "--quiet")
-    if code == 0:
-        checkpoint = {"status": "no_changes", "message": "no checkpointable file changes after exclusions."}
-        entry = record_event("GIT_SKIP", f"{relative_path(project_path)} :: no checkpointable file changes")
-        await broadcast("git_event", entry)
-        return checkpoint
-    if code not in {0, 1}:
-        checkpoint = {"status": "error", "message": f"git diff --cached failed: {git_output_tail(output)}"}
-        entry = record_event("GIT_ERR", f"{relative_path(project_path)} :: {checkpoint['message']}")
-        await broadcast("git_event", entry)
-        return checkpoint
-
-    message = checkpoint_message(mode, runner)
-    code, output = await run_git(
-        project_path,
-        "-c",
-        "user.name=Dualith",
-        "-c",
-        "user.email=dualith@localhost",
-        "commit",
-        "-m",
-        message,
-    )
-    if code != 0:
-        checkpoint = {"status": "error", "message": f"git commit failed: {git_output_tail(output)}"}
-        entry = record_event("GIT_ERR", f"{relative_path(project_path)} :: {checkpoint['message']}")
-        await broadcast("git_event", entry)
-        return checkpoint
-
-    rev_code, rev_output = await run_git(project_path, "rev-parse", "--short", "HEAD")
-    commit = rev_output.strip() if rev_code == 0 else ""
-    checkpoint = {"status": "committed", "message": message, "commit": commit}
-    entry = record_event("GIT_OK", f"{relative_path(project_path)} :: committed {commit} :: {message}")
-    await broadcast("git_event", entry)
-    return checkpoint
-
-
-async def current_git_branch(project_path: Path) -> tuple[int, str]:
-    code, output = await run_git(project_path, "branch", "--show-current")
-    return code, output.strip()
-
-
-def git_result_content(title: str, rows: list[tuple[str, str]], details: str = "") -> str:
-    lines = [f"### {title}", ""]
-    for label, value in rows:
-        if value:
-            lines.append(f"- {label}: {value}")
-    if details.strip():
-        lines.extend(["", "```text", details.strip(), "```"])
-    return "\n".join(lines).strip()
-
-
-async def backend_git_commit(project_path: Path, prompt: str, push_after: bool = False) -> tuple[str, str, str, int]:
-    branch_code, branch = await current_git_branch(project_path)
-    if branch_code != 0:
-        return "error", "", f"git branch failed: {branch or 'unknown error'}", branch_code
-
-    status_code, status_output = await git_status_porcelain(project_path)
-    if status_code != 0:
-        return "error", "", f"git status failed: {git_output_tail(status_output)}", status_code
-    if not status_output.strip():
-        content = git_result_content("Nothing To Commit", [("Branch", branch), ("Status", "working tree clean")])
-        return "ok", content, "", 0
-
-    stat_code, stat_output = await run_git(project_path, "diff", "--stat")
-    if stat_code != 0:
-        stat_output = ""
-
-    add_code, add_output = await run_git(project_path, "add", "-A")
-    if add_code != 0:
-        return "error", "", f"git add -A failed: {git_output_tail(add_output)}", add_code
-
-    diff_code, diff_output = await run_git(project_path, "diff", "--cached", "--quiet")
-    if diff_code == 0:
-        content = git_result_content("Nothing To Commit", [("Branch", branch), ("Status", "no staged changes after git add")])
-        return "ok", content, "", 0
-    if diff_code not in {0, 1}:
-        return "error", "", f"git diff --cached failed: {git_output_tail(diff_output)}", diff_code
-
-    message = git_message_from_prompt(prompt, generated_commit_message(status_output))
-    commit_code, commit_output = await run_git(
-        project_path,
-        "-c",
-        "user.name=Dualith",
-        "-c",
-        "user.email=dualith@localhost",
-        "commit",
-        "-m",
-        message,
-    )
-    if commit_code != 0:
-        return "error", "", f"git commit failed: {git_output_tail(commit_output)}", commit_code
-
-    rev_code, rev_output = await run_git(project_path, "rev-parse", "--short", "HEAD")
-    commit = rev_output.strip() if rev_code == 0 else ""
-    rows = [("Branch", branch), ("Commit", commit), ("Message", message)]
-    details = stat_output.strip() or status_output.strip()
-
-    if push_after:
-        push_code, push_output = await run_git(project_path, "push", "origin", branch)
-        if push_code != 0:
-            content = git_result_content("Commit Created, Push Failed", rows, push_output)
-            return "error", content, f"git push failed: {git_output_tail(push_output)}", push_code
-        rows.append(("Push", f"origin/{branch}"))
-        details = push_output.strip() or details
-
-    content = git_result_content("Commit Created", rows, details)
-    return "ok", content, "", 0
-
-
-async def backend_git_push(project_path: Path, prompt: str) -> tuple[str, str, str, int]:
-    branch_code, current_branch = await current_git_branch(project_path)
-    if branch_code != 0 or not current_branch:
-        return "error", "", f"git branch failed: {current_branch or 'not on a branch'}", branch_code or 128
-    branch = branch_from_push_prompt(prompt, current_branch)
-    push_code, push_output = await run_git(project_path, "push", "origin", branch)
-    if push_code != 0:
-        return "error", "", f"git push failed: {git_output_tail(push_output)}", push_code
-    content = git_result_content("Push Complete", [("Branch", branch), ("Remote", f"origin/{branch}")], push_output)
-    return "ok", content, "", 0
-
-
-async def backend_git_stash(project_path: Path, prompt: str) -> tuple[str, str, str, int]:
-    status_code, status_output = await git_status_porcelain(project_path)
-    if status_code != 0:
-        return "error", "", f"git status failed: {git_output_tail(status_output)}", status_code
-    if not status_output.strip():
-        content = git_result_content("Nothing To Stash", [("Status", "working tree clean")])
-        return "ok", content, "", 0
-    message = git_message_from_prompt(prompt, f"Dualith stash {utc_now()}")
-    stash_code, stash_output = await run_git(project_path, "stash", "push", "-u", "-m", message)
-    if stash_code != 0:
-        return "error", "", f"git stash failed: {git_output_tail(stash_output)}", stash_code
-    content = git_result_content("Stash Created", [("Message", message)], stash_output or status_output)
-    return "ok", content, "", 0
-
-
-async def backend_git_tag(project_path: Path, prompt: str) -> tuple[str, str, str, int]:
-    tag = tag_from_prompt(prompt)
-    if not tag:
-        return "error", "", "No tag name was provided. Try `tag v1.2.3` or `git tag v1.2.3`.", 2
-    tag_code, tag_output = await run_git(project_path, "tag", tag)
-    if tag_code != 0:
-        return "error", "", f"git tag failed: {git_output_tail(tag_output)}", tag_code
-    content = git_result_content("Tag Created", [("Tag", tag)], tag_output)
-    return "ok", content, "", 0
-
-
-async def perform_backend_git_operation(project_path: Path, prompt: str) -> tuple[str, str, str, int]:
-    if not (project_path / ".git").exists():
-        return "error", "", "Project is not a Git repository.", 128
-    operation = direct_git_operation(prompt)
-    if operation == "commit":
-        return await backend_git_commit(project_path, prompt)
-    if operation == "commit-push":
-        return await backend_git_commit(project_path, prompt, push_after=True)
-    if operation == "push":
-        return await backend_git_push(project_path, prompt)
-    if operation == "stash":
-        return await backend_git_stash(project_path, prompt)
-    if operation == "tag":
-        return await backend_git_tag(project_path, prompt)
-    status_code, status_output = await git_status_porcelain(project_path)
-    if status_code != 0:
-        return "error", "", f"git status failed: {git_output_tail(status_output)}", status_code
-    content = git_result_content("Git Status", [("Status", status_output.strip() or "working tree clean")])
-    return "ok", content, "", 0
-
-
 async def run_backend_git_operation(
     project_name: str,
     project_path: Path,
@@ -3969,54 +1733,6 @@ async def run_backend_git_operation(
     else:
         await broadcast("agent_event", record_event("GIT_ERR", f"{relative_path(project_path)} :: {error[:180]}"))
     return result
-
-
-def git_head_token(project_path: Path) -> str:
-    """Cheap fingerprint of a repo's current tip, read without spawning git.
-
-    Returns "" when it can't be determined, which disables caching for that
-    repo rather than risking a stale answer.
-    """
-    git_dir = project_path / ".git"
-    try:
-        head = git_dir / "HEAD"
-        raw = head.read_text(encoding="utf-8", errors="replace").strip()
-        parts = [raw, str(head.stat().st_mtime_ns)]
-        if raw.startswith("ref: "):
-            for candidate in (git_dir / raw[5:].strip(), git_dir / "packed-refs"):
-                if candidate.exists():
-                    parts.append(f"{candidate.name}:{candidate.stat().st_mtime_ns}")
-        return "|".join(parts)
-    except OSError:
-        return ""
-
-
-async def latest_project_commits(project_path: Path) -> list[str]:
-    if not (project_path / ".git").exists():
-        return []
-
-    # This runs once per project per snapshot, and snapshots are frequent.
-    # Skip the subprocess whenever the repo tip hasn't moved.
-    token = git_head_token(project_path)
-    cache_key = display_path(project_path)
-    if token:
-        cached = project_commits_cache.get(cache_key)
-        if cached is not None and cached[0] == token:
-            return cached[1]
-
-    try:
-        code, output = await run_git(project_path, "log", "--oneline", "-5")
-    except Exception:
-        log.warning("git log failed  project=%s", display_path(project_path), exc_info=True)
-        return []
-
-    if code != 0 or not output:
-        return []
-
-    commits = output.splitlines()[:5]
-    if token:
-        project_commits_cache[cache_key] = (token, commits)
-    return commits
 
 
 def path_belongs_to_project(entry_path: str, project_path: Path) -> bool:
@@ -4376,10 +2092,6 @@ async def bootstrap_git(project_path: Path) -> None:
     except Exception as exc:
         entry = record_event("GIT_ERR", f"{relative_path(project_path)} :: {type(exc).__name__}: {exc}")
         await broadcast("git_event", entry)
-
-
-def parse_shell_words(raw_args: str) -> list[str]:
-    return [part for part in shlex.split(raw_args, posix=True) if part]
 
 
 def parse_model_args(raw_args: str, model: str) -> list[str]:
@@ -4797,41 +2509,6 @@ def clean_reasoning(value: str) -> str:
     return reasoning or "medium"
 
 
-def _month_start_hours() -> float:
-    now = datetime.now(timezone.utc)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    return max((now - month_start).total_seconds() / 3600, 1)
-
-
-def _next_reset_label(hours: float) -> str:
-    """Human label for when a rolling window resets (e.g. '4h', '2d 3h')."""
-    total_h = int(hours)
-    days = total_h // 24
-    rem_h = total_h % 24
-    if days and rem_h:
-        return f"{days}d {rem_h}h"
-    if days:
-        return f"{days}d"
-    return f"{rem_h}h"
-
-
-def status_entry_has_period_data(entry: dict[str, Any]) -> bool:
-    parsed = entry.get("parsed", {})
-    if not isinstance(parsed, dict):
-        return False
-    for period in parsed.values():
-        if not isinstance(period, dict):
-            continue
-        try:
-            used = int(period.get("used") or 0)
-            limit = int(period.get("limit") or 0)
-        except (TypeError, ValueError):
-            continue
-        if used > 0 or limit > 0:
-            return True
-    return False
-
-
 async def refresh_codex_status_from_logs() -> dict[str, Any]:
     """Fallback: read Codex token usage from ~/.codex/sessions/**/*.jsonl session files."""
     checked_at = utc_now()
@@ -5041,24 +2718,7 @@ async def refresh_runner_status(runner: str) -> dict[str, Any]:
 
 
 def get_status_refresh_lock() -> asyncio.Lock:
-    global status_refresh_lock
-    if status_refresh_lock is None:
-        status_refresh_lock = asyncio.Lock()
-    return status_refresh_lock
-
-
-def status_cache_fresh(cache: dict[str, Any], ttl_seconds: int = STATUS_REFRESH_TTL_SECONDS) -> bool:
-    if ttl_seconds <= 0:
-        return False
-    checked_times: list[datetime] = []
-    for runner in ("codex", "claude"):
-        checked_at = str((cache.get(runner) or {}).get("checked_at") or "")
-        parsed = parse_timestamp(checked_at)
-        if not parsed:
-            return False
-        checked_times.append(parsed)
-    oldest = min(checked_times)
-    return (datetime.now(timezone.utc) - oldest).total_seconds() < ttl_seconds
+    return status_refresh.get_lock()
 
 
 async def compute_status_cache() -> dict[str, Any]:
@@ -5090,11 +2750,10 @@ async def run_status_refresh_scan(emit_events: bool = False, force: bool = False
 
 
 def status_refresh_running() -> bool:
-    return bool(status_refresh_task and not status_refresh_task.done()) or get_status_refresh_lock().locked()
+    return status_refresh.running()
 
 
 async def refresh_status_cache(emit_events: bool = False, wait: bool = True, force: bool = False) -> tuple[dict[str, Any], str]:
-    global status_refresh_task
     cache = read_status_cache()
     if not force and status_cache_fresh(cache):
         return cache, "fresh"
@@ -5105,7 +2764,7 @@ async def refresh_status_cache(emit_events: bool = False, wait: bool = True, for
     if wait:
         return await run_status_refresh_scan(emit_events=emit_events, force=force)
 
-    status_refresh_task = asyncio.create_task(run_status_refresh_scan(emit_events=emit_events, force=force))
+    status_refresh.task = asyncio.create_task(run_status_refresh_scan(emit_events=emit_events, force=force))
     return cache, "refreshing"
 
 
@@ -5144,23 +2803,6 @@ def registry_preferred_runner(agent: str) -> str:
     if agent in REVIEW_AGENTS:
         return "claude"
     return "codex"
-
-
-def quota_int(value: Any) -> int:
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-def quota_period_headroom(period: dict[str, Any]) -> float:
-    if not bool(period.get("available", True)):
-        return -1.0
-    usable_limit = quota_int(period.get("usable_limit"))
-    if usable_limit <= 0:
-        return 1.0
-    usable_remaining = quota_int(period.get("usable_remaining"))
-    return max(0.0, min(1.0, usable_remaining / usable_limit))
 
 
 def runner_headroom_score(runner: str, quota: dict[str, Any]) -> float:

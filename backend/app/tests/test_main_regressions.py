@@ -26,6 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 main = pytest.importorskip("backend.app.main")
+git_ops = pytest.importorskip("backend.app.git_ops")
 
 
 # ── stop_team_after_failed_step: the NameError ────────────────────────────────
@@ -176,9 +177,10 @@ def test_broadcast_sends_snapshot_when_a_client_is_attached(
 
 
 # ── latest_project_commits: no git log when the tip hasn't moved ──────────────
+# (now lives in git_ops.py; the behaviour under test is unchanged)
 
 def test_git_head_token_is_empty_for_non_repo(tmp_path: Path) -> None:
-    assert main.git_head_token(tmp_path) == ""
+    assert git_ops.git_head_token(tmp_path) == ""
 
 
 def test_git_head_token_changes_when_head_moves(tmp_path: Path) -> None:
@@ -187,8 +189,8 @@ def test_git_head_token_changes_when_head_moves(tmp_path: Path) -> None:
     (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     (git_dir / "refs" / "heads" / "main").write_text("a" * 40, encoding="utf-8")
 
-    before = main.git_head_token(tmp_path)
+    before = git_ops.git_head_token(tmp_path)
     assert before != ""
 
     (git_dir / "refs" / "heads" / "main").write_text("b" * 40, encoding="utf-8")
-    assert main.git_head_token(tmp_path) != before
+    assert git_ops.git_head_token(tmp_path) != before
