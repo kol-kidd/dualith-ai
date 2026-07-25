@@ -72,6 +72,7 @@ import {
   promptWithAgenticChoice,
   likelyWorkflow,
 } from "../_helpers";
+import { apiFetch } from "../../lib/api";
 import {
   AgentProse,
   Badge,
@@ -767,7 +768,7 @@ export function ChatComposer({
     if (!project || runPrompt.trim().length < 4) { setRouteHint(null); return; }
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch(`${apiBase}/api/projects/${encodeURIComponent(project.name)}/route-preview?message=${encodeURIComponent(runPrompt.trim())}`);
+        const res = await apiFetch(`${apiBase}/api/projects/${encodeURIComponent(project.name)}/route-preview?message=${encodeURIComponent(runPrompt.trim())}`);
         if (res.ok) {
           const data = await res.json() as { intent: string; workflow: string; estimated_calls: number };
           setRouteHint({ intent: data.intent, calls: data.estimated_calls });
@@ -815,7 +816,7 @@ export function ChatComposer({
     if (!attachments.length) return [];
     const formData = new FormData();
     for (const att of attachments) formData.append("files", att.file, att.name);
-    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/attachments`, { method: "POST", body: formData });
+    const response = await apiFetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/attachments`, { method: "POST", body: formData });
     if (!response.ok) throw new Error(await readErrorMessage(response));
     const data = (await response.json()) as { paths: string[] };
     return data.paths ?? [];

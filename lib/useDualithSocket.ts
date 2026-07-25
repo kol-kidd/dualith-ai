@@ -129,6 +129,13 @@ export function useDualithSocket({ url, onSnapshot, onDelta }: UseDualithSocketO
   }, []);
 
   useEffect(() => {
+    // The URL is empty until the session token has been fetched — the server
+    // rejects a tokenless handshake, so wait rather than connect-and-fail.
+    if (!url) {
+      setStatus("Connecting...");
+      return;
+    }
+
     let closed = false;
     let reconnectTimer: number | undefined;
 

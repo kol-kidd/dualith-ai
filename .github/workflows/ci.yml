@@ -54,10 +54,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # Dev tools are pinned so a new ruff release cannot turn the build red
-      # on its own.
+      # requirements-dev.txt pins the tooling (and includes requirements.txt),
+      # so CI and a local checkout resolve to the same versions.
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest==9.1.1 pytest-asyncio==1.4.0 ruff==0.15.8
+        run: pip install -r requirements-dev.txt
 
       - name: Lint
         id: lint

@@ -34,6 +34,7 @@ import {
   FormattedAgentOutput,
   RunnerMascot,
 } from "./primitives";
+import { apiFetch } from "../../lib/api";
 
 type SetupFormProps = {
   name: string;
@@ -146,7 +147,7 @@ function ProjectImportForm({ projectsRoot, onImported }: { projectsRoot: string;
       formData.append("spec", spec);
       for (const file of files) formData.append("files", file, file.webkitRelativePath || file.name);
 
-      const response = await fetch(`${apiBase}/api/projects/import`, { method: "POST", body: formData });
+      const response = await apiFetch(`${apiBase}/api/projects/import`, { method: "POST", body: formData });
       if (!response.ok) throw new Error(await readErrorMessage(response));
       await onImported(projectName);
       setFiles([]); setRawFileCount(0); setSkippedFileCount(0); setFolderName("Choose folder"); setName(""); setSpec(defaultSpec); setStatus("Imported");
@@ -257,7 +258,7 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, providerSlots, 
     let output = "";
     let partialSaved = false;
     try {
-      const response = await fetch(`${apiBase}/api/ideas/${encodeURIComponent(ideaId)}/chat`, {
+      const response = await apiFetch(`${apiBase}/api/ideas/${encodeURIComponent(ideaId)}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt, runner }),
@@ -300,7 +301,7 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, providerSlots, 
     setBusy("create");
     setStatusText("Saving idea...");
     try {
-      const response = await fetch(`${apiBase}/api/ideas`, {
+      const response = await apiFetch(`${apiBase}/api/ideas`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ raw_idea: rawIdea }),
@@ -334,7 +335,7 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, providerSlots, 
     let output = "";
     let partialSaved = false;
     try {
-      const response = await fetch(`${apiBase}/api/ideas/${encodeURIComponent(selected.id)}/brief`, {
+      const response = await apiFetch(`${apiBase}/api/ideas/${encodeURIComponent(selected.id)}/brief`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ runner }),
@@ -369,7 +370,7 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, providerSlots, 
     setBusy("save");
     setStatusText("Saving...");
     try {
-      const response = await fetch(`${apiBase}/api/ideas/${encodeURIComponent(selected.id)}`, {
+      const response = await apiFetch(`${apiBase}/api/ideas/${encodeURIComponent(selected.id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -396,7 +397,7 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, providerSlots, 
     setBusy("delete");
     setStatusText("Deleting...");
     try {
-      const response = await fetch(`${apiBase}/api/ideas/${encodeURIComponent(selected.id)}`, { method: "DELETE" });
+      const response = await apiFetch(`${apiBase}/api/ideas/${encodeURIComponent(selected.id)}`, { method: "DELETE" });
       if (!response.ok) throw new Error(await readErrorMessage(response));
       setSelectedId(null);
       await onRefresh();
@@ -421,7 +422,7 @@ export function IdeasDrawer({ ideas, projectsRoot, runnerHealth, providerSlots, 
     setBusy("promote");
     setStatusText("Creating project...");
     try {
-      const response = await fetch(`${apiBase}/api/ideas/${encodeURIComponent(selected.id)}/promote`, {
+      const response = await apiFetch(`${apiBase}/api/ideas/${encodeURIComponent(selected.id)}/promote`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: projectName, brief: briefDraft, stack_profile: "smart" }),

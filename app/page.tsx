@@ -70,6 +70,7 @@ import {
   ProjectSwitcher,
   SettingsMenu,
 } from "./components/ui";
+import { apiFetch, setSessionToken, socketUrl } from "../lib/api";
 
 function DualithApp() {
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -154,7 +155,7 @@ function DualithApp() {
   }, []);
 
   const refreshProjects = useCallback(async (preferredName?: string) => {
-    const response = await fetch(`${apiBase}/api/projects`, { cache: "no-store" });
+    const response = await apiFetch(`${apiBase}/api/projects`, { cache: "no-store" });
     if (!response.ok) throw new Error(await readErrorMessage(response));
     applySnapshot(await response.json(), preferredName);
   }, [applySnapshot]);
@@ -163,9 +164,14 @@ function DualithApp() {
   // Also captures the per-session CSRF token used to authenticate mutating setup calls
   // and the per-slot provider summary used to label the run-settings picker.
   const refreshSetupStatus = useCallback(async () => {
-    const res = await fetch(`${apiBase}/api/setup/status`, { cache: "no-store" });
+    const res = await apiFetch(`${apiBase}/api/setup/status`, { cache: "no-store" });
     const d = await res.json();
-    if (d.token) setSetupToken(d.token);
+    if (d.token) {
+      // Must reach the api client before any mutating call or the socket
+      // connect, both of which the backend now rejects without it.
+      setSessionToken(d.token);
+      setSetupToken(d.token);
+    }
     setProviderSlots((d.slots as ProviderSlots) ?? null);
     return Boolean(d.configured);
   }, []);
@@ -413,7 +419,7 @@ function DualithApp() {
   }, [applySnapshot]);
 
   const { status: socketStatus } = useDualithSocket({
-    url: `${wsBase}/ws`,
+    url: setupToken ? socketUrl(wsBase) : "",
     onSnapshot: onSocketSnapshot,
     onDelta: applyDelta,
   });
@@ -430,7 +436,7 @@ function DualithApp() {
   }, [socketStatus, refreshProjects]);
 
   const submitHumanAnswer = useCallback(async (projectName: string, answer: string) => {
-    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/human-input`, {
+    const response = await apiFetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/human-input`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ answer }),
@@ -450,7 +456,7 @@ function DualithApp() {
       route_mode: options.routeMode ?? "auto",
       team_mode: options.teamMode ?? "lean",
     };
-    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat`, {
+    const response = await apiFetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -460,7 +466,7 @@ function DualithApp() {
   }, [applySnapshot]);
 
   const approvePlan = useCallback(async (projectName: string, approved: boolean, comment?: string) => {
-    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat/plan-approve`, {
+    const response = await apiFetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat/plan-approve`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ approved, comment: comment ?? "" }),
@@ -470,7 +476,7 @@ function DualithApp() {
   }, [applySnapshot]);
 
   const stopChat = useCallback(async (projectName: string) => {
-    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat/stop`, { method: "POST" });
+    const response = await apiFetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat/stop`, { method: "POST" });
     if (response.ok) {
       // Apply the stop response snapshot (backend force-evicts stale state before responding).
       applySnapshot(await response.json(), projectName);
@@ -486,13 +492,13 @@ function DualithApp() {
   }, [applySnapshot, refreshProjects]);
 
   const clearChatHistory = useCallback(async (projectName: string) => {
-    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat/clear`, { method: "POST" });
+    const response = await apiFetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/chat/clear`, { method: "POST" });
     if (!response.ok) throw new Error(await readErrorMessage(response));
     applySnapshot(await response.json(), projectName);
   }, [applySnapshot]);
 
   const runDevServerAction = useCallback(async (projectName: string, action: DevServerAction) => {
-    const response = await fetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/dev-server/${action}`, {
+    const response = await apiFetch(`${apiBase}/api/projects/${encodeURIComponent(projectName)}/dev-server/${action}`, {
       method: "POST",
       headers: action === "stop" ? undefined : { "Content-Type": "application/json" },
       body: action === "stop" ? undefined : JSON.stringify({}),
@@ -502,7 +508,7 @@ function DualithApp() {
   }, [applySnapshot]);
 
   const saveQuota = useCallback(async (settings: QuotaSettings) => {
-    const response = await fetch(`${apiBase}/api/quota`, {
+    const response = await apiFetch(`${apiBase}/api/quota`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(settings),
@@ -512,7 +518,7 @@ function DualithApp() {
   }, [applySnapshot]);
 
   const refreshStatus = useCallback(async (force = false) => {
-    const response = await fetch(`${apiBase}/api/status/refresh${force ? "?force=true" : ""}`, { method: "POST" });
+    const response = await apiFetch(`${apiBase}/api/status/refresh${force ? "?force=true" : ""}`, { method: "POST" });
     if (!response.ok) throw new Error(await readErrorMessage(response));
     const refreshState = response.headers.get("X-Dualith-Status-Refresh") as StatusRefreshState | null;
     applySnapshot(await response.json());
@@ -707,7 +713,7 @@ function DualithApp() {
             onQuotaSave={saveQuota}
             onStatusRefresh={refreshStatus}
             onReconfigure={async () => {
-              await fetch(`${apiBase}/api/setup/config`, { method: "DELETE", headers: { "X-Dualith-Token": setupToken } });
+              await apiFetch(`${apiBase}/api/setup/config`, { method: "DELETE" });
               setQuotaModalOpen(false);
               setWizardOpen(true);
             }}

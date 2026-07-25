@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { apiFetch } from "../../lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4200";
 
@@ -175,7 +176,7 @@ function ModelField({
     setFetchError("");
     const handle = setTimeout(async () => {
       try {
-        const resp = await fetch(`${API_BASE}/api/setup/models`, {
+        const resp = await apiFetch(`${API_BASE}/api/setup/models`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-Dualith-Token": token },
           body: JSON.stringify({
@@ -466,7 +467,7 @@ export function SetupWizard({ token, onComplete }: { token: string; onComplete: 
     setTestResults({ runner_a: null, runner_b: null });
     setSaveError("");
     try {
-      const resp = await fetch(`${API_BASE}/api/setup/test`, {
+      const resp = await apiFetch(`${API_BASE}/api/setup/test`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Dualith-Token": token },
         body: JSON.stringify({
@@ -499,7 +500,7 @@ export function SetupWizard({ token, onComplete }: { token: string; onComplete: 
     setSaving(true);
     setSaveError("");
     try {
-      const resp = await fetch(`${API_BASE}/api/setup/save`, {
+      const resp = await apiFetch(`${API_BASE}/api/setup/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Dualith-Token": token },
         body: JSON.stringify({

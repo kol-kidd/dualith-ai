@@ -2,7 +2,7 @@
 
 ## Context
 
-Dualith orchestrates Codex/Claude CLIs as a multi-agent team (FastAPI backend `backend/app/main.py` ~9k lines + Next.js UI `app/page.tsx` ~9k lines). The user reports everything feels clunky, slow, and token-hungry. A prior audit (AUDIT.md, 2026-06-10) covered security; this one covers **token usage, latency, and UI responsiveness**. Deliverable: audit report + a prioritized remediation plan.
+Dualith orchestrates Codex/Claude CLIs as a multi-agent team (FastAPI backend `backend/app/main.py` + Next.js UI). The line counts quoted throughout this document are from the time of writing (2026-06); `app/page.tsx` has since been split down to ~730 lines, so treat sizes here as point-in-time. The user reports everything feels clunky, slow, and token-hungry. A prior audit (AUDIT.md, 2026-06-10) covered security; this one covers **token usage, latency, and UI responsiveness**. Deliverable: audit report + a prioritized remediation plan.
 
 ---
 

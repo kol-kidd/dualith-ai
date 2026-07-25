@@ -135,7 +135,7 @@ backend/app/
 - **Streaming:** CLI output (Codex `exec --json` JSONL, Claude `--output-format stream-json --verbose`) and HTTP SSE for API key slots, normalised per-runner.
 - **Agent runners:** two configurable slots — each runs a CLI subprocess (subscription mode) or makes direct HTTP calls to any OpenAI-compatible provider (API key mode), with quota-aware dual-runner takeover.
 - **Provider layer:** `providers.py` owns the provider registry (Claude, OpenAI, OpenRouter, Gemini) and the HTTP streaming adapter. API keys are stored in the OS keyring. Runner slots are configured at first launch and can be reconfigured from the Quota panel.
-- **Security:** CSRF token on all mutating setup endpoints; SSRF validation on provider URLs; API keys never written to disk.
+- **Security:** session token required on every mutating endpoint and on the WebSocket; Origin allowlist on all routes (loopback only unless LAN mode); SSRF validation on provider URLs; API keys stored in the OS keyring, never written to disk. See [Security model](#security-model).
 - **Local state:** `.dualith/` stores project registry, usage history, quota settings, and status cache. Provider config stored separately in the OS keyring.
 - **Project files:** each workspace gets `SPEC.md`, `PLAN.md`, `FEEDBACK.md`, `AGENT_CHAT.md`, `CHAT_HISTORY.md`, `HUMAN_INPUT.md`, `PRODUCT.md`, `DESIGN.md`, `CLAUDE.md`.
 
@@ -197,6 +197,13 @@ The `DUALITH_CODEX_*` and `DUALITH_CLAUDE_*` variables configure the two default
 | `DUALITH_IDEA_RUN_TIMEOUT` | Timeout in seconds for Ideas planning chat and brief generation. Defaults to `300`. |
 | `DUALITH_IDEA_CODEX_SEARCH` | Enables native Codex web search for Ideas planning when set to `1`. Defaults to `1`. |
 | `DUALITH_IDEA_CLAUDE_TOOLS` | Claude CLI tools available to Ideas planning. Defaults to `WebSearch,WebFetch`. |
+| `DUALITH_LAN_MODE` | Binds to the local network and allows private-network browser origins. Off by default — see [Security model](#security-model). |
+| `DUALITH_MAX_CONCURRENT_ORCHESTRATIONS` | How many projects may run at once. Defaults to `4`; further starts get a 429 and queued tasks wait. |
+| `DUALITH_LOG_LEVEL` | On-disk log level. Defaults to `INFO`; `DEBUG` records every filesystem event and raw arguments. |
+| `DUALITH_FS_BROADCAST_DEBOUNCE_SECONDS` | Trailing window used to coalesce filesystem events into one snapshot. Defaults to `0.25`. |
+| `DUALITH_ENABLE_API_DOCS` | Serves `/docs`, `/redoc` and `/openapi.json` when set to `1`. Off by default. |
+
+Unknown `DUALITH_*` names and unparseable numeric values are reported as warnings at startup rather than silently ignored.
 
 ## Running Locally
 
@@ -219,6 +226,40 @@ LAN mode (binds to local network, prints phone URL):
 ```powershell
 npm run dev:lan
 ```
+
+> **LAN mode widens the trust boundary.** It binds the API to your local network
+> and allows browser origins from private IP ranges (`10.x`, `192.168.x`,
+> `172.16-31.x`). Anyone who can reach that address and read the session token
+> can drive agents that write to your project folders. Use it only on a network
+> you trust. It is off unless you ask for it.
+
+## Security model
+
+Dualith is a single-user local tool that spawns AI CLIs against your own
+project folders. What that means in practice:
+
+| Boundary | Behaviour |
+|---|---|
+| Network binding | `127.0.0.1` by default; the whole LAN only with `DUALITH_LAN_MODE=1` |
+| Browser origins | Loopback only; private-network origins added in LAN mode. Anything else gets 403 on every route, including the WebSocket |
+| Mutating endpoints | Require `X-Dualith-Token`, a token regenerated each server start |
+| WebSocket | Rejects the handshake without a valid Origin *and* token — WebSockets bypass CORS, so both are checked explicitly |
+| API docs | `/docs`, `/redoc` and `/openapi.json` are off unless `DUALITH_ENABLE_API_DOCS=1` |
+| Concurrency | At most `DUALITH_MAX_CONCURRENT_ORCHESTRATIONS` (default 4) projects run at once |
+| Attachments | Uploads are checked by content (magic bytes), not by filename extension; reads are contained to the project's attachment directory |
+
+Things worth knowing before you point Dualith at a repository:
+
+- **Agents execute code from the project you point them at.** The Tester runs
+  that project's `npm run test/build/check`, `make test`, and `pytest`, and
+  write-capable agents in API-key mode have a `run_command` tool. A repository
+  you do not trust can therefore run commands on your machine. This is what the
+  tool is for; there is no sandbox between an agent and your filesystem.
+- **Prompts and agent output are written to `.dualith/logs/`.** Anything you
+  paste into a prompt — including a secret — lands in those files. On-disk log
+  level defaults to `INFO`; `DUALITH_LOG_LEVEL=DEBUG` records considerably more.
+- **API keys** live in the OS keyring. If the keyring is unavailable the backend
+  logs a warning and falls back to plaintext on disk.
 
 ## Auto-Start On Windows
 

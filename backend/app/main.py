@@ -12,6 +12,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,7 @@ from watchdog.observers import Observer
 
 from . import brain as brain_module
 from .dialogue import HANDOFF_PROMPT_TRAILER, Handoff, bounce_prompt, parse_handoff
+from .env import INVALID_ENV_VALUES, env_float, env_int
 from .events import event_bus, narration_for
 from .failures import translate as translate_failure
 from .prompts import (
@@ -115,17 +117,21 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 DUALITH_DIR = ROOT_DIR / ".dualith"
 REGISTRY_PATH = DUALITH_DIR / "projects.json"
 
-# ── Setup token ───────────────────────────────────────────────────────────────
+# ── Session token ─────────────────────────────────────────────────────────────
 # Generated fresh each server start. The frontend reads it from /api/setup/status
-# and sends it as X-Dualith-Token on all mutating setup calls.
-# A cross-origin page cannot read the status response body (CORS blocks it), and
-# cannot send an unknown custom header without a preflight that CORS will deny.
-_SETUP_TOKEN: str = secrets.token_urlsafe(32)
+# and sends it as X-Dualith-Token on every mutating call and on the WebSocket.
+#
+# The token alone is not the boundary — /api/setup/status has to be readable
+# before the caller has a token, so it is guarded by the Origin allowlist
+# instead (see require_allowed_origin). The two together mean a page from an
+# origin we don't serve can neither read the token nor act without one.
+_SESSION_TOKEN: str = secrets.token_urlsafe(32)
 
 
-async def _require_setup_token(x_dualith_token: str | None = Header(None)) -> None:
-    if x_dualith_token != _SETUP_TOKEN:
-        raise HTTPException(status_code=403, detail="Missing or invalid setup token")
+async def require_session_token(x_dualith_token: str | None = Header(None)) -> None:
+    """Reject mutating calls that don't carry this server run's token."""
+    if not secrets.compare_digest(x_dualith_token or "", _SESSION_TOKEN):
+        raise HTTPException(status_code=403, detail="Missing or invalid Dualith token")
 
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -133,8 +139,14 @@ def _setup_logger() -> logging.Logger:
     _log_dir = DUALITH_DIR / "logs"
     _log_dir.mkdir(parents=True, exist_ok=True)
 
+    # Prompts and agent output pass through this logger, so the on-disk level
+    # is INFO by default — DEBUG records every filesystem event and every raw
+    # argument. Set DUALITH_LOG_LEVEL=DEBUG when actually debugging.
+    _level_name = os.environ.get("DUALITH_LOG_LEVEL", "INFO").upper()
+    _level = getattr(logging, _level_name, logging.INFO)
+
     _logger = logging.getLogger("dualith")
-    _logger.setLevel(logging.DEBUG)
+    _logger.setLevel(_level)
 
     if _logger.handlers:
         return _logger  # already configured (e.g. on hot-reload)
@@ -143,7 +155,7 @@ def _setup_logger() -> logging.Logger:
     _file_handler = logging.handlers.RotatingFileHandler(
         _log_dir / "dualith.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
-    _file_handler.setLevel(logging.DEBUG)
+    _file_handler.setLevel(_level)
 
     class _JsonFormatter(logging.Formatter):
         def format(self, record: logging.LogRecord) -> str:
@@ -154,8 +166,13 @@ def _setup_logger() -> logging.Logger:
             }
             if record.exc_info:
                 payload["exc"] = self.formatException(record.exc_info)
+            # `args` is deliberately excluded: getMessage() has already
+            # rendered it, and copying it verbatim duplicates prompt text and
+            # agent output into the log payload.
             extra = {k: v for k, v in record.__dict__.items()
-                     if k not in logging.LogRecord.__dict__ and not k.startswith("_")}
+                     if k not in logging.LogRecord.__dict__
+                     and not k.startswith("_")
+                     and k != "args"}
             if extra:
                 payload.update(extra)
             return json.dumps(payload, default=str)
@@ -187,17 +204,100 @@ CHECKPOINT_EXCLUDE_PATHS = (*sorted(SKIP_IMPORT_DIRS - {".git"}), ".dualith", ".
 CHECKPOINT_MODES = {"builder", "lead"}
 USAGE_RUN_LIMIT = 500
 STATUS_OUTPUT_LIMIT = 8_000
-STATUS_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_STATUS_TIMEOUT_SECONDS", "15"))
-STATUS_REFRESH_TTL_SECONDS = int(os.environ.get("DUALITH_STATUS_REFRESH_TTL_SECONDS", "60"))
-CLAUDE_STATUSLINE_TTL_SECONDS = int(os.environ.get("DUALITH_CLAUDE_STATUSLINE_TTL_SECONDS", "1800"))
-CODEX_APP_SERVER_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_CODEX_APP_SERVER_TIMEOUT_SECONDS", str(STATUS_TIMEOUT_SECONDS)))
-AGENT_IDLE_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_AGENT_IDLE_TIMEOUT_SECONDS", "600"))
+STATUS_TIMEOUT_SECONDS = env_int("DUALITH_STATUS_TIMEOUT_SECONDS", 15)
+STATUS_REFRESH_TTL_SECONDS = env_int("DUALITH_STATUS_REFRESH_TTL_SECONDS", 60)
+CLAUDE_STATUSLINE_TTL_SECONDS = env_int("DUALITH_CLAUDE_STATUSLINE_TTL_SECONDS", 1800)
+CODEX_APP_SERVER_TIMEOUT_SECONDS = env_int("DUALITH_CODEX_APP_SERVER_TIMEOUT_SECONDS", STATUS_TIMEOUT_SECONDS)
+AGENT_IDLE_TIMEOUT_SECONDS = env_int("DUALITH_AGENT_IDLE_TIMEOUT_SECONDS", 600)
+# Ceiling on how many projects may be mid-run at once. Each project is already
+# capped at one orchestration; this bounds the total so repeated start calls
+# cannot spawn runner subprocesses without limit.
+MAX_CONCURRENT_ORCHESTRATIONS = env_int("DUALITH_MAX_CONCURRENT_ORCHESTRATIONS", 4)
+
+# Every DUALITH_* setting the backend or the launch scripts read. Used at
+# startup to flag typo'd names instead of silently falling back.
+KNOWN_DUALITH_ENV_VARS = frozenset({
+    "DUALITH_AGENT_IDLE_TIMEOUT_SECONDS",
+    "DUALITH_API_HOST",
+    "DUALITH_API_PORT",
+    "DUALITH_CHAT_HISTORY_PROMPT_CHARS",
+    "DUALITH_CLAUDE_ARGS",
+    "DUALITH_CLAUDE_CHEAP_MODEL",
+    "DUALITH_CLAUDE_COMMAND",
+    "DUALITH_CLAUDE_MODEL_ARGS",
+    "DUALITH_CLAUDE_RATE_LIMIT_CACHE",
+    "DUALITH_CLAUDE_REASONING_ARGS",
+    "DUALITH_CLAUDE_STATUSLINE_TTL_SECONDS",
+    "DUALITH_CLAUDE_STATUS_ARGS",
+    "DUALITH_CLAUDE_STATUS_COMMAND",
+    "DUALITH_CLAUDE_STREAM",
+    "DUALITH_CODEX_APP_SERVER_ARGS",
+    "DUALITH_CODEX_APP_SERVER_TIMEOUT_SECONDS",
+    "DUALITH_CODEX_ARGS",
+    "DUALITH_CODEX_CHEAP_MODEL",
+    "DUALITH_CODEX_COMMAND",
+    "DUALITH_CODEX_MODEL_ARGS",
+    "DUALITH_CODEX_REASONING_ARGS",
+    "DUALITH_CODEX_STATUS_ARGS",
+    "DUALITH_CODEX_STATUS_COMMAND",
+    "DUALITH_COMPLEX_TASK_TERMS",
+    "DUALITH_DEFAULT_RUNNER_POLICY",
+    "DUALITH_DYNAMIC_ORCHESTRATION",
+    "DUALITH_ENABLE_API_DOCS",
+    "DUALITH_FS_BROADCAST_DEBOUNCE_SECONDS",
+    "DUALITH_IDEA_CLAUDE_TOOLS",
+    "DUALITH_IDEA_CODEX_SEARCH",
+    "DUALITH_IDEA_RUN_TIMEOUT",
+    "DUALITH_LAN_API_BASE_URL",
+    "DUALITH_LAN_IP",
+    "DUALITH_LAN_MODE",
+    "DUALITH_LEAN_TEAM_MAX_ROUNDS",
+    "DUALITH_LOG_LEVEL",
+    "DUALITH_MAX_BOUNCES",
+    "DUALITH_MAX_CONCURRENT_ORCHESTRATIONS",
+    "DUALITH_NEXT_DIST_DIR",
+    "DUALITH_PIPELINE_MAX_ITERATIONS",
+    "DUALITH_PROJECTS_ROOT",
+    "DUALITH_PROJECT_PREVIEW_HOST",
+    "DUALITH_PROJECT_PREVIEW_PORT",
+    "DUALITH_PROJECT_PREVIEW_PORT_START",
+    "DUALITH_PROJECT_PREVIEW_URL",
+    "DUALITH_RESERVED_PORTS",
+    "DUALITH_REVIEW_RUNNER",
+    "DUALITH_SPEC_REFINE_TIMEOUT",
+    "DUALITH_STATUS_REFRESH_TTL_SECONDS",
+    "DUALITH_STATUS_TIMEOUT_SECONDS",
+    "DUALITH_TEAM_MAX_ROUNDS",
+    "DUALITH_WEB_HOST",
+    "DUALITH_WEB_PORT",
+})
+# Settings parsed as numbers — a non-numeric value is silently discarded.
+NUMERIC_DUALITH_ENV_VARS = frozenset({
+    "DUALITH_AGENT_IDLE_TIMEOUT_SECONDS",
+    "DUALITH_API_PORT",
+    "DUALITH_CHAT_HISTORY_PROMPT_CHARS",
+    "DUALITH_CLAUDE_STATUSLINE_TTL_SECONDS",
+    "DUALITH_CODEX_APP_SERVER_TIMEOUT_SECONDS",
+    "DUALITH_FS_BROADCAST_DEBOUNCE_SECONDS",
+    "DUALITH_IDEA_RUN_TIMEOUT",
+    "DUALITH_LEAN_TEAM_MAX_ROUNDS",
+    "DUALITH_MAX_BOUNCES",
+    "DUALITH_MAX_CONCURRENT_ORCHESTRATIONS",
+    "DUALITH_PIPELINE_MAX_ITERATIONS",
+    "DUALITH_PROJECT_PREVIEW_PORT",
+    "DUALITH_PROJECT_PREVIEW_PORT_START",
+    "DUALITH_SPEC_REFINE_TIMEOUT",
+    "DUALITH_STATUS_REFRESH_TTL_SECONDS",
+    "DUALITH_STATUS_TIMEOUT_SECONDS",
+    "DUALITH_TEAM_MAX_ROUNDS",
+    "DUALITH_WEB_PORT",
+})
 # Watchdog event types that represent a real workspace change. Everything else
 # it emits (`opened`, `closed`, `closed_no_write` on inotify) is read activity —
 # including our own snapshot reads — and must never drive a broadcast.
 WATCHED_FS_EVENTS = frozenset({"created", "modified", "deleted", "moved"})
 # Trailing window used to collapse a burst of filesystem events into one snapshot.
-FS_BROADCAST_DEBOUNCE_SECONDS = float(os.environ.get("DUALITH_FS_BROADCAST_DEBOUNCE_SECONDS", "0.25"))
+FS_BROADCAST_DEBOUNCE_SECONDS = env_float("DUALITH_FS_BROADCAST_DEBOUNCE_SECONDS", 0.25)
 RESULT_LIMIT = 100
 RESULT_CONTENT_MAX_CHARS = 32_000
 APP_FEATURES = [
@@ -223,11 +323,11 @@ APP_FEATURES = [
     "lean-team-mode",
     "smart-stack-scaffold",
 ]
-DUALITH_WEB_PORT = int(os.environ.get("DUALITH_WEB_PORT", "3200"))
-DUALITH_API_PORT = int(os.environ.get("DUALITH_API_PORT", "4200"))
+DUALITH_WEB_PORT = env_int("DUALITH_WEB_PORT", 3200)
+DUALITH_API_PORT = env_int("DUALITH_API_PORT", 4200)
 DUALITH_WEB_HOST = os.environ.get("DUALITH_WEB_HOST", "127.0.0.1")
 DUALITH_API_HOST = os.environ.get("DUALITH_API_HOST", "127.0.0.1")
-PROJECT_PREVIEW_PORT_START = int(os.environ.get("DUALITH_PROJECT_PREVIEW_PORT_START", "5173"))
+PROJECT_PREVIEW_PORT_START = env_int("DUALITH_PROJECT_PREVIEW_PORT_START", 5173)
 PROJECT_PREVIEW_HOST = os.environ.get("DUALITH_PROJECT_PREVIEW_HOST", "127.0.0.1")
 LAN_MODE = os.environ.get("DUALITH_LAN_MODE", "").lower() in {"1", "true", "yes", "on"}
 DEFAULT_RUNNER_MODELS = {
@@ -369,7 +469,7 @@ runner_health: dict[str, dict[str, Any]] = {
 CLAUDE_STREAM_ENABLED = os.environ.get("DUALITH_CLAUDE_STREAM", "1") != "0"
 
 # Bounded reviewer/tester → lead question bounce-backs per team round.
-MAX_BOUNCES_PER_ROUND = int(os.environ.get("DUALITH_MAX_BOUNCES", "2"))
+MAX_BOUNCES_PER_ROUND = env_int("DUALITH_MAX_BOUNCES", 2)
 
 
 AGENT_REGISTRY: dict[str, dict[str, Any]] = {
@@ -605,8 +705,8 @@ class DevServerStartRequest(BaseModel):
     port: int = Field(default=0, ge=0, le=65535)
 
 
-SPEC_REFINE_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_SPEC_REFINE_TIMEOUT", "120"))
-IDEA_RUN_TIMEOUT_SECONDS = int(os.environ.get("DUALITH_IDEA_RUN_TIMEOUT", "300"))
+SPEC_REFINE_TIMEOUT_SECONDS = env_int("DUALITH_SPEC_REFINE_TIMEOUT", 120)
+IDEA_RUN_TIMEOUT_SECONDS = env_int("DUALITH_IDEA_RUN_TIMEOUT", 300)
 IDEA_CLAUDE_TOOLS = os.environ.get("DUALITH_IDEA_CLAUDE_TOOLS", "WebSearch,WebFetch")
 IDEA_CODEX_SEARCH_ENABLED = os.environ.get("DUALITH_IDEA_CODEX_SEARCH", "1").lower() not in {"0", "false", "no", "off"}
 DUALITH_REVIEW_RUNNER = os.environ.get("DUALITH_REVIEW_RUNNER", "codex").strip().lower()
@@ -649,11 +749,40 @@ async def check_runner_health() -> None:
             runner_health[runner_id] = {"ready": False, "version": "", "error": str(exc)}
 
 
+def validate_environment() -> list[str]:
+    """Surface typo'd or unusable DUALITH_* settings instead of silently
+    falling back to defaults.
+
+    Returns the warnings so this stays testable; the caller logs them.
+    """
+    warnings: list[str] = []
+
+    for name in sorted(k for k in os.environ if k.startswith("DUALITH_")):
+        if name not in KNOWN_DUALITH_ENV_VARS:
+            warnings.append(f"{name} is not a setting Dualith reads — check the spelling")
+
+    # Recorded by env_int/env_float while the module was importing.
+    warnings.extend(INVALID_ENV_VALUES)
+
+    root = os.environ.get("DUALITH_PROJECTS_ROOT", "").strip()
+    if root and not Path(root).expanduser().exists():
+        warnings.append(f"DUALITH_PROJECTS_ROOT={root!r} does not exist")
+
+    return warnings
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Dualith backend starting  host=%s port=%s lan=%s log=%s",
              DUALITH_API_HOST, DUALITH_API_PORT, LAN_MODE,
              DUALITH_DIR / "logs" / "dualith.log")
+    for warning in validate_environment():
+        log.warning("config: %s", warning)
+    if LAN_MODE:
+        log.warning(
+            "config: LAN mode is ON — the API accepts private-network origins. "
+            "Only enable this on a network you trust."
+        )
     reconcile_interrupted_active_tasks()
     asyncio.create_task(check_runner_health())
     asyncio.create_task(refresh_status_cache())
@@ -665,13 +794,67 @@ async def lifespan(app: FastAPI):
     log.info("Dualith backend shutting down")
 
 
-app = FastAPI(title="Dualith Backend", version="0.1.0", lifespan=lifespan)
+# ── Origin policy ─────────────────────────────────────────────────────────────
+# Loopback is always allowed. Private-network origins are allowed ONLY in LAN
+# mode — previously they were allowed unconditionally, which let a page served
+# by any device on the user's network read this server's token and drive it.
+LOOPBACK_ORIGIN_PATTERN = r"https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?"
+PRIVATE_NETWORK_ORIGIN_PATTERN = (
+    r"https?://(0\.0\.0\.0"
+    r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+    r"|192\.168\.\d{1,3}\.\d{1,3}"
+    r"|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?"
+)
+ALLOWED_ORIGIN_PATTERN = (
+    f"({LOOPBACK_ORIGIN_PATTERN}|{PRIVATE_NETWORK_ORIGIN_PATTERN})"
+    if LAN_MODE
+    else LOOPBACK_ORIGIN_PATTERN
+)
+ALLOWED_ORIGIN_RE = re.compile(ALLOWED_ORIGIN_PATTERN)
+
+
+def origin_allowed(origin: str | None) -> bool:
+    """True when a request may act on this server.
+
+    A missing Origin means a non-browser client (curl, a script, the health
+    probe); those are already local processes and are not the threat this
+    guards against. A *present* Origin is browser-supplied and unforgeable by
+    page JavaScript, so it is the reliable signal.
+    """
+    if not origin:
+        return True
+    return ALLOWED_ORIGIN_RE.fullmatch(origin) is not None
+
+
+async def require_allowed_origin(origin: str | None = Header(None)) -> None:
+    if not origin_allowed(origin):
+        raise HTTPException(status_code=403, detail="Origin not allowed")
+
+
+# FastAPI mounts /docs, /redoc and /openapi.json outside the app-level
+# dependency list, so they would answer any origin. They expose the API surface
+# and nothing else, but there is no reason to serve them by default on a local
+# tool — opt in when you actually want them.
+API_DOCS_ENABLED = os.environ.get("DUALITH_ENABLE_API_DOCS", "").lower() in {"1", "true", "yes", "on"}
+
+app = FastAPI(
+    title="Dualith Backend",
+    version="0.1.0",
+    lifespan=lifespan,
+    # Applies to every route, including the ones that only read: the snapshot
+    # and the session token are both worth protecting from a foreign origin.
+    dependencies=[Depends(require_allowed_origin)],
+    docs_url="/docs" if API_DOCS_ENABLED else None,
+    redoc_url="/redoc" if API_DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if API_DOCS_ENABLED else None,
+)
 
 app.add_middleware(
     CORSMiddleware,
-    # Allow local and same-Wi-Fi development origins. LAN mode is for trusted local networks.
-    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?",
-    allow_credentials=True,
+    allow_origin_regex=ALLOWED_ORIGIN_PATTERN,
+    # No cookies or HTTP auth are used, so credentialed cross-origin requests
+    # buy nothing and only widen the policy.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -882,7 +1065,7 @@ CHAT_HISTORY_MAX_CHARS = 32_000
 # re-sends this prefix, so keeping it tight is the single biggest token saver. The
 # Summarizer already distills durable context into PROJECT_MEMORY.md, so the raw
 # tail only needs the most recent exchanges. Env-overridable.
-CHAT_HISTORY_PROMPT_CHARS = int(os.environ.get("DUALITH_CHAT_HISTORY_PROMPT_CHARS", "2500"))
+CHAT_HISTORY_PROMPT_CHARS = env_int("DUALITH_CHAT_HISTORY_PROMPT_CHARS", 2500)
 
 def ensure_dualith_store() -> None:
     DUALITH_DIR.mkdir(parents=True, exist_ok=True)
@@ -1996,6 +2179,12 @@ def recover_interrupted_tasks() -> None:
 
 async def start_next_queued_task(project_name: str) -> None:
     if project_has_active_orchestration(project_name) or active_task_for_project(project_name):
+        return
+    # Soft gate, not an error: a queued task simply waits its turn when the
+    # host is already at its concurrent-run ceiling. The next completion
+    # elsewhere re-enters this function and picks it up.
+    if concurrent_orchestration_count() >= MAX_CONCURRENT_ORCHESTRATIONS:
+        record_event("RUN_DEFERRED", f"{project_name} :: at concurrency ceiling, task stays queued")
         return
     task = next_pending_task(project_name)
     if not task:
@@ -4643,6 +4832,7 @@ async def latest_project_commits(project_path: Path) -> list[str]:
     try:
         code, output = await run_git(project_path, "log", "--oneline", "-5")
     except Exception:
+        log.warning("git log failed  project=%s", display_path(project_path), exc_info=True)
         return []
 
     if code != 0 or not output:
@@ -4731,6 +4921,7 @@ async def collect_snapshot() -> dict[str, Any]:
         try:
             projects.append(await project_record(project_path, entry["name"]))
         except Exception:
+            log.warning("project snapshot failed  project=%s", entry["name"], exc_info=True)
             projects.append(
                 {
                     "name": entry["name"],
@@ -6449,6 +6640,7 @@ async def refresh_eco_pricing() -> None:
             )
             _eco_slot_price[runner_id] = await fetch_model_price(slot)
         except Exception:
+            log.warning("eco price lookup failed  runner=%s", runner_id, exc_info=True)
             _eco_slot_price[runner_id] = None
 
 
@@ -7688,18 +7880,28 @@ def post_final_team_answer(project_name: str, project_path: Path) -> None:
     append_chat_history(project_path, f"### Dualith Answer - {utc_now()}\n\n{summary}\n\n")
 
 
-def deterministic_check_commands(project_path: Path) -> list[str]:
-    commands: list[str] = []
+def resolve_executable(name: str) -> str:
+    """Absolute path for a tool, so it can be spawned without a shell.
+
+    On Windows `npm`/`make` are `.cmd`/`.bat` shims that `shell=False` cannot
+    find by bare name; `shutil.which` resolves the real filename.
+    """
+    return shutil.which(name) or name
+
+
+def deterministic_check_commands(project_path: Path) -> list[list[str]]:
+    """Verification commands as argv lists — never a shell string."""
+    commands: list[list[str]] = []
     scripts = package_scripts(read_package_json(project_path))
     for script in ("check", "test", "build"):
         if script in scripts:
-            commands.append(f"npm run {script}")
+            commands.append([resolve_executable("npm"), "run", script])
     if (project_path / "pyproject.toml").exists() or (project_path / "setup.py").exists():
-        commands.append("python -m compileall .")
+        commands.append([sys.executable or "python", "-m", "compileall", "."])
         if (project_path / "tests").exists():
-            commands.append("python -m pytest")
+            commands.append([sys.executable or "python", "-m", "pytest"])
     if (project_path / "Makefile").exists():
-        commands.append("make test")
+        commands.append([resolve_executable("make"), "test"])
     return commands[:4]
 
 
@@ -7716,13 +7918,14 @@ async def run_deterministic_tester(project_name: str, project_path: Path, task_i
 
     output_lines: list[str] = []
     for command in commands:
+        shown = command_display(command)
         await set_team_state(project_name, project_path, "team_event", status="running", step="tester", round=round_no)
         try:
             result = await asyncio.to_thread(
                 subprocess.run,
                 command,
                 cwd=project_path,
-                shell=True,
+                shell=False,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -7730,23 +7933,26 @@ async def run_deterministic_tester(project_name: str, project_path: Path, task_i
                 timeout=300,
                 check=False,
             )
+        except FileNotFoundError:
+            output_lines.append(f"$ {shown}\nskipped — executable not found")
+            continue
         except subprocess.TimeoutExpired:
-            summary = f"`{command}` timed out after 300 seconds."
+            summary = f"`{shown}` timed out after 300 seconds."
             feedback_path(project_path).write_text(f"### Tester - {utc_now()}\n\n{summary}\n\nTESTER: FAILED\n", encoding="utf-8")
             append_agent_chat_section_if_missing(project_path, "Tester", start_offset, f"{summary}\n\nTESTER: FAILED")
             publish_verdict(project_name, "tester", "changes_requested", summary, round_no, synthesized=True)
             return False, summary
         output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part and part.strip())
-        output_lines.append(f"$ {command}\nexit {result.returncode}\n{output[-3000:] if output else '(no output)'}")
+        output_lines.append(f"$ {shown}\nexit {result.returncode}\n{output[-3000:] if output else '(no output)'}")
         if result.returncode != 0:
-            summary = f"`{command}` failed with exit code {result.returncode}."
+            summary = f"`{shown}` failed with exit code {result.returncode}."
             body = f"{summary}\n\n```text\n{output[-4000:] if output else '(no output)'}\n```\n\nTESTER: FAILED"
             feedback_path(project_path).write_text(f"### Tester - {utc_now()}\n\n{body}\n", encoding="utf-8")
             append_agent_chat_section_if_missing(project_path, "Tester", start_offset, body)
             publish_verdict(project_name, "tester", "changes_requested", summary, round_no, synthesized=True)
             return False, summary
 
-    summary = "Deterministic checks passed: " + ", ".join(commands) + "."
+    summary = "Deterministic checks passed: " + ", ".join(command_display(c) for c in commands) + "."
     body = f"{summary}\n\n```text\n{chr(10).join(output_lines)[-6000:]}\n```\n\nTESTER: PASSED"
     feedback_path(project_path).write_text(f"### Tester - {utc_now()}\n\n{body}\n", encoding="utf-8")
     append_agent_chat_section_if_missing(project_path, "Tester", start_offset, body)
@@ -8767,7 +8973,7 @@ async def setup_status() -> dict[str, Any]:
     # this response by the CORS policy (only allowed origins get the body).
     return {
         "configured": provider_config_exists(),
-        "token": _SETUP_TOKEN,
+        "token": _SESSION_TOKEN,
         "slots": describe_provider_config(),
     }
 
@@ -8777,7 +8983,7 @@ class SetupTestRequest(BaseModel):
     runner_b: ProviderSlotConfig
 
 
-@app.post("/api/setup/test", dependencies=[Depends(_require_setup_token)])
+@app.post("/api/setup/test", dependencies=[Depends(require_session_token)])
 async def setup_test(request: SetupTestRequest) -> dict[str, Any]:
     runner_a_result, runner_b_result = await asyncio.gather(
         test_provider_slot(request.runner_a),
@@ -8791,7 +8997,7 @@ class SetupSaveRequest(BaseModel):
     runner_b: ProviderSlotConfig
 
 
-@app.post("/api/setup/save", dependencies=[Depends(_require_setup_token)])
+@app.post("/api/setup/save", dependencies=[Depends(require_session_token)])
 async def setup_save(request: SetupSaveRequest) -> dict[str, Any]:
     config = ProviderConfig(
         runner_a=request.runner_a,
@@ -8807,7 +9013,7 @@ async def setup_save(request: SetupSaveRequest) -> dict[str, Any]:
     return {"ok": True}
 
 
-@app.delete("/api/setup/config", dependencies=[Depends(_require_setup_token)])
+@app.delete("/api/setup/config", dependencies=[Depends(require_session_token)])
 async def setup_delete_config() -> dict[str, Any]:
     delete_provider_config()
     log.info("Provider config deleted — wizard will re-run on next load")
@@ -8818,7 +9024,7 @@ class SetupModelsRequest(BaseModel):
     slot: ProviderSlotConfig
 
 
-@app.post("/api/setup/models", dependencies=[Depends(_require_setup_token)])
+@app.post("/api/setup/models", dependencies=[Depends(require_session_token)])
 async def setup_models(request: SetupModelsRequest) -> dict[str, Any]:
     return await list_provider_models(request.slot)
 
@@ -8843,17 +9049,18 @@ async def get_quota() -> dict[str, Any]:
     return quota_snapshot()
 
 
-@app.post("/api/quota")
+@app.post("/api/quota", dependencies=[Depends(require_session_token)])
 async def update_quota(request: QuotaSettingsRequest) -> dict[str, Any]:
     write_quota_settings(request.model_dump())
     return await collect_snapshot()
 
 
-@app.post("/api/status/refresh")
+@app.post("/api/status/refresh", dependencies=[Depends(require_session_token)])
 async def refresh_status(response: Response, force: bool = False) -> dict[str, Any]:
     try:
         _, refresh_state = await refresh_status_cache(emit_events=True, wait=force, force=force)
     except Exception:
+        log.warning("status refresh failed", exc_info=True)
         response.headers["X-Dualith-Status-Refresh"] = "error"
         return await collect_snapshot()
 
@@ -8867,7 +9074,7 @@ async def refresh_status(response: Response, force: bool = False) -> dict[str, A
     return await collect_snapshot()
 
 
-@app.post("/api/refine-spec")
+@app.post("/api/refine-spec", dependencies=[Depends(require_session_token)])
 async def refine_spec(request: SpecRefineRequest) -> StreamingResponse:
     idea = request.idea.strip()
     runner = request.runner
@@ -9220,7 +9427,7 @@ async def get_ideas() -> dict[str, Any]:
     return {"ideas": read_ideas()}
 
 
-@app.post("/api/ideas", status_code=201)
+@app.post("/api/ideas", status_code=201, dependencies=[Depends(require_session_token)])
 async def create_idea(request: IdeaCreateRequest) -> dict[str, Any]:
     raw_idea = request.raw_idea.strip()
     if not raw_idea:
@@ -9246,7 +9453,7 @@ async def create_idea(request: IdeaCreateRequest) -> dict[str, Any]:
     return {"idea": idea, "ideas": read_ideas()}
 
 
-@app.patch("/api/ideas/{idea_id}")
+@app.patch("/api/ideas/{idea_id}", dependencies=[Depends(require_session_token)])
 async def update_idea(idea_id: str, request: IdeaPatchRequest) -> dict[str, Any]:
     def mutate(idea: dict[str, Any]) -> None:
         if request.title is not None:
@@ -9270,7 +9477,7 @@ async def update_idea(idea_id: str, request: IdeaPatchRequest) -> dict[str, Any]
     return {"idea": idea, "ideas": read_ideas()}
 
 
-@app.delete("/api/ideas/{idea_id}")
+@app.delete("/api/ideas/{idea_id}", dependencies=[Depends(require_session_token)])
 async def delete_idea(idea_id: str) -> dict[str, Any]:
     ideas = read_ideas()
     next_ideas = [idea for idea in ideas if idea["id"] != idea_id]
@@ -9282,7 +9489,7 @@ async def delete_idea(idea_id: str) -> dict[str, Any]:
     return {"ideas": read_ideas()}
 
 
-@app.post("/api/ideas/{idea_id}/chat")
+@app.post("/api/ideas/{idea_id}/chat", dependencies=[Depends(require_session_token)])
 async def chat_idea(idea_id: str, request: IdeaChatRequest) -> StreamingResponse:
     prompt_text = request.prompt.strip()
     if not prompt_text:
@@ -9326,7 +9533,7 @@ async def chat_idea(idea_id: str, request: IdeaChatRequest) -> StreamingResponse
     )
 
 
-@app.post("/api/ideas/{idea_id}/brief")
+@app.post("/api/ideas/{idea_id}/brief", dependencies=[Depends(require_session_token)])
 async def brief_idea(idea_id: str, request: IdeaBriefRequest) -> StreamingResponse:
     idea = require_idea(idea_id)
     prompt = IDEA_BRIEF_META_PROMPT.format(
@@ -9369,7 +9576,7 @@ async def brief_idea(idea_id: str, request: IdeaBriefRequest) -> StreamingRespon
     )
 
 
-@app.post("/api/ideas/{idea_id}/promote", status_code=201)
+@app.post("/api/ideas/{idea_id}/promote", status_code=201, dependencies=[Depends(require_session_token)])
 async def promote_idea(idea_id: str, request: IdeaPromoteRequest) -> dict[str, Any]:
     idea = require_idea(idea_id)
     project_name = request.name.strip()
@@ -9391,7 +9598,7 @@ async def promote_idea(idea_id: str, request: IdeaPromoteRequest) -> dict[str, A
     return await collect_snapshot()
 
 
-@app.post("/api/projects", status_code=201)
+@app.post("/api/projects", status_code=201, dependencies=[Depends(require_session_token)])
 async def create_project(request: ProjectCreateRequest) -> dict[str, Any]:
     project_name = request.name.strip()
     project_path = await create_project_from_spec(project_name, request.spec, "new", request.stack_profile)
@@ -9402,10 +9609,25 @@ async def create_project(request: ProjectCreateRequest) -> dict[str, Any]:
 
 
 ATTACHMENT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+# Leading bytes each accepted format must actually start with. The filename
+# extension is client-supplied and proves nothing; this checks the content.
+IMAGE_MAGIC_PREFIXES: tuple[bytes, ...] = (
+    b"\x89PNG\r\n\x1a\n",   # png
+    b"\xff\xd8\xff",        # jpeg
+    b"GIF87a",              # gif
+    b"GIF89a",              # gif
+)
+
+
+def looks_like_image(head: bytes) -> bool:
+    if head.startswith(IMAGE_MAGIC_PREFIXES):
+        return True
+    # webp: "RIFF" .... "WEBP"
+    return len(head) >= 12 and head.startswith(b"RIFF") and head[8:12] == b"WEBP"
 ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024
 
 
-@app.post("/api/projects/{name}/attachments")
+@app.post("/api/projects/{name}/attachments", dependencies=[Depends(require_session_token)])
 async def upload_attachments(name: str, files: list[UploadFile] = File(...)) -> dict[str, Any]:
     project_path = tracked_project_path(name)
     dest_dir = project_path / ".dualith" / "attachments"
@@ -9418,14 +9640,27 @@ async def upload_attachments(name: str, files: list[UploadFile] = File(...)) -> 
             raise HTTPException(status_code=400, detail=f"Unsupported image type: {ext or 'unknown'}.")
         target = dest_dir / f"{uuid4().hex}{ext}"
         size = 0
+        first_chunk = True
         with target.open("wb") as handle:
             while chunk := await upload.read(1024 * 1024):
+                if first_chunk:
+                    first_chunk = False
+                    if not looks_like_image(chunk[:12]):
+                        handle.close()
+                        target.unlink(missing_ok=True)
+                        raise HTTPException(
+                            status_code=400,
+                            detail="File content is not a PNG, JPEG, GIF or WebP image.",
+                        )
                 size += len(chunk)
                 if size > ATTACHMENT_MAX_BYTES:
                     handle.close()
                     target.unlink(missing_ok=True)
                     raise HTTPException(status_code=400, detail="Image exceeds 15 MB limit.")
                 handle.write(chunk)
+        if first_chunk:  # empty upload never entered the loop
+            target.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="Empty file.")
         saved.append(str(target.resolve()))
 
     return {"paths": saved}
@@ -9466,7 +9701,7 @@ async def route_preview(name: str, message: str = "") -> dict[str, Any]:
     return {"intent": intent, "workflow": workflow_id, "estimated_calls": calls, "reason": reason}
 
 
-@app.post("/api/projects/import", status_code=201)
+@app.post("/api/projects/import", status_code=201, dependencies=[Depends(require_session_token)])
 async def import_project(
     name: str = Form(...),
     spec: str = Form(default=""),
@@ -9527,7 +9762,7 @@ async def import_project(
     return await collect_snapshot()
 
 
-@app.delete("/api/projects/{name}")
+@app.delete("/api/projects/{name}", dependencies=[Depends(require_session_token)])
 async def delete_project(name: str) -> dict[str, Any]:
     project_path = unregister_project(name)
     unwatch_project(project_path)
@@ -9543,21 +9778,21 @@ async def delete_project(name: str) -> dict[str, Any]:
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/dev-server/start")
+@app.post("/api/projects/{name}/dev-server/start", dependencies=[Depends(require_session_token)])
 async def start_dev_server(name: str, request: DevServerStartRequest = DevServerStartRequest()) -> dict[str, Any]:
     project_path = tracked_project_path(name)
     await start_project_dev_server(name, project_path, request)
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/dev-server/stop")
+@app.post("/api/projects/{name}/dev-server/stop", dependencies=[Depends(require_session_token)])
 async def stop_dev_server(name: str) -> dict[str, Any]:
     project_path = tracked_project_path(name)
     await stop_project_dev_server(name, project_path)
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/dev-server/restart")
+@app.post("/api/projects/{name}/dev-server/restart", dependencies=[Depends(require_session_token)])
 async def restart_dev_server(name: str, request: DevServerStartRequest = DevServerStartRequest()) -> dict[str, Any]:
     project_path = tracked_project_path(name)
     if name in active_dev_servers:
@@ -9566,7 +9801,7 @@ async def restart_dev_server(name: str, request: DevServerStartRequest = DevServ
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/agents/{agent}/start")
+@app.post("/api/projects/{name}/agents/{agent}/start", dependencies=[Depends(require_session_token)])
 async def start_agent(name: str, agent: str, request: AgentStartRequest = AgentStartRequest()) -> dict[str, Any]:
     if agent not in RUN_MODES:
         raise HTTPException(status_code=404, detail="Unknown agent.")
@@ -9574,6 +9809,7 @@ async def start_agent(name: str, agent: str, request: AgentStartRequest = AgentS
     project_path = tracked_project_path(name)
     if project_has_active_orchestration(name):
         raise HTTPException(status_code=409, detail="Agent is already running.")
+    enforce_global_run_capacity()
     await ensure_dualith_files(project_path, "", overwrite_spec=False)
 
     workflow_id = workflow_for_agent(agent)
@@ -9583,7 +9819,7 @@ async def start_agent(name: str, agent: str, request: AgentStartRequest = AgentS
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/agents/{agent}/stop")
+@app.post("/api/projects/{name}/agents/{agent}/stop", dependencies=[Depends(require_session_token)])
 async def stop_agent(name: str, agent: str) -> dict[str, Any]:
     if agent not in RUN_MODES:
         raise HTTPException(status_code=404, detail="Unknown agent.")
@@ -9629,6 +9865,30 @@ class PlanApprovalRequest(BaseModel):
     comment: str = Field(default="", max_length=5000)
 
 
+def concurrent_orchestration_count() -> int:
+    """Projects currently running something that spawns runner subprocesses."""
+    busy = set(active_pipelines) | set(active_teams)
+    busy.update(key.split(":", 1)[0] for key in active_agent_runs if ":" in key)
+    return len(busy)
+
+
+def enforce_global_run_capacity() -> None:
+    """Cap how many projects can be mid-run at once.
+
+    Each project's own 409 guard already stops it running twice, but nothing
+    bounded the total, so a loop of start calls across projects could spawn
+    runner processes until the host gave out.
+    """
+    if concurrent_orchestration_count() >= MAX_CONCURRENT_ORCHESTRATIONS:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Dualith is already running {MAX_CONCURRENT_ORCHESTRATIONS} projects. "
+                "Wait for one to finish, or raise DUALITH_MAX_CONCURRENT_ORCHESTRATIONS."
+            ),
+        )
+
+
 def project_has_active_orchestration(project_name: str) -> bool:
     if project_name in active_pipelines or project_name in active_teams:
         return True
@@ -9654,6 +9914,10 @@ async def start_orchestration(
     workflow = ORCHESTRATION_WORKFLOWS.get(workflow_id)
     if not workflow:
         raise HTTPException(status_code=404, detail="Unknown workflow.")
+
+    # Every run kind funnels through here, so this is the one place the
+    # host-wide concurrency ceiling needs to hold.
+    enforce_global_run_capacity()
 
     kind = str(workflow.get("kind", ""))
     if kind == "team":
@@ -9796,6 +10060,7 @@ async def try_inline_ask(
                     except json.JSONDecodeError:
                         pass
     except Exception:
+        log.warning("ask stream failed  project=%s", project_name, exc_info=True)
         return False
 
     answer = "".join(collected).strip()
@@ -9811,7 +10076,7 @@ async def try_inline_ask(
     return True
 
 
-@app.post("/api/projects/{name}/chat")
+@app.post("/api/projects/{name}/chat", dependencies=[Depends(require_session_token)])
 async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatRequest()) -> dict[str, Any]:
     project_path = tracked_project_path(name)
 
@@ -9943,7 +10208,7 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
             schedule_broadcast("team_event", entry)
             return await collect_snapshot()
 
-    log.info("→ chat routed  project=%s prompt=%r workflow=%s runner=%s reason=%s",
+    log.info("→ chat routed  project=%s prompt=%.80r workflow=%s runner=%s reason=%s",
              name, request.prompt[:60], workflow_id, runner, route_reason)
     record_event(
         "CHAT_ROUTED",
@@ -9984,7 +10249,7 @@ async def unified_chat(name: str, request: UnifiedChatRequest = UnifiedChatReque
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/chat/stop")
+@app.post("/api/projects/{name}/chat/stop", dependencies=[Depends(require_session_token)])
 async def stop_unified_chat(name: str) -> dict[str, Any]:
     """Stop whatever is currently running for this project.
 
@@ -10053,7 +10318,7 @@ async def stop_unified_chat(name: str) -> dict[str, Any]:
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/chat/plan-approve")
+@app.post("/api/projects/{name}/chat/plan-approve", dependencies=[Depends(require_session_token)])
 async def approve_plan(name: str, request: PlanApprovalRequest) -> dict[str, Any]:
     """Accept or reject the pending plan for a project.
 
@@ -10079,7 +10344,7 @@ async def approve_plan(name: str, request: PlanApprovalRequest) -> dict[str, Any
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/chat/clear")
+@app.post("/api/projects/{name}/chat/clear", dependencies=[Depends(require_session_token)])
 async def clear_chat(name: str) -> dict[str, Any]:
     """Clear CHAT_HISTORY.md, AGENT_CHAT.md, and saved project results atomically.
 
@@ -10118,11 +10383,12 @@ async def clear_chat(name: str) -> dict[str, Any]:
     return snapshot
 
 
-@app.post("/api/projects/{name}/pipeline/start")
+@app.post("/api/projects/{name}/pipeline/start", dependencies=[Depends(require_session_token)])
 async def start_pipeline(name: str, request: PipelineStartRequest = PipelineStartRequest()) -> dict[str, Any]:
     project_path = tracked_project_path(name)
     if name in active_pipelines:
         raise HTTPException(status_code=409, detail="Pipeline is already running.")
+    enforce_global_run_capacity()
 
     max_iterations = request.max_iterations or PIPELINE_MAX_ITERATIONS
     asyncio.create_task(
@@ -10133,7 +10399,7 @@ async def start_pipeline(name: str, request: PipelineStartRequest = PipelineStar
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/pipeline/stop")
+@app.post("/api/projects/{name}/pipeline/stop", dependencies=[Depends(require_session_token)])
 async def stop_pipeline(name: str) -> dict[str, Any]:
     project_path = tracked_project_path(name)
     state = active_pipelines.get(name)
@@ -10153,11 +10419,12 @@ async def stop_pipeline(name: str) -> dict[str, Any]:
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/team/start")
+@app.post("/api/projects/{name}/team/start", dependencies=[Depends(require_session_token)])
 async def start_team(name: str, request: TeamStartRequest = TeamStartRequest()) -> dict[str, Any]:
     project_path = tracked_project_path(name)
     if name in active_teams:
         raise HTTPException(status_code=409, detail="Team is already running.")
+    enforce_global_run_capacity()
 
     max_rounds = request.max_rounds or TEAM_MAX_ROUNDS
     lead, teammate, reason = team_runners(request.runner)
@@ -10170,7 +10437,7 @@ async def start_team(name: str, request: TeamStartRequest = TeamStartRequest()) 
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/team/stop")
+@app.post("/api/projects/{name}/team/stop", dependencies=[Depends(require_session_token)])
 async def stop_team(name: str) -> dict[str, Any]:
     project_path = tracked_project_path(name)
     state = active_teams.get(name)
@@ -10189,7 +10456,7 @@ async def stop_team(name: str) -> dict[str, Any]:
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/agent-chat/clear")
+@app.post("/api/projects/{name}/agent-chat/clear", dependencies=[Depends(require_session_token)])
 async def clear_agent_chat_endpoint(name: str) -> dict[str, Any]:
     project_path = tracked_project_path(name)
     clear_agent_chat(project_path)
@@ -10198,7 +10465,7 @@ async def clear_agent_chat_endpoint(name: str) -> dict[str, Any]:
     return await collect_snapshot()
 
 
-@app.post("/api/projects/{name}/human-input")
+@app.post("/api/projects/{name}/human-input", dependencies=[Depends(require_session_token)])
 async def submit_human_input(name: str, request: HumanInputRequest) -> dict[str, Any]:
     project_path = tracked_project_path(name)
     human_input = parse_human_input(project_path)
@@ -10238,6 +10505,17 @@ async def submit_human_input(name: str, request: HumanInputRequest) -> dict[str,
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
+    # WebSocket handshakes are NOT subject to CORS — the browser will happily
+    # open ws://127.0.0.1 from any page. Since the first frame is a full
+    # snapshot (every project's transcripts, prompts and absolute paths), the
+    # Origin and token have to be checked before accepting.
+    if not origin_allowed(websocket.headers.get("origin")):
+        await websocket.close(code=4403, reason="Origin not allowed")
+        return
+    if not secrets.compare_digest(websocket.query_params.get("token", ""), _SESSION_TOKEN):
+        await websocket.close(code=4401, reason="Missing or invalid Dualith token")
+        return
+
     await websocket.accept()
     queue = event_bus.attach(websocket)
     pump_task = asyncio.create_task(event_bus.pump(websocket, queue))

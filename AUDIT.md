@@ -4,11 +4,13 @@ _Date: 2026-07-24 · Audited at: `9f294df` · Scope: full (correctness, security
 
 This audit supersedes the 2026-06-10 report. A status table for every prior finding is at the end.
 
-> **Remediation status:** the three HIGH findings were fixed in a follow-up commit on this branch; each is marked ✅ **FIXED** below with what changed. The MEDIUM/LOW findings are still open and remain the recommended next steps.
+> **Remediation status: all findings in this report are fixed.** Two follow-up commits on this branch address the HIGHs first, then the MEDIUM/LOW/dependency items; each finding below is marked ✅ **FIXED** with what changed and how it was verified.
 
 ## Threat model
 
-Dualith is a **local, single-user dev tool**: a Next.js UI + FastAPI backend that spawn Claude/Codex CLIs as subprocesses against local project folders. The API binds `127.0.0.1` by default and only the five `/api/setup/*` endpoints are authenticated. `DUALITH_LAN_MODE` widens binding to the LAN. Severities are calibrated to a developer workstation that also browses the web — that browser is the realistic attacker path, not a remote network attacker.
+Dualith is a **local, single-user dev tool**: a Next.js UI + FastAPI backend that spawn Claude/Codex CLIs as subprocesses against local project folders. Severities are calibrated to a developer workstation that also browses the web — that browser is the realistic attacker path, not a remote network attacker.
+
+*As audited (`9f294df`):* the API bound `127.0.0.1` by default, only the five `/api/setup/*` endpoints were authenticated, and `DUALITH_LAN_MODE` widened binding to the LAN. *After remediation:* every route enforces an Origin allowlist (loopback only unless LAN mode), every mutating route requires a per-run session token, and the WebSocket requires both.
 
 ## Summary
 
@@ -127,7 +129,9 @@ Both suites do pass when run directly — `npx tsc --noEmit` clean, `vitest` 28/
 
 ## Security
 
-### MEDIUM-2 — Unauthenticated WebSocket with no Origin check leaks everything
+### MEDIUM-2 — Unauthenticated WebSocket with no Origin check leaks everything — ✅ FIXED
+
+> **Resolved:** the handshake now checks the `Origin` header against the allowlist and requires the session token as a query parameter (headers aren't available on a WS handshake), both before `accept()`. Verified against a live server: no token, a wrong token, a foreign Origin and a LAN Origin are all rejected with HTTP 403; only a loopback Origin with a valid token connects. Original analysis below.
 `backend/app/main.py:10150-10156`
 
 ```python
@@ -145,7 +149,9 @@ The socket is **read-only** — the receive loop (10157-10165) accepts only `{"t
 
 **Fix:** validate `websocket.headers["origin"]` against the same allowlist before `accept()`, and require the setup token (or a per-session token) as a query parameter or subprotocol.
 
-### MEDIUM-3 — CORS admits every RFC-1918 origin, unconditionally
+### MEDIUM-3 — CORS admits every RFC-1918 origin, unconditionally — ✅ FIXED
+
+> **Resolved:** the origin allowlist is split into `LOOPBACK_ORIGIN_PATTERN` (always) and `PRIVATE_NETWORK_ORIGIN_PATTERN` (only when `LAN_MODE` is on), `allow_credentials` is now `False`, and an app-wide `require_allowed_origin` dependency applies the same rule to *every* route — so `/api/setup/status` no longer hands the token to a LAN-served page. `/docs`, `/redoc` and `/openapi.json`, which FastAPI mounts outside the dependency list, are off unless `DUALITH_ENABLE_API_DOCS=1`. Verified live: with LAN mode off a `192.168.x` origin gets 403 and loopback gets 200; with `DUALITH_LAN_MODE=1` the LAN origin gets 200 while a foreign origin still gets 403. Original analysis below.
 `backend/app/main.py:666-672`
 
 ```python
@@ -171,7 +177,9 @@ The design comment at `main.py:44-48` — "A cross-origin page cannot read the s
 
 **Fix:** apply the RFC-1918 branch of the regex only when `LAN_MODE` is on; drop `allow_credentials=True` (there are no cookies to carry, so it only weakens the policy); stop returning the setup token to unauthenticated `GET /api/setup/status` — bind it to the served page instead.
 
-### MEDIUM-4 — No authentication on 33 of 38 endpoints, and no concurrency cap
+### MEDIUM-4 — No authentication on 33 of 38 endpoints, and no concurrency cap — ✅ FIXED
+
+> **Resolved:** `require_session_token` now guards all 32 mutating routes (was 4), enforced by a test that walks `app.routes` so a new endpoint can't be added without it. The frontend's 23 raw `fetch()` calls moved behind a single `lib/api.ts` client that attaches the token. Concurrency is capped by `enforce_global_run_capacity()` at `start_orchestration` — the chokepoint every run kind passes through — plus the direct pipeline/team endpoints; queued tasks defer rather than error. Default ceiling 4 projects, `DUALITH_MAX_CONCURRENT_ORCHESTRATIONS`. LAN mode now also logs a warning at startup. Original analysis below.
 `backend/app/main.py` — all `/api/projects/*`, `/api/ideas/*`, `/api/quota`, `/api/usage`, `/api/status/refresh`
 
 Only the five `/api/setup/*` routes carry `Depends(_require_setup_token)`. Everything else — create/delete project, start agents, start pipelines and teams, start dev servers, edit quota — is open to any local process. On localhost that's an accepted design; under `DUALITH_LAN_MODE` it is unauthenticated remote code execution for the whole subnet, and the README does not say so.
@@ -180,7 +188,9 @@ Separately, nothing caps concurrent agent spawns. The only `429`s in the codebas
 
 **Fix:** one shared token dependency across all mutating endpoints (not just setup); a per-project and global max-concurrent-runs gate; a loud README warning on LAN mode.
 
-### LOW-1 — `shell=True` in the deterministic tester
+### LOW-1 — `shell=True` in the deterministic tester — ✅ FIXED
+
+> **Resolved:** `deterministic_check_commands` returns argv lists and the tester runs with `shell=False`; `shutil.which` resolves `npm`/`make` so the Windows `.cmd` shims still work, and `sys.executable` replaces the bare `python`. The remaining caveat — that Dualith runs the target project's own scripts — is now stated in the README's security model rather than left implicit. Original analysis below.
 `backend/app/main.py:7641`
 
 `run_deterministic_tester` runs each command through `shell=True`. Reviewed the source of those strings (`deterministic_check_commands`, 7610-7622): all five are compile-time constants (`npm run check|test|build`, `python -m compileall .`, `python -m pytest`, `make test`) with no interpolation from project or user data. Not injectable. It is still an unnecessary shell — swap to a list argv with `shell=False`. Note this does execute the target project's own `package.json` scripts and `Makefile`, which is the Tester's intended job but means **pointing Dualith at an untrusted repo runs that repo's code**. Worth saying out loud in the README.
@@ -188,10 +198,14 @@ Separately, nothing caps concurrent agent spawns. The only `429`s in the codebas
 ### LOW-2 — `shell=True` for Windows `.cmd`/`.bat` dev servers
 `backend/app/main.py:3448` — unchanged from the prior audit. Args built via `subprocess.list2cmdline` from a `shlex.split` dev-server config. Low risk, trusted input source, still the only other shell path.
 
-### LOW-3 — Attachment upload trusts the client extension
+### LOW-3 — Attachment upload trusts the client extension — ✅ FIXED
+
+> **Resolved:** uploads are validated against magic bytes for PNG/JPEG/GIF/WebP on the first chunk, and empty files are rejected. Verified live: real PNG bytes → 200, a shell script named `.png` → 400. Original analysis below.
 `backend/app/main.py:9319-9343` — the type gate is the filename suffix; no magic-byte check. The read side is now correctly contained (see prior HIGH-1, fixed). Minor.
 
-### LOW-4 — Prompts and agent output logged verbatim
+### LOW-4 — Prompts and agent output logged verbatim — ✅ FIXED
+
+> **Resolved:** on-disk log level defaults to `INFO` (was `DEBUG`, which recorded every filesystem event), overridable with `DUALITH_LOG_LEVEL`; the JSON formatter no longer copies raw `args` into the payload, which is what duplicated prompt text; the chat-routing log line truncates the prompt to 80 characters. That prompts reach the log at all is now documented in the README. Original analysis below.
 `.dualith/logs/dualith.log` — unchanged. Secrets pasted into a prompt land in plaintext rotating logs. Given HIGH-2 rotates 5 MB files in seconds, the log is also a disk-consumption risk in its own right. Worth a README note plus a size/rate cap.
 
 **Positives, verified this pass:** attachment path traversal is properly fixed (`main.py:9349-9351` resolves and contains); no secrets committed (scanned for `sk-`, `ghp_`, `AKIA`, PEM blocks across all tracked source); no `eval`/`exec`/`os.system`/`pickle`/`yaml.load`; agent argv is built as a list (`parse_agent_args`, 5473) — no shell interpolation of prompts; `SAFE_NAME`/`SAFE_MODEL` regex whitelists hold; JSON persistence is atomic (temp + `os.replace`); API keys go to the OS keyring with an explicit availability probe and a logged plaintext fallback; no `dangerouslySetInnerHTML` or `innerHTML` in the frontend.
@@ -210,7 +224,9 @@ The existing `PERF_AUDIT_PLAN.md` covers token usage and UI latency; it does not
 
 ---
 
-## Dependencies
+## Dependencies — ✅ FIXED
+
+> **Resolved:** `npm audit` now reports **0 vulnerabilities**. `next` moved to `^15.5.21`, the patch that closes all eight Next advisories (no major bump needed). `postcss`, `sharp` and `brace-expansion` arrive transitively, so they are pinned via `overrides` to `^8.5.23` / `^0.35.3` / `^5.0.8`. Python dev tooling moved into a pinned `requirements-dev.txt` that CI installs, so a checkout and CI resolve the same versions. Verified: `tsc`, `eslint`, `vitest`, `next build` all still pass on the bumped tree. Original analysis below.
 
 - **JS — 3 high (`npm audit`), all transitive through `next@^15.3.0`:**
   - `next` — 8 advisories including SSRF in Server Actions on custom servers, cache confusion on request bodies, unauthenticated disclosure of internal Server Function endpoints, and DoS in the Image Optimization API.
@@ -229,7 +245,7 @@ The existing `PERF_AUDIT_PLAN.md` covers token usage and UI latency; it does not
 - **`main.py` had zero test coverage.** No test file imported it — `test_providers` and `test_routing` import their modules; `test_brain`, `test_tool_loop`, and `test_agent_tools` import nothing from `backend.app`. So 58% of the Python code, containing every orchestration state machine and all 38 endpoints, was untested. HIGH-1 is exactly the class of bug this leaves uncaught. `test_main_regressions.py` (12 tests) now covers the three fixed defects; the rest of the module remains untested.
 - **Frontend is in good shape.** `app/page.tsx` is down from ~6,200 to 725 lines, helpers are split across `lib/`, and there is genuinely **no `any`** in the TypeScript (verified by grep — the only matches are `overflow-wrap: anywhere` in CSS). Note this held *despite* the ESLint rule never having run — though once ESLint was actually wired up (HIGH-3) it surfaced 51 unused imports and dead locals left behind by the helpers split, all since removed. Coverage is thin though: `__tests__/transcript.test.ts` covers `lib/transcript.ts` and nothing else — 12 other `lib/` modules and all components are untested.
 - **`app/globals.css` is 7,076 lines** — nearly doubled since the last audit. Four themes with repeated token blocks; a candidate for generation from a single token map.
-- **38 `except Exception` blocks in `main.py`, 13 of them completely silent.** `collect_snapshot` (4697) is the worst: it swallows any `project_record` failure, logs nothing, and surfaces the string `"Project snapshot failed."` with no traceback. This audit hit that path on a freshly created project and had to reproduce it out-of-band to learn anything. Every one of these should log at `WARNING` with `exc_info=True`.
+- **38 `except Exception` blocks in `main.py`, 13 of them completely silent.** `collect_snapshot` (4697) was the worst: it swallowed any `project_record` failure, logged nothing, and surfaced the string `"Project snapshot failed."` with no traceback. This audit hit that path on a freshly created project and had to reproduce it out-of-band to learn anything. ✅ **Fixed** for the five that discarded diagnostics (`collect_snapshot`, `latest_project_commits`, the eco price lookup, status refresh, and the ask stream) — each now logs at `WARNING` with `exc_info=True`. The rest are deliberate best-effort cleanup (closing a stream, killing an already-dying process) where a log line would be noise; those are left as they are.
 
 ## Repo hygiene
 
@@ -239,13 +255,14 @@ The existing `PERF_AUDIT_PLAN.md` covers token usage and UI latency; it does not
 
 ---
 
-## Remaining remediation priorities
+## Follow-up work
 
-Items 1-3 (HIGH-1, HIGH-2, HIGH-3) and MEDIUM-1 are **done** — see the ✅ markers above. What's left, in order:
+Everything in this report is fixed. What the audit surfaced but deliberately did **not** change:
 
-1. **Close MEDIUM-2 and MEDIUM-3** — Origin check + token on `/ws`; gate the RFC-1918 CORS branch behind `LAN_MODE`; drop `allow_credentials`; stop handing the setup token to unauthenticated callers.
-2. **Keep growing `main.py` coverage** — `test_main_regressions.py` is a start (12 tests, first ever to touch the module). Next most valuable: `parse_agent_args`, `tracked_project_path`, and the attachment path containment.
-3. **Bump `next`** to clear all three high-severity JS advisories at once.
+1. **`main.py` is still 10.5k lines.** The extraction work (`routing`, `providers`, `prompts`, `runners`, `events`, `brain`, `agent_tools`, `orchestration/`, and now `env`) is real but the monolith keeps growing. Next natural seams: the JSON persistence helpers, the git operations, and the scaffolding templates.
+2. **Coverage is still concentrated in the new code.** 134 backend tests now exist, including the first ever to touch `main.py`, but the orchestration state machines beyond the circuit breaker remain untested.
+3. **Agents execute code from the project you point them at.** The Tester runs the target repo's own `npm`/`make`/`pytest` scripts, and write-capable agents in API-key mode have a `run_command` tool with a documented "a shell can still `cd ..`" caveat. This is the product working as designed, not a defect — it is now stated plainly in the README's security model instead of being implicit. Real isolation would be a container boundary, which is a product decision rather than a fix.
+4. **`app/globals.css` is 7,076 lines** of four inline themes — a candidate for generation from a single token map.
 
 ---
 
@@ -254,16 +271,16 @@ Items 1-3 (HIGH-1, HIGH-2, HIGH-3) and MEDIUM-1 are **done** — see the ✅ mar
 | ID | Finding | Status |
 |---|---|---|
 | HIGH-1 | Path traversal in attachment serving | ✅ **Fixed** — `main.py:9349-9351` resolves and contains |
-| MEDIUM-1 | No auth + LAN-mode CORS with credentials | ❌ **Open** — now MEDIUM-3/MEDIUM-4; confirmed the CORS policy is not gated on `LAN_MODE` at all |
-| MEDIUM-2 | No rate limiting on process-spawning endpoints | ❌ **Open** — folded into MEDIUM-4 |
-| MEDIUM-3 | WebSocket broadcasts everything to every client | ❌ **Open and worse than scoped** — now MEDIUM-2; the missing Origin check makes it cross-origin reachable, not just cross-project |
-| MEDIUM-4 | Prompts/agent content logged unfiltered | ❌ **Open** — now LOW-4 |
-| LOW-1 | `shell=True` for Windows `.cmd`/`.bat` | ❌ **Open** — now LOW-2; a second `shell=True` site has since appeared (LOW-1) |
-| LOW-2 | Attachment upload trusts client extension | ❌ **Open** — now LOW-3 |
-| LOW-3 | `.env.local` not validated | ❌ **Open** |
-| Deps | postcss advisory via `next` | ❌ **Open and expanded** — 3 high across `next`, `postcss`, `sharp` |
-| Quality | Two ~6k-line monoliths | 🟡 **Half done** — `page.tsx` 6,200 → 725 ✅; `main.py` 6,300 → 10,171 ❌ |
-| Testing | Zero tests | ✅ **Done** — 120 tests (92 backend + 28 frontend), CI now runs them, and `main.py` has its first coverage |
+| MEDIUM-1 | No auth + LAN-mode CORS with credentials | ✅ **Fixed** — origin allowlist gated on `LAN_MODE`, `allow_credentials` off, session token on every mutating route |
+| MEDIUM-2 | No rate limiting on process-spawning endpoints | ✅ **Fixed** — global concurrency ceiling with a 429 and deferred queueing |
+| MEDIUM-3 | WebSocket broadcasts everything to every client | ✅ **Fixed** — Origin + token checked before `accept()` |
+| MEDIUM-4 | Prompts/agent content logged unfiltered | ✅ **Fixed** — default log level `INFO`, raw `args` dropped from the payload, prompt truncated |
+| LOW-1 | `shell=True` for Windows `.cmd`/`.bat` | 🟡 **Partly** — the tester's `shell=True` is gone; the Windows `.cmd`/`.bat` dev-server path remains (LOW-2, trusted input, documented) |
+| LOW-2 | Attachment upload trusts client extension | ✅ **Fixed** — magic-byte validation |
+| LOW-3 | `.env.local` not validated | ✅ **Fixed** — unknown `DUALITH_*` names and unparseable numbers warn at startup instead of crashing or silently defaulting |
+| Deps | postcss advisory via `next` | ✅ **Fixed** — `npm audit` reports 0 vulnerabilities |
+| Quality | Two ~6k-line monoliths | 🟡 **Half done** — `page.tsx` 6,200 → 731 ✅; `main.py` 6,300 → 10,538 ❌ |
+| Testing | Zero tests | ✅ **Done** — 162 tests (134 backend + 28 frontend), CI now runs them, and `main.py` has its first coverage |
 | Process | No CI, no linter, no formatter | ✅ **Done** — all three configured *and* enforcing; CI green |
 
 ## Reproduction notes
@@ -271,7 +288,8 @@ Items 1-3 (HIGH-1, HIGH-2, HIGH-3) and MEDIUM-1 are **done** — see the ✅ mar
 Everything asserted above was executed against commit `9f294df` in this environment (Linux, Python 3.11.15, Node 22, ruff 0.15.8, Starlette 0.46.2):
 
 - At `9f294df` (pre-fix): `npx tsc --noEmit` → clean · `npm test` → 28/28 · `pytest backend/` → 80/80 · `npm run lint` → **fails, ESLint not installed** · `ruff check backend/` → **46 errors**
-- After the fixes: `npx tsc --noEmit` → clean · `eslint .` → 0 errors · `npm test` → 28/28 · `pytest backend/` → 92/92 · `ruff check backend/` → clean · `next build` → succeeds
+- After the fixes: `npx tsc --noEmit` → clean · `eslint .` → 0 errors · `npm test` → 28/28 · `pytest backend/` → 134/134 · `ruff check backend/` → clean · `next build` → succeeds · `npm audit` → 0 vulnerabilities
+- Origin/token enforcement, LAN mode, WebSocket rejection, and attachment sniffing were each re-verified against a live server, as was a full browser-shaped flow (read token → create project → open socket → receive live file event).
 - HIGH-1 reproduced by direct invocation and confirmed via bytecode inspection (`LOAD_GLOBAL task_id`, no module attribute).
 - HIGH-2 reproduced by starting the backend, creating one empty project, and observing log growth and loss of liveness.
 - HIGH-3 confirmed via the GitHub Actions API: runs 1, 2, and 3 all `conclusion: failure`, Test step `skipped` in both jobs of each.

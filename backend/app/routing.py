@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .env import env_int
 from .orchestration.planner import plan_from_prompt
 from .orchestration.scheduler import plan_node_summary
 from .orchestration.schema import OrchestrationPlan, PlanValidationResult
@@ -50,12 +51,12 @@ REVIEW_AGENTS = {"auditor", "teammate", *SPECIALIST_REVIEWERS}
 # Team / pipeline sizing
 # ---------------------------------------------------------------------------
 
-PIPELINE_MAX_ITERATIONS = int(os.environ.get("DUALITH_PIPELINE_MAX_ITERATIONS", "6"))
-TEAM_MAX_ROUNDS = int(os.environ.get("DUALITH_TEAM_MAX_ROUNDS", "4"))
+PIPELINE_MAX_ITERATIONS = env_int("DUALITH_PIPELINE_MAX_ITERATIONS", 6)
+TEAM_MAX_ROUNDS = env_int("DUALITH_TEAM_MAX_ROUNDS", 4)
 # Lean mode converges in round 1 for most tasks (early-exit on approval), so the
 # default round cap is lower than full mode — the extra rounds were the main
 # source of repeated, full-context agent calls. Env-overridable.
-LEAN_TEAM_MAX_ROUNDS = int(os.environ.get("DUALITH_LEAN_TEAM_MAX_ROUNDS", "2"))
+LEAN_TEAM_MAX_ROUNDS = env_int("DUALITH_LEAN_TEAM_MAX_ROUNDS", 2)
 
 
 def effective_max_rounds(team_mode: str | None, requested: int) -> int:

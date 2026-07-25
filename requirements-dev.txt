@@ -1,0 +1,7 @@
+# Dev/CI tooling, pinned so a new release of a linter or test runner cannot
+# turn the build red on its own. Runtime deps live in requirements.txt.
+-r requirements.txt
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
+ruff==0.15.8
