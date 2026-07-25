@@ -149,7 +149,7 @@ def test_broadcast_skips_snapshot_with_no_clients(monkeypatch: pytest.MonkeyPatc
         calls += 1
         return {}
 
-    monkeypatch.setattr(main, "collect_snapshot", _counting_snapshot)
+    monkeypatch.setattr(main.event_bus, "_snapshot_provider", _counting_snapshot)
     monkeypatch.setattr(type(main.event_bus), "client_count", property(lambda self: 0))
 
     asyncio.run(main.broadcast("fs_event"))
@@ -164,7 +164,7 @@ def test_broadcast_sends_snapshot_when_a_client_is_attached(
     async def _snapshot() -> dict[str, Any]:
         return {"projects": []}
 
-    monkeypatch.setattr(main, "collect_snapshot", _snapshot)
+    monkeypatch.setattr(main.event_bus, "_snapshot_provider", _snapshot)
     monkeypatch.setattr(type(main.event_bus), "client_count", property(lambda self: 1))
     monkeypatch.setattr(main.event_bus, "publish_message", published.append)
 

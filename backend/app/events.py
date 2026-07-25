@@ -128,6 +128,29 @@ class EventBus:
         payload = await self._snapshot_provider()
         return {"v": PROTOCOL_VERSION, "type": "snapshot", "ts": _utc_now(), "payload": payload}
 
+    async def broadcast_snapshot(
+        self, message_type: str, event: dict[str, str] | None = None,
+    ) -> None:
+        """Send a legacy `{type, payload}` frame carrying a fresh full snapshot.
+
+        Lives here rather than in `main` because the snapshot is reached
+        through the provider registered by `configure()`. That indirection is
+        what lets modules extracted out of `main` publish state changes without
+        importing `main` back — the cycle that previously forced every domain
+        helper to stay in the monolith.
+        """
+        # Building a snapshot walks every registered project and spawns a
+        # `git log` per repo. With nobody attached, nothing can observe the
+        # result, so skip the work rather than burn it on the floor.
+        if not self._snapshot_provider or self.client_count == 0:
+            return
+
+        payload = await self._snapshot_provider()
+        if event:
+            payload["event"] = event
+
+        self.publish_message({"type": message_type, "payload": payload})
+
     async def pump(self, websocket: Any, queue: asyncio.Queue[dict[str, Any]]) -> None:
         """Drain one client's queue into its websocket. Runs until cancelled."""
         while True:

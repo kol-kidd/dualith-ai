@@ -112,10 +112,40 @@ from .routing import (
     workflow_for_intent,
 )
 from .runners import RUNNER_COMMANDS
-
-ROOT_DIR = Path(__file__).resolve().parents[2]
-DUALITH_DIR = ROOT_DIR / ".dualith"
-REGISTRY_PATH = DUALITH_DIR / "projects.json"
+from .store import (
+    DUALITH_DIR,
+    PROJECTS_ROOT,
+    REGISTRY_PATH,
+    ROOT_DIR,
+    SAFE_NAME,
+    agent_chat_path,
+    architecture_path,
+    central_memory_path,
+    chat_history_path,
+    claude_rate_limits_path,
+    decisions_path,
+    display_path,
+    feedback_path,
+    human_input_path,
+    ideas_path,
+    lessons_path,
+    plan_path,
+    project_memory_doc_path,
+    project_memory_path,
+    quota_path,
+    read_json_object,
+    read_limited_text,
+    relative_path,
+    result_file_path,
+    results_path,
+    round_context_path,
+    status_path,
+    tasks_path,
+    usage_path,
+    utc_now,
+    workspace_state_path,
+    write_json_atomic,
+)
 
 # ── Session token ─────────────────────────────────────────────────────────────
 # Generated fresh each server start. The frontend reads it from /api/setup/status
@@ -192,9 +222,7 @@ def _setup_logger() -> logging.Logger:
 
 log = _setup_logger()
 # ─────────────────────────────────────────────────────────────────────────────
-PROJECTS_ROOT = Path(os.environ.get("DUALITH_PROJECTS_ROOT", ROOT_DIR.parent)).expanduser().resolve()
 DYNAMIC_ORCHESTRATION_ENABLED = os.environ.get("DUALITH_DYNAMIC_ORCHESTRATION", "").strip().lower() in {"1", "true", "yes", "on"}
-SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 SAFE_MODEL = re.compile(r"^[A-Za-z0-9._:@/+ -]+$")
 SAFE_REASONING = {"low", "medium", "high", "extra-high"}
 STACK_PROFILE_VALUES = {"smart", "next-web", "fastify-api", "fastapi-api", "none"}
@@ -860,14 +888,6 @@ app.add_middleware(
 )
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def display_path(path: Path) -> str:
-    return str(path).replace("\\", "/")
-
-
 def dualith_reserved_ports() -> set[int]:
     return {port for port in (DUALITH_WEB_PORT, DUALITH_API_PORT) if port > 0}
 
@@ -971,90 +991,6 @@ def orchestration_manifest() -> dict[str, Any]:
     }
 
 
-def usage_path() -> Path:
-    return DUALITH_DIR / "usage.json"
-
-
-def results_path() -> Path:
-    return DUALITH_DIR / "results.json"
-
-
-def quota_path() -> Path:
-    return DUALITH_DIR / "quota.json"
-
-
-def status_path() -> Path:
-    return DUALITH_DIR / "status.json"
-
-
-def claude_rate_limits_path() -> Path:
-    return DUALITH_DIR / "claude-rate-limits.json"
-
-
-def tasks_path() -> Path:
-    return DUALITH_DIR / "tasks.json"
-
-
-def ideas_path() -> Path:
-    return DUALITH_DIR / "ideas.json"
-
-
-def provider_config_path() -> Path:
-    return DUALITH_DIR / "provider-config.json"
-
-
-def central_memory_path() -> Path:
-    return DUALITH_DIR / "memory.json"
-
-
-def human_input_path(project_path: Path) -> Path:
-    return project_path / "HUMAN_INPUT.md"
-
-
-def chat_history_path(project_path: Path) -> Path:
-    return project_path / "CHAT_HISTORY.md"
-
-
-def project_memory_path(project_path: Path) -> Path:
-    return project_path / ".dualith_memory"
-
-
-def project_memory_doc_path(project_path: Path) -> Path:
-    return project_path / "PROJECT_MEMORY.md"
-
-
-def plan_path(project_path: Path) -> Path:
-    return project_path / "PLAN.md"
-
-
-def feedback_path(project_path: Path) -> Path:
-    return project_path / "FEEDBACK.md"
-
-
-def agent_chat_path(project_path: Path) -> Path:
-    return project_path / "AGENT_CHAT.md"
-
-
-def architecture_path(project_path: Path) -> Path:
-    return project_path / "ARCHITECTURE.md"
-
-
-def decisions_path(project_path: Path) -> Path:
-    return project_path / "DECISIONS.md"
-
-
-def lessons_path(project_path: Path) -> Path:
-    return project_path / "LESSONS.md"
-
-
-def workspace_state_path(project_path: Path) -> Path:
-    return project_path / "WORKSPACE_STATE.md"
-
-
-def round_context_path(project_path: Path) -> Path:
-    return project_path / ".dualith" / "round_context.md"
-
-
 # HITL marker prefixes (kept as exact strings per spec).
 QUESTION_PREFIX = "🤖 QUESTION:"
 ANSWER_PREFIX = "✍️ ANSWER:"
@@ -1124,9 +1060,7 @@ def read_registry() -> list[dict[str, str]]:
 def write_registry(projects: list[dict[str, str]]) -> None:
     ensure_dualith_store()
     payload = {"projects": sorted(projects, key=lambda item: item["name"].lower())}
-    temp_path = REGISTRY_PATH.with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temp_path.replace(REGISTRY_PATH)
+    write_json_atomic(REGISTRY_PATH, payload)
 
 
 def read_usage_runs() -> list[dict[str, Any]]:
@@ -1146,9 +1080,7 @@ def read_usage_runs() -> list[dict[str, Any]]:
 def write_usage_runs(runs: list[dict[str, Any]]) -> None:
     ensure_dualith_store()
     payload = {"runs": runs[-USAGE_RUN_LIMIT:]}
-    temp_path = usage_path().with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temp_path.replace(usage_path())
+    write_json_atomic(usage_path(), payload)
 
 
 def read_results() -> list[dict[str, Any]]:
@@ -1180,9 +1112,7 @@ def sanitize_result_for_snapshot(result: dict[str, Any]) -> dict[str, Any]:
 def write_results(results: list[dict[str, Any]]) -> None:
     ensure_dualith_store()
     payload = {"results": results[-RESULT_LIMIT:]}
-    temp_path = results_path().with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temp_path.replace(results_path())
+    write_json_atomic(results_path(), payload)
 
 
 def write_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -1257,9 +1187,7 @@ def write_tasks(tasks: list[dict[str, Any]]) -> None:
         trimmed.extend([*history[-TASK_LIMIT_PER_PROJECT:], *pinned])
 
     payload = {"tasks": sorted(trimmed, key=lambda item: str(item.get("created_at", "")))}
-    temp_path = tasks_path().with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temp_path.replace(tasks_path())
+    write_json_atomic(tasks_path(), payload)
     schedule_team_room_broadcast()
 
 
@@ -1347,9 +1275,7 @@ def write_ideas(ideas: list[dict[str, Any]]) -> None:
     payload = {
         "ideas": sorted(normalized, key=lambda item: str(item.get("updated_at", "")), reverse=True)[:IDEA_LIMIT]
     }
-    temp_path = ideas_path().with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temp_path.replace(ideas_path())
+    write_json_atomic(ideas_path(), payload)
 
 
 def idea_by_id(idea_id: str) -> dict[str, Any] | None:
@@ -2259,9 +2185,7 @@ def write_quota_settings(settings: dict[str, Any]) -> dict[str, Any]:
 
     payload["reserve_percent"] = min(90, max(0, payload["reserve_percent"]))
     ensure_dualith_store()
-    temp_path = quota_path().with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temp_path.replace(quota_path())
+    write_json_atomic(quota_path(), payload)
     return payload
 
 
@@ -2318,9 +2242,7 @@ def write_status_cache(cache: dict[str, Any]) -> dict[str, Any]:
         }
 
     ensure_dualith_store()
-    temp_path = status_path().with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temp_path.replace(status_path())
+    write_json_atomic(status_path(), payload)
     return payload
 
 
@@ -2895,12 +2817,6 @@ def finish_usage_record(record: dict[str, Any], status: str, exit_code: int | No
     return record
 
 
-def result_file_path(project_path: Path, run_id: str) -> Path:
-    result_dir = project_path / ".dualith-result"
-    result_dir.mkdir(parents=True, exist_ok=True)
-    return result_dir / f"{run_id}.md"
-
-
 def text_from_json_value(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -3381,13 +3297,6 @@ def resolve_project_path(name: str) -> Path:
         raise HTTPException(status_code=400, detail="Project path escapes the configured projects root.")
 
     return project_path
-
-
-def relative_path(path: Path) -> str:
-    try:
-        return str(path.resolve().relative_to(PROJECTS_ROOT)).replace("\\", "/")
-    except ValueError:
-        return display_path(path)
 
 
 def project_name_for_path(project_path: Path) -> str:
@@ -4035,18 +3944,6 @@ def clear_human_input(project_path: Path) -> None:
     human_input_path(project_path).write_text("", encoding="utf-8")
 
 
-def read_json_object(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    # Tolerate a UTF-8 BOM (common when files are authored via Windows tools).
-    raw = path.read_text(encoding="utf-8-sig", errors="replace").strip() or "{}"
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def load_memory(project_path: Path) -> dict[str, Any]:
     """Merge centralized memory with per-project memory; project keys override central."""
     merged = dict(read_json_object(central_memory_path()))
@@ -4217,13 +4114,6 @@ def read_agent_chat(project_path: Path) -> str:
         return ""
     content = path.read_text(encoding="utf-8", errors="replace")
     return content[-CHAT_HISTORY_MAX_CHARS:] if len(content) > CHAT_HISTORY_MAX_CHARS else content
-
-
-def read_limited_text(path: Path, limit: int = 12_000) -> str:
-    if not path.exists():
-        return ""
-    content = path.read_text(encoding="utf-8", errors="replace")
-    return content[-limit:] if len(content) > limit else content
 
 
 def project_artifacts(project_path: Path) -> dict[str, str]:
@@ -4990,20 +4880,13 @@ async def collect_snapshot() -> dict[str, Any]:
 
 
 async def broadcast(message_type: str, event: dict[str, str] | None = None) -> None:
-    # collect_snapshot() is expensive — it walks every registered project and
-    # spawns a `git log` per repo. With no attached clients nothing can observe
-    # the payload, so skip the work entirely rather than burn it on the floor.
-    if event_bus.client_count == 0:
-        return
+    """Thin delegate kept so existing call sites read unchanged.
 
-    payload = await collect_snapshot()
-    if event:
-        payload["event"] = event
-
-    event_bus.publish_message({
-        "type": message_type,
-        "payload": payload,
-    })
+    The implementation lives on the event bus, which reaches the snapshot
+    through the provider registered in `startup()` — see
+    `EventBus.broadcast_snapshot`.
+    """
+    await event_bus.broadcast_snapshot(message_type, event)
 
 
 def record_event(action: str, path: Path | str) -> dict[str, str]:
