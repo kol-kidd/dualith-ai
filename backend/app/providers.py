@@ -21,6 +21,8 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, model_validator
 
+from .store import provider_config_path
+
 try:
     import keyring
 except Exception:  # pragma: no cover - keyring optional at import time
@@ -209,8 +211,9 @@ def delete_slot_secret(slot_name: str) -> None:
 # ── Config persistence ────────────────────────────────────────────────────────
 
 def _provider_config_path() -> Path:
-    from .main import DUALITH_DIR
-    return DUALITH_DIR / "provider-config.json"
+    # Was a deferred `from .main import DUALITH_DIR` purely to dodge a circular
+    # import. store.py is a leaf, so the import can be a normal top-level one.
+    return provider_config_path()
 
 
 def load_provider_config() -> ProviderConfig | None:

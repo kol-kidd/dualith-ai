@@ -13,7 +13,6 @@ import shutil
 import socket
 import subprocess
 import sys
-from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -88,12 +87,10 @@ from .routing import (
     ORCHESTRATION_WORKFLOWS,
     PIPELINE_MAX_ITERATIONS,
     REVIEW_AGENTS,
-    ROUTE_MODE_VALUES,
     SPECIALIST_REVIEWER_LABELS,
     SPECIALIST_REVIEWER_VERDICTS,
     SPECIALIST_REVIEWERS,
     TEAM_MAX_ROUNDS,
-    TEAM_MODE_VALUES,
     _is_obvious_question,
     audit_passed,
     classify_orchestration_intent,
@@ -112,7 +109,26 @@ from .routing import (
     workflow_for_intent,
 )
 from .runners import RUNNER_COMMANDS
+from .runtime import (
+    active_agent_runs,
+    active_dev_servers,
+    active_pipelines,
+    active_teams,
+    last_fs_activity,
+    pipeline_resume_events,
+    plan_approval_events,
+    plan_approval_results,
+    project_commits_cache,
+    team_resume_events,
+    watch_handles,
+)
+from .scaffolding import (
+    copy_impeccable_skill,
+    scaffold_project_stack,
+)
 from .store import (
+    DEFAULT_QUOTA_SETTINGS,
+    DEFAULT_STATUS_CACHE,
     DUALITH_DIR,
     PROJECTS_ROOT,
     REGISTRY_PATH,
@@ -125,6 +141,7 @@ from .store import (
     claude_rate_limits_path,
     decisions_path,
     display_path,
+    ensure_dualith_store,
     feedback_path,
     human_input_path,
     ideas_path,
@@ -140,11 +157,39 @@ from .store import (
     results_path,
     round_context_path,
     status_path,
-    tasks_path,
     usage_path,
     utc_now,
     workspace_state_path,
     write_json_atomic,
+)
+from .tasks import (
+    TASK_PHASES,
+    TASK_STATUSES,
+    active_task_for_project,
+    append_task_decision,
+    append_task_event,
+    create_task,
+    initial_task_phases,
+    next_pending_task,
+    parse_decomposer_file,
+    project_tasks,
+    read_tasks,
+    reconcile_interrupted_active_tasks,
+    recover_interrupted_tasks,
+    set_task_lead_lanes,
+    set_task_phase,
+    set_task_specialist_review,
+    set_task_status,
+    specialist_review_state,
+    task_by_id,
+    task_counts,
+    task_event_type_for_action,
+    task_final_status_from_state,
+    task_phase_for_agent,
+    task_title,
+    update_task,
+    update_task_lane_progress,
+    write_tasks,
 )
 
 # ── Session token ─────────────────────────────────────────────────────────────
@@ -225,7 +270,6 @@ log = _setup_logger()
 DYNAMIC_ORCHESTRATION_ENABLED = os.environ.get("DUALITH_DYNAMIC_ORCHESTRATION", "").strip().lower() in {"1", "true", "yes", "on"}
 SAFE_MODEL = re.compile(r"^[A-Za-z0-9._:@/+ -]+$")
 SAFE_REASONING = {"low", "medium", "high", "extra-high"}
-STACK_PROFILE_VALUES = {"smart", "next-web", "fastify-api", "fastapi-api", "none"}
 CODE_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".py", ".html", ".css", ".md"}
 SKIP_IMPORT_DIRS = {".git", "node_modules", ".next", "dist", "build", ".venv", "__pycache__", ".cache", ".turbo"}
 CHECKPOINT_EXCLUDE_PATHS = (*sorted(SKIP_IMPORT_DIRS - {".git"}), ".dualith", ".dualith-result")
@@ -366,16 +410,6 @@ DEFAULT_RUNNER_REASONING = {
     "codex": "extra-high",
     "claude": "medium",
 }
-DEFAULT_QUOTA_SETTINGS = {
-    # Eco by default: route heavy reasoning (lead/builder) to the pricier/stronger
-    # slot and light roles (tester/reviewers) to the cheaper one — better quality
-    # where it matters, lower spend overall. Env-overridable via the quota panel.
-    "runner_policy": os.environ.get("DUALITH_DEFAULT_RUNNER_POLICY", "eco"),
-    "reserve_percent": 10,
-    "codex_monthly_tokens": 0,
-    "claude_five_hour_tokens": 0,
-    "claude_weekly_tokens": 0,
-}
 RUNNER_POLICIES = {
     "auto": {
         "label": "Auto",
@@ -444,47 +478,10 @@ QUOTA_INTEGER_SETTINGS = {
 }
 IMPLEMENTATION_AGENTS = {"ask", "builder", "lead", "team", "git"}
 
-TASK_STATUSES = {"pending", "active", "blocked", "completed", "failed"}
-TASK_PHASES = ("pm", "architect", "planner", "lead", "tester", "reviewer")
-TASK_EVENT_TYPES = {"conversation", "agent_activity", "decision", "system", "review", "queue_event"}
-TASK_LIMIT_PER_PROJECT = 80
 IDEA_LIMIT = 100
 IDEA_MESSAGE_LIMIT = 80
-DEFAULT_STATUS_CACHE = {
-    "codex": {
-        "checked_at": "",
-        "status": "not_checked",
-        "raw": "",
-        "error": "",
-        "exit_code": None,
-        "parsed": {"monthly": None},
-    },
-    "claude": {
-        "checked_at": "",
-        "status": "not_checked",
-        "raw": "",
-        "error": "",
-        "exit_code": None,
-        "parsed": {"five_hour": None, "weekly": None},
-    },
-}
-
-console_events: deque[dict[str, str]] = deque(maxlen=120)
 observer: Observer | None = None
 event_loop: asyncio.AbstractEventLoop | None = None
-watch_handles: dict[str, Any] = {}
-active_agent_runs: dict[str, dict[str, Any]] = {}
-active_pipelines: dict[str, dict[str, Any]] = {}
-pipeline_resume_events: dict[str, asyncio.Event] = {}
-active_teams: dict[str, dict[str, Any]] = {}
-team_resume_events: dict[str, asyncio.Event] = {}
-plan_approval_events: dict[str, asyncio.Event] = {}
-plan_approval_results: dict[str, dict[str, Any]] = {}
-active_dev_servers: dict[str, dict[str, Any]] = {}
-team_room_broadcast_pending = False
-fs_broadcast_pending = False
-fs_broadcast_latest: dict[str, str] | None = None
-project_commits_cache: dict[str, tuple[str, list[str]]] = {}
 status_refresh_lock: asyncio.Lock | None = None
 status_refresh_task: asyncio.Task[tuple[dict[str, Any], str]] | None = None
 runner_health: dict[str, dict[str, Any]] = {
@@ -1003,27 +1000,6 @@ CHAT_HISTORY_MAX_CHARS = 32_000
 # tail only needs the most recent exchanges. Env-overridable.
 CHAT_HISTORY_PROMPT_CHARS = env_int("DUALITH_CHAT_HISTORY_PROMPT_CHARS", 2500)
 
-def ensure_dualith_store() -> None:
-    DUALITH_DIR.mkdir(parents=True, exist_ok=True)
-    PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
-    if not REGISTRY_PATH.exists():
-        REGISTRY_PATH.write_text('{"projects":[]}\n', encoding="utf-8")
-    if not usage_path().exists():
-        usage_path().write_text('{"runs":[]}\n', encoding="utf-8")
-    if not results_path().exists():
-        results_path().write_text('{"results":[]}\n', encoding="utf-8")
-    if not quota_path().exists():
-        quota_path().write_text(json.dumps(DEFAULT_QUOTA_SETTINGS, indent=2) + "\n", encoding="utf-8")
-    if not status_path().exists():
-        status_path().write_text(json.dumps(DEFAULT_STATUS_CACHE, indent=2) + "\n", encoding="utf-8")
-    if not tasks_path().exists():
-        tasks_path().write_text('{"tasks":[]}\n', encoding="utf-8")
-    if not ideas_path().exists():
-        ideas_path().write_text('{"ideas":[]}\n', encoding="utf-8")
-    if not central_memory_path().exists():
-        central_memory_path().write_text("{}\n", encoding="utf-8")
-
-
 def read_registry() -> list[dict[str, str]]:
     ensure_dualith_store()
     try:
@@ -1127,29 +1103,6 @@ def clear_project_results(project_name: str) -> None:
     write_results(remaining)
 
 
-def task_title(prompt: str, fallback: str = "New engineering task") -> str:
-    for line in prompt.splitlines():
-        cleaned = line.strip().strip("#*- ")
-        if cleaned:
-            return cleaned[:96]
-    return fallback
-
-
-def task_event_type_for_action(action: str) -> str:
-    upper = action.upper()
-    if any(token in upper for token in ("QUEUE", "TASK")):
-        return "queue_event"
-    if any(token in upper for token in ("PLAN_READY", "HUMAN", "QUESTION", "APPROVAL", "DECISION")):
-        return "decision"
-    if any(token in upper for token in ("AUDIT", "REVIEW", "TEAMMATE")):
-        return "review"
-    if any(token in upper for token in ("CHAT", "GIT")):
-        return "conversation"
-    if any(token in upper for token in ("TEAM", "PIPELINE", "CODEX", "CLAUDE", "STATUS")):
-        return "agent_activity"
-    return "system"
-
-
 def typed_console_events() -> list[dict[str, str]]:
     return [
         {
@@ -1158,37 +1111,8 @@ def typed_console_events() -> list[dict[str, str]]:
             "path": entry.get("path", ""),
             "type": task_event_type_for_action(entry.get("action", "")),
         }
-        for entry in console_events
+        for entry in event_bus.console_events
     ]
-
-
-def read_tasks() -> list[dict[str, Any]]:
-    ensure_dualith_store()
-    try:
-        data = json.loads(tasks_path().read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        data = {"tasks": []}
-    tasks = data.get("tasks", [])
-    return [normalize_task_record(task) for task in tasks if isinstance(task, dict)] if isinstance(tasks, list) else []
-
-
-def write_tasks(tasks: list[dict[str, Any]]) -> None:
-    ensure_dualith_store()
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for task in tasks:
-        project = str(task.get("project", ""))
-        grouped.setdefault(project, []).append(task)
-
-    trimmed: list[dict[str, Any]] = []
-    for project_tasks in grouped.values():
-        ordered = sorted(project_tasks, key=lambda item: str(item.get("created_at", "")))
-        pinned = [task for task in ordered if str(task.get("status", "")) in {"active", "blocked", "pending"}]
-        history = [task for task in ordered if task not in pinned]
-        trimmed.extend([*history[-TASK_LIMIT_PER_PROJECT:], *pinned])
-
-    payload = {"tasks": sorted(trimmed, key=lambda item: str(item.get("created_at", "")))}
-    write_json_atomic(tasks_path(), payload)
-    schedule_team_room_broadcast()
 
 
 def idea_title_from_text(value: str) -> str:
@@ -1334,604 +1258,6 @@ def idea_conversation_text(idea: dict[str, Any]) -> str:
     return "\n\n".join(lines) or "(No conversation yet.)"
 
 
-def task_phase_state(status: str = "pending", runner: str = "") -> dict[str, str]:
-    return {"status": status, "runner": runner, "updated_at": ""}
-
-
-def workflow_agents(workflow_id: str) -> set[str]:
-    workflow = ORCHESTRATION_WORKFLOWS.get(workflow_id, {})
-    agents = workflow.get("agents", [])
-    if isinstance(agents, list):
-        return {str(agent) for agent in agents}
-    agent = str(workflow.get("agent", ""))
-    return {agent} if agent else set()
-
-
-def workflow_task_phases(workflow_id: str) -> set[str]:
-    agents = workflow_agents(workflow_id)
-    phases: set[str] = set()
-    if "pm" in agents:
-        phases.add("pm")
-    if "architect" in agents:
-        phases.add("architect")
-    if "planner" in agents:
-        phases.add("planner")
-    if agents.intersection({"lead", "builder"}):
-        phases.add("lead")
-    if "tester" in agents:
-        phases.add("tester")
-    if agents.intersection({"teammate", "auditor", *SPECIALIST_REVIEWERS}):
-        phases.add("reviewer")
-    return phases
-
-
-def initial_task_phases(workflow_id: str) -> dict[str, dict[str, str]]:
-    active_phases = workflow_task_phases(workflow_id)
-    return {
-        phase: task_phase_state("pending" if phase in active_phases else "skipped")
-        for phase in TASK_PHASES
-    }
-
-
-def normalize_task_decision(decision: dict[str, Any]) -> dict[str, str]:
-    return {
-        "id": str(decision.get("id", "")) or uuid4().hex,
-        "label": str(decision.get("label", ""))[:120],
-        "selected": str(decision.get("selected", ""))[:240],
-        "reason": str(decision.get("reason", ""))[:500],
-        "source": str(decision.get("source", ""))[:80],
-        "timestamp": str(decision.get("timestamp", "")) or utc_now(),
-        "status": str(decision.get("status", ""))[:80],
-    }
-
-
-def normalize_task_record(task: dict[str, Any]) -> dict[str, Any]:
-    workflow_id = str(task.get("workflow_id", ""))
-    route_mode = str(task.get("route_mode", "auto"))
-    team_mode = str(task.get("team_mode", "full"))
-    task["route_mode"] = route_mode if route_mode in ROUTE_MODE_VALUES else "auto"
-    task["team_mode"] = team_mode if team_mode in TEAM_MODE_VALUES else "full"
-    task["estimated_runner_calls"] = int(task.get("estimated_runner_calls") or 0)
-    planned_agents = task.get("planned_agents", [])
-    if not isinstance(planned_agents, list):
-        planned_agents = []
-    task["planned_agents"] = [str(agent) for agent in planned_agents if str(agent).strip()][:24]
-    preflight_status = str(task.get("preflight_status", "ready"))
-    task["preflight_status"] = preflight_status if preflight_status in {"ready", "blocked", "answered", "skipped"} else "ready"
-    active_phases = workflow_task_phases(workflow_id)
-    phases = task.get("phases", {})
-    if not isinstance(phases, dict):
-        phases = {}
-    for phase in TASK_PHASES:
-        current = phases.get(phase, {})
-        if not isinstance(current, dict):
-            current = {}
-        status = str(current.get("status", ""))
-        runner = str(current.get("runner", ""))
-        updated_at = str(current.get("updated_at", ""))
-        if phase not in active_phases and status in {"", "pending", "waiting"} and not runner and not updated_at:
-            current["status"] = "skipped"
-        elif not status:
-            current["status"] = "pending" if phase in active_phases else "skipped"
-        current.setdefault("runner", "")
-        current.setdefault("updated_at", "")
-        phases[phase] = current
-    task["phases"] = phases
-
-    reviews = task.get("specialist_reviews")
-    if (
-        not isinstance(reviews, list)
-        and workflow_agents(workflow_id).intersection(SPECIALIST_REVIEWERS)
-        and str(task.get("status", "")) in {"pending", "active", "blocked"}
-    ):
-        task["specialist_reviews"] = [specialist_review_state(reviewer) for reviewer in SPECIALIST_REVIEWERS]
-
-    decisions = task.get("decisions", [])
-    if not isinstance(decisions, list):
-        decisions = []
-    task["decisions"] = [
-        normalize_task_decision(decision)
-        for decision in decisions
-        if isinstance(decision, dict) and str(decision.get("selected", "")).strip()
-    ][-24:]
-
-    subagents = task.get("subagents", [])
-    if not isinstance(subagents, list):
-        subagents = []
-    task["subagents"] = [item for item in subagents if isinstance(item, dict)]
-    return task
-
-
-def specialist_review_state(reviewer: str, status: str = "pending", runner: str = "", summary: str = "") -> dict[str, str]:
-    return {
-        "id": reviewer,
-        "label": SPECIALIST_REVIEWER_LABELS.get(reviewer, reviewer.replace("_", " ").title()),
-        "status": status,
-        "runner": runner,
-        "summary": summary,
-        "updated_at": "",
-    }
-
-
-def new_task_record(
-    project_name: str,
-    workflow_id: str,
-    runner: str,
-    model: str,
-    reasoning: str,
-    prompt: str,
-    route_reason: str,
-    attachment_paths: list[str] | None = None,
-    status: str = "pending",
-    orchestration: dict[str, Any] | None = None,
-    route_mode: str = "auto",
-    team_mode: str = "full",
-    estimated_runner_calls: int = 0,
-    planned_agents: list[str] | None = None,
-    preflight_status: str = "ready",
-) -> dict[str, Any]:
-    now = utc_now()
-    phases = initial_task_phases(workflow_id)
-    specialist_reviews = [specialist_review_state(reviewer) for reviewer in SPECIALIST_REVIEWERS]
-    task = {
-        "id": uuid4().hex,
-        "project": project_name,
-        "title": task_title(prompt),
-        "prompt": prompt.strip(),
-        "workflow_id": workflow_id,
-        "runner": runner,
-        "model": model,
-        "reasoning": reasoning,
-        "route_reason": route_reason,
-        "route_mode": route_mode if route_mode in ROUTE_MODE_VALUES else "auto",
-        "team_mode": team_mode if team_mode in TEAM_MODE_VALUES else "full",
-        "estimated_runner_calls": max(0, int(estimated_runner_calls or 0)),
-        "planned_agents": planned_agents or [],
-        "preflight_status": preflight_status if preflight_status in {"ready", "blocked", "answered", "skipped"} else "ready",
-        "attachment_paths": attachment_paths or [],
-        "status": status if status in TASK_STATUSES else "pending",
-        "active_phase": "",
-        "created_at": now,
-        "updated_at": now,
-        "started_at": now if status == "active" else "",
-        "completed_at": "",
-        "phases": phases,
-        "specialist_reviews": specialist_reviews,
-        "decisions": [],
-        "events": [
-            {
-                "id": uuid4().hex,
-                "type": "queue_event",
-                "title": "Task created" if status == "active" else "Task queued",
-                "body": route_reason,
-                "role": "",
-                "status": status,
-                "timestamp": now,
-            }
-        ],
-        "ownership": {"mode": "sequential", "claimed_paths": []},
-        "subagents": [],
-    }
-    if orchestration:
-        task["orchestration"] = orchestration
-    return task
-
-
-def project_tasks(project_name: str) -> list[dict[str, Any]]:
-    return [task for task in read_tasks() if str(task.get("project", "")) == project_name]
-
-
-def active_task_for_project(project_name: str) -> dict[str, Any] | None:
-    for task in project_tasks(project_name):
-        if str(task.get("status", "")) in {"active", "blocked"}:
-            return task
-    return None
-
-
-def next_pending_task(project_name: str) -> dict[str, Any] | None:
-    pending = [task for task in project_tasks(project_name) if str(task.get("status", "")) == "pending"]
-    return sorted(pending, key=lambda item: str(item.get("created_at", "")))[0] if pending else None
-
-
-def task_counts(project_name: str) -> dict[str, int]:
-    counts = {status: 0 for status in TASK_STATUSES}
-    for task in project_tasks(project_name):
-        status = str(task.get("status", ""))
-        if status in counts:
-            counts[status] += 1
-    return counts
-
-
-def update_task(task_id: str, mutate: Any) -> dict[str, Any] | None:
-    tasks = read_tasks()
-    found: dict[str, Any] | None = None
-    for task in tasks:
-        if str(task.get("id", "")) == task_id:
-            mutate(task)
-            task["updated_at"] = utc_now()
-            found = task
-            break
-    if found:
-        write_tasks(tasks)
-    return found
-
-
-def create_task(
-    project_name: str,
-    workflow_id: str,
-    runner: str,
-    model: str,
-    reasoning: str,
-    prompt: str,
-    route_reason: str,
-    attachment_paths: list[str] | None = None,
-    status: str = "pending",
-    orchestration: dict[str, Any] | None = None,
-    route_mode: str = "auto",
-    team_mode: str = "full",
-    estimated_runner_calls: int = 0,
-    planned_agents: list[str] | None = None,
-    preflight_status: str = "ready",
-) -> dict[str, Any]:
-    task = new_task_record(
-        project_name,
-        workflow_id,
-        runner,
-        model,
-        reasoning,
-        prompt,
-        route_reason,
-        attachment_paths,
-        status,
-        orchestration,
-        route_mode,
-        team_mode,
-        estimated_runner_calls,
-        planned_agents,
-        preflight_status,
-    )
-    tasks = read_tasks()
-    tasks.append(task)
-    write_tasks(tasks)
-    return task
-
-
-def task_by_id(task_id: str | None) -> dict[str, Any] | None:
-    if not task_id:
-        return None
-    for task in read_tasks():
-        if str(task.get("id", "")) == task_id:
-            return task
-    return None
-
-
-def append_task_event(task_id: str | None, event_type: str, title: str, body: str = "", role: str = "", status: str = "") -> None:
-    if not task_id:
-        return
-    event_type = event_type if event_type in TASK_EVENT_TYPES else "system"
-
-    def mutate(task: dict[str, Any]) -> None:
-        now = utc_now()
-        events = task.setdefault("events", [])
-        if not isinstance(events, list):
-            events = []
-            task["events"] = events
-        events.append(
-            {
-                "id": uuid4().hex,
-                "type": event_type,
-                "title": title[:120],
-                "body": body[:500],
-                "role": role,
-                "status": status,
-                "timestamp": now,
-            }
-        )
-        task["events"] = events[-80:]
-        if event_type == "decision" and re.search(r"(^|\n)\s*selected\s*:", body, flags=re.IGNORECASE):
-            selected = re.search(r"(^|\n)\s*selected\s*:\s*(.+)", body, flags=re.IGNORECASE)
-            reason = re.search(r"(^|\n)\s*reason\s*:\s*(.+)", body, flags=re.IGNORECASE)
-            decision = normalize_task_decision(
-                {
-                    "id": uuid4().hex,
-                    "label": title,
-                    "selected": selected.group(2).strip() if selected else title,
-                    "reason": reason.group(2).strip() if reason else body,
-                    "source": role,
-                    "timestamp": now,
-                    "status": status,
-                }
-            )
-            decisions = task.setdefault("decisions", [])
-            if not isinstance(decisions, list):
-                decisions = []
-            decisions.append(decision)
-            task["decisions"] = decisions[-24:]
-
-    update_task(task_id, mutate)
-
-
-def append_task_decision(
-    task_id: str | None,
-    label: str,
-    selected: str,
-    reason: str = "",
-    source: str = "",
-    status: str = "",
-) -> None:
-    if not task_id or not selected.strip():
-        return
-
-    now = utc_now()
-    decision = normalize_task_decision(
-        {
-            "id": uuid4().hex,
-            "label": label or "Decision",
-            "selected": selected.strip(),
-            "reason": reason.strip(),
-            "source": source.strip(),
-            "timestamp": now,
-            "status": status.strip(),
-        }
-    )
-
-    def mutate(task: dict[str, Any]) -> None:
-        decisions = task.setdefault("decisions", [])
-        if not isinstance(decisions, list):
-            decisions = []
-        decisions.append(decision)
-        task["decisions"] = decisions[-24:]
-
-        events = task.setdefault("events", [])
-        if not isinstance(events, list):
-            events = []
-        events.append(
-            {
-                "id": uuid4().hex,
-                "type": "decision",
-                "title": decision["label"],
-                "body": f"selected: {decision['selected']}\nreason: {decision['reason']}".strip(),
-                "role": decision["source"],
-                "status": decision["status"],
-                "timestamp": now,
-            }
-        )
-        task["events"] = events[-80:]
-
-    update_task(task_id, mutate)
-
-
-def set_task_status(task_id: str | None, status: str, active_phase: str = "", body: str = "") -> None:
-    if not task_id or status not in TASK_STATUSES:
-        return
-
-    def mutate(task: dict[str, Any]) -> None:
-        now = utc_now()
-        task["status"] = status
-        task["active_phase"] = active_phase
-        if status == "active" and not task.get("started_at"):
-            task["started_at"] = now
-        if status in {"completed", "failed"}:
-            task["completed_at"] = now
-
-    update_task(task_id, mutate)
-    append_task_event(task_id, "queue_event", f"Task {status}", body, active_phase, status)
-
-
-def set_task_phase(task_id: str | None, phase: str, status: str, runner: str = "", body: str = "") -> None:
-    if not task_id or phase not in TASK_PHASES:
-        return
-
-    def mutate(task: dict[str, Any]) -> None:
-        phases = task.setdefault("phases", {})
-        if not isinstance(phases, dict):
-            phases = {}
-            task["phases"] = phases
-        current = phases.get(phase, {})
-        if not isinstance(current, dict):
-            current = {}
-        current.update({"status": status, "runner": runner, "updated_at": utc_now()})
-        phases[phase] = current
-        task["active_phase"] = phase if status in {"running", "blocked"} else task.get("active_phase", "")
-
-    updated = update_task(task_id, mutate)
-    event_type = "review" if phase == "reviewer" else "decision" if phase in {"pm", "architect", "planner"} else "agent_activity"
-    append_task_event(task_id, event_type, f"{phase.title()} {status}", body, phase, status)
-    if updated:
-        project_name = str(updated.get("project", ""))
-        team = active_teams.get(project_name) or {}
-        event_bus.publish(
-            "phase",
-            project_name,
-            {
-                "phase": phase,
-                "status": status,
-                "runner": runner,
-                "round": int(team.get("round") or 0),
-                "narration": narration_for(phase, status, body),
-            },
-            task_id=task_id,
-        )
-
-
-def interrupted_task_phase(task: dict[str, Any]) -> str:
-    active_phase = str(task.get("active_phase", "")).strip()
-    if active_phase in TASK_PHASES:
-        return active_phase
-    phases = task.get("phases", {})
-    if isinstance(phases, dict):
-        for phase in TASK_PHASES:
-            state = phases.get(phase, {})
-            if isinstance(state, dict) and str(state.get("status", "")) in {"running", "summarizing"}:
-                return phase
-    return ""
-
-
-def reconcile_interrupted_active_tasks() -> None:
-    tasks = read_tasks()
-    changed = False
-    message = "Backend restarted while this task was active; generated files were preserved. Inspect the worktree, then rerun the task if needed."
-    for task in tasks:
-        if str(task.get("status", "")) != "active":
-            continue
-        now = utc_now()
-        phase = interrupted_task_phase(task)
-        task["status"] = "failed"
-        task["active_phase"] = phase
-        task["updated_at"] = now
-        task["completed_at"] = now
-        phases = task.setdefault("phases", {})
-        if phase in TASK_PHASES and isinstance(phases, dict):
-            current = phases.get(phase, {})
-            if not isinstance(current, dict):
-                current = {}
-            current.update({"status": "failed", "runner": str(current.get("runner", "")), "updated_at": now})
-            phases[phase] = current
-        events = task.setdefault("events", [])
-        if not isinstance(events, list):
-            events = []
-        events.append(
-            {
-                "id": uuid4().hex,
-                "type": "queue_event",
-                "title": "Task failed",
-                "body": message,
-                "role": phase,
-                "status": "failed",
-                "timestamp": now,
-            }
-        )
-        task["events"] = events[-80:]
-        changed = True
-    if changed:
-        write_tasks(tasks)
-
-
-def set_task_specialist_review(task_id: str | None, reviewer: str, status: str, runner: str = "", summary: str = "") -> None:
-    if not task_id or reviewer not in SPECIALIST_REVIEWERS:
-        return
-
-    def mutate(task: dict[str, Any]) -> None:
-        reviews = task.setdefault("specialist_reviews", [])
-        if not isinstance(reviews, list):
-            reviews = []
-            task["specialist_reviews"] = reviews
-        by_id = {str(item.get("id", "")): item for item in reviews if isinstance(item, dict)}
-        current = by_id.get(reviewer, specialist_review_state(reviewer))
-        current.update({
-            "status": status,
-            "runner": runner,
-            "summary": summary[:240],
-            "updated_at": utc_now(),
-        })
-        by_id[reviewer] = current
-        task["specialist_reviews"] = [by_id.get(item, specialist_review_state(item)) for item in SPECIALIST_REVIEWERS]
-
-    update_task(task_id, mutate)
-    append_task_event(task_id, "review", f"{SPECIALIST_REVIEWER_LABELS[reviewer]} {status}", summary, reviewer, status)
-
-
-def task_subagent_from_lane(lane: dict[str, Any]) -> dict[str, Any]:
-    label = str(lane.get("lane", "")).strip()
-    files = lane.get("files", [])
-    if not isinstance(files, list):
-        files = []
-    try:
-        pct = int(lane.get("pct", 0) or 0)
-    except (TypeError, ValueError):
-        pct = 0
-    return {
-        "id": label,
-        "label": label.upper() if len(label) <= 4 else label.replace("_", " ").title(),
-        "status": str(lane.get("status", "queued")) or "queued",
-        "scope": str(lane.get("scope", ""))[:240],
-        "files": [str(file) for file in files][:8],
-        "pct": pct,
-        "updated_at": str(lane.get("updated_at", "")),
-    }
-
-
-def set_task_lead_lanes(task_id: str | None, lanes: list[dict[str, Any]]) -> None:
-    """Store the decomposer's lane plan on the lead phase so the UI can render LaneMatrix."""
-    if not task_id:
-        return
-
-    def mutate(task: dict[str, Any]) -> None:
-        phases = task.setdefault("phases", {})
-        lead_phase = phases.setdefault("lead", {})
-        lead_phase["lanes"] = lanes
-        lead_phase["updated_at"] = utc_now()
-        task["subagents"] = [task_subagent_from_lane(lane) for lane in lanes if isinstance(lane, dict)]
-
-    update_task(task_id, mutate)
-
-
-def update_task_lane_progress(task_id: str | None, lane_label: str, status: str, pct: int = 0) -> None:
-    """Update a single lane's status/progress inside the lead phase lanes list."""
-    if not task_id:
-        return
-
-    def mutate(task: dict[str, Any]) -> None:
-        lanes = task.get("phases", {}).get("lead", {}).get("lanes", [])
-        for lane in lanes:
-            if isinstance(lane, dict) and lane.get("lane") == lane_label:
-                lane["status"] = status
-                lane["pct"] = pct
-                lane["updated_at"] = utc_now()
-                break
-        subagents = task.get("subagents", [])
-        if isinstance(subagents, list):
-            for subagent in subagents:
-                if not isinstance(subagent, dict):
-                    continue
-                if subagent.get("id") == lane_label or str(subagent.get("label", "")).lower() == lane_label.lower():
-                    subagent["status"] = status
-                    subagent["pct"] = pct
-                    subagent["updated_at"] = utc_now()
-                    break
-
-    update_task(task_id, mutate)
-
-
-def parse_decomposer_file(project_path: Path) -> list[dict[str, Any]]:
-    """Read DECOMPOSE.json written by the decomposer agent.
-
-    Returns [] on any parse failure or when the decomposer signals no split.
-    """
-    import json as _json
-    import re as _re
-    decompose_file = project_path / "DECOMPOSE.json"
-    if not decompose_file.exists():
-        return []
-    try:
-        raw = decompose_file.read_text(encoding="utf-8", errors="ignore").strip()
-    except Exception:  # noqa: BLE001
-        return []
-    # Strip markdown fences if the model wrapped anyway.
-    clean = _re.sub(r"```[a-z]*\n?", "", raw).strip()
-    m = _re.search(r'\{.*\}', clean, _re.DOTALL)
-    if not m:
-        return []
-    try:
-        data = _json.loads(m.group())
-        lanes = data.get("lanes", [])
-        if not isinstance(lanes, list):
-            return []
-        valid: list[dict[str, Any]] = []
-        for item in lanes:
-            if isinstance(item, dict) and item.get("lane"):
-                valid.append({
-                    "lane": str(item["lane"])[:32],
-                    "scope": str(item.get("scope", ""))[:200],
-                    "files": [str(f)[:200] for f in item.get("files", []) if f][:20],
-                    "status": "queued",
-                    "pct": 0,
-                })
-        return valid[:3]
-    except Exception:  # noqa: BLE001
-        return []
-
-
 def update_task_ownership_from_git(task_id: str | None, project_path: Path, owner: str = "Lead") -> None:
     if not task_id or not (project_path / ".git").exists():
         return
@@ -1955,18 +1281,6 @@ def update_task_ownership_from_git(task_id: str | None, project_path: Path, owne
         ownership["claimed_paths"] = claimed[-80:]
 
     update_task(task_id, mutate)
-
-
-def task_final_status_from_state(state: dict[str, Any] | None, success_step: str) -> tuple[str, str]:
-    if not state:
-        return "failed", "No final runtime state was captured."
-    status = str(state.get("status", ""))
-    step = str(state.get("step", ""))
-    if status == "done" and step == success_step:
-        return "completed", step
-    if status == "done" and step not in {"circuit-breaker", "max-rounds", "max-iterations"}:
-        return "completed", step or status
-    return "failed", step or status or "stopped"
 
 
 def taskable_workflow(workflow_id: str) -> bool:
@@ -2072,35 +1386,6 @@ def append_team_dispatch_receipt(
 
     body = team_dispatch_receipt_body(workflow_id, workflow, status, route_reason, runner_pref, team_mode, estimated_runner_calls, planned_agents)
     append_agent_chat(project_path, f"### Dispatch - {utc_now()}\n\n{body}\n\n")
-
-
-def recover_interrupted_tasks() -> None:
-    tasks = read_tasks()
-    changed = False
-    now = utc_now()
-    for task in tasks:
-        if str(task.get("status", "")) not in {"active", "blocked"}:
-            continue
-        task["status"] = "failed"
-        task["active_phase"] = ""
-        task["completed_at"] = now
-        task["updated_at"] = now
-        events = task.setdefault("events", [])
-        if isinstance(events, list):
-            events.append(
-                {
-                    "id": uuid4().hex,
-                    "type": "system",
-                    "title": "Task interrupted",
-                    "body": "The backend restarted before this task finished.",
-                    "role": "",
-                    "status": "failed",
-                    "timestamp": now,
-                }
-            )
-        changed = True
-    if changed:
-        write_tasks(tasks)
 
 
 async def start_next_queued_task(project_name: str) -> None:
@@ -4749,7 +4034,7 @@ async def project_record(project_path: Path, name: str | None = None) -> dict[st
     todos = [str(item.get("text", "")) for item in attention.get("items", []) if str(item.get("text", "")).strip()]
     attention_status = str(attention.get("status", "none"))
     audit_state = "CLEAN" if attention_status == "clean" else "ATTENTION" if attention_status in {"attention", "stale"} else "PENDING"
-    project_events = [entry for entry in reversed(console_events) if path_belongs_to_project(entry["path"], project_path)]
+    project_events = [entry for entry in reversed(event_bus.console_events) if path_belongs_to_project(entry["path"], project_path)]
     last_event = project_events[0] if project_events else None
     agent_state = "IDLE"
     tasks = project_tasks(project_name)
@@ -4864,7 +4149,7 @@ async def collect_snapshot() -> dict[str, Any]:
 
     return {
         "projects": projects,
-        "console": list(console_events),
+        "console": list(event_bus.console_events),
         "events": typed_console_events(),
         "commits": all_commits[:5],
         "usage": usage_snapshot(),
@@ -4879,6 +4164,25 @@ async def collect_snapshot() -> dict[str, Any]:
     }
 
 
+# These forward to the event bus, which owns the console buffer, the loop
+# handle, and the debounce state. Kept as module-level names so the ~200
+# existing call sites read unchanged.
+def record_event(action: str, path: Path | str) -> dict[str, str]:
+    return event_bus.record(action, path)
+
+
+def schedule_broadcast(message_type: str, event: dict[str, str] | None = None) -> None:
+    event_bus.schedule_broadcast(message_type, event)
+
+
+def schedule_fs_broadcast(event: dict[str, str]) -> None:
+    event_bus.schedule_fs_broadcast(event)
+
+
+def schedule_team_room_broadcast() -> None:
+    event_bus.schedule_team_room_broadcast()
+
+
 async def broadcast(message_type: str, event: dict[str, str] | None = None) -> None:
     """Thin delegate kept so existing call sites read unchanged.
 
@@ -4887,78 +4191,6 @@ async def broadcast(message_type: str, event: dict[str, str] | None = None) -> N
     `EventBus.broadcast_snapshot`.
     """
     await event_bus.broadcast_snapshot(message_type, event)
-
-
-def record_event(action: str, path: Path | str) -> dict[str, str]:
-    path_value = relative_path(path) if isinstance(path, Path) else path
-    entry = {
-        "timestamp": utc_now(),
-        "action": action,
-        "path": path_value,
-    }
-    console_events.append(entry)
-    # Error-class actions at WARNING; everything else at DEBUG (high-volume)
-    _level = logging.WARNING if action.endswith(("_ERR", "_ERROR", "DENIED")) else logging.DEBUG
-    log.log(_level, "%s  %s", action, path_value)
-    return entry
-
-
-def schedule_broadcast(message_type: str, event: dict[str, str] | None = None) -> None:
-    if not event_loop:
-        return
-
-    asyncio.run_coroutine_threadsafe(broadcast(message_type, event), event_loop)
-
-
-async def _team_room_broadcast_soon() -> None:
-    global team_room_broadcast_pending
-    try:
-        await asyncio.sleep(0.12)
-    finally:
-        team_room_broadcast_pending = False
-    await broadcast("team_event")
-
-
-async def _fs_broadcast_soon() -> None:
-    """Coalesce a burst of filesystem events into a single snapshot broadcast."""
-    global fs_broadcast_pending, fs_broadcast_latest
-    try:
-        await asyncio.sleep(FS_BROADCAST_DEBOUNCE_SECONDS)
-        event = fs_broadcast_latest
-    finally:
-        fs_broadcast_pending = False
-        fs_broadcast_latest = None
-    await broadcast("fs_event", event)
-
-
-def schedule_fs_broadcast(event: dict[str, str]) -> None:
-    """Queue an fs-driven broadcast, at most one in flight at a time.
-
-    An agent run can touch hundreds of files in a second; without this every
-    one of them would trigger a full multi-project snapshot.
-    """
-    global fs_broadcast_pending, fs_broadcast_latest
-    fs_broadcast_latest = event
-    if not event_loop or fs_broadcast_pending:
-        return
-
-    fs_broadcast_pending = True
-    try:
-        asyncio.run_coroutine_threadsafe(_fs_broadcast_soon(), event_loop)
-    except RuntimeError:
-        fs_broadcast_pending = False
-
-
-def schedule_team_room_broadcast() -> None:
-    global team_room_broadcast_pending
-    if not event_loop or team_room_broadcast_pending:
-        return
-
-    team_room_broadcast_pending = True
-    try:
-        asyncio.run_coroutine_threadsafe(_team_room_broadcast_soon(), event_loop)
-    except RuntimeError:
-        team_room_broadcast_pending = False
 
 
 def watch_project(project_path: Path) -> None:
@@ -4989,7 +4221,6 @@ def watch_registered_projects() -> None:
 
 # Per-project last file-system activity (workspace key → ISO timestamp).
 # Used as a liveness signal so silent long builds aren't idle-killed.
-last_fs_activity: dict[str, str] = {}
 
 
 def seconds_since_fs_activity(project_path: Path) -> float:
@@ -5026,456 +4257,12 @@ class WorkspaceEventHandler(FileSystemEventHandler):
         schedule_fs_broadcast(entry)
 
 
-def clean_stack_profile(stack_profile: str | None) -> str:
-    value = str(stack_profile or "smart").strip().lower()
-    return value if value in STACK_PROFILE_VALUES else "smart"
-
-
-def infer_stack_profile(spec: str, stack_profile: str | None = "smart") -> str:
-    requested = clean_stack_profile(stack_profile)
-    if requested != "smart":
-        return requested
-
-    text = spec.lower()
-    python_terms = ("python", "fastapi", "ml", "machine learning", "data science", "pandas", "numpy", "notebook")
-    node_api_terms = ("api-only", "api only", "backend api", "rest api", "webhook", "microservice", "fastify")
-    frontend_terms = ("next", "react", "frontend", "ui", "dashboard", "page", "website", "web app", "tailwind")
-    if any(term in text for term in python_terms):
-        return "fastapi-api"
-    if any(term in text for term in node_api_terms) and not any(term in text for term in frontend_terms):
-        return "fastify-api"
-    return "next-web"
-
-
-def write_scaffold_file(project_path: Path, relative_path: str, content: str, *, overwrite: bool = False) -> None:
-    target = project_path / relative_path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if overwrite or not target.exists():
-        target.write_text(content.lstrip("\n"), encoding="utf-8")
-
-
-def write_next_web_scaffold(project_path: Path, spec: str) -> None:
-    package_json = {
-        "name": project_path.name,
-        "version": "0.1.0",
-        "private": True,
-        "type": "module",
-        "scripts": {
-            "dev": "next dev",
-            "build": "next build",
-            "start": "next start",
-            "typecheck": "tsc --noEmit",
-            "lint": "eslint . --max-warnings=0",
-            "check": "npm run typecheck && npm run lint",
-        },
-        "dependencies": {
-            "@radix-ui/react-slot": "^1.1.0",
-            "class-variance-authority": "^0.7.1",
-            "clsx": "^2.1.1",
-            "lucide-react": "^0.468.0",
-            "next": "^15.3.0",
-            "react": "^19.0.0",
-            "react-dom": "^19.0.0",
-            "tailwind-merge": "^2.5.5",
-            "tailwindcss-animate": "^1.0.7",
-        },
-        "devDependencies": {
-            "@eslint/eslintrc": "^3.2.0",
-            "@types/node": "^22.10.0",
-            "@types/react": "^19.0.0",
-            "@types/react-dom": "^19.0.0",
-            "eslint": "^9.15.0",
-            "eslint-config-next": "^15.3.0",
-            "autoprefixer": "^10.4.20",
-            "postcss": "^8.4.49",
-            "tailwindcss": "^3.4.17",
-            "typescript": "^5.7.2",
-        },
-    }
-    write_scaffold_file(project_path, "package.json", json.dumps(package_json, indent=2) + "\n")
-    write_scaffold_file(
-        project_path,
-        "tsconfig.json",
-        """{
-  "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["dom", "dom.iterable", "es2022"],
-    "allowJs": false,
-    "skipLibCheck": true,
-    "strict": true,
-    "noImplicitAny": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    "noEmit": true,
-    "esModuleInterop": true,
-    "module": "esnext",
-    "moduleResolution": "bundler",
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "jsx": "preserve",
-    "incremental": true,
-    "plugins": [{ "name": "next" }]
-  },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
-}
-""",
-    )
-    write_scaffold_file(project_path, "next.config.ts", "import type { NextConfig } from \"next\";\n\nconst nextConfig: NextConfig = {};\n\nexport default nextConfig;\n")
-    write_scaffold_file(project_path, "postcss.config.mjs", "export default {\n  plugins: {\n    tailwindcss: {},\n    autoprefixer: {},\n  },\n};\n")
-    write_scaffold_file(
-        project_path,
-        "tailwind.config.ts",
-        """import type { Config } from "tailwindcss";
-import animate from "tailwindcss-animate";
-
-const config: Config = {
-  darkMode: ["class"],
-  content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./lib/**/*.{ts,tsx}"],
-  theme: {
-    extend: {
-      colors: {
-        border: "hsl(var(--border))",
-        background: "hsl(var(--background))",
-        foreground: "hsl(var(--foreground))",
-        primary: {
-          DEFAULT: "hsl(var(--primary))",
-          foreground: "hsl(var(--primary-foreground))",
-        },
-      },
-    },
-  },
-  plugins: [animate],
-};
-
-export default config;
-""",
-    )
-    write_scaffold_file(
-        project_path,
-        "eslint.config.mjs",
-        """import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { FlatCompat } from "@eslint/eslintrc";
-
-const compat = new FlatCompat({
-  baseDirectory: dirname(fileURLToPath(import.meta.url)),
-});
-
-export default [
-  ...compat.extends("next/core-web-vitals", "next/typescript"),
-  {
-    rules: {
-      "@typescript-eslint/no-explicit-any": "error",
-    },
-  },
-];
-""",
-    )
-    write_scaffold_file(project_path, ".gitignore", "node_modules\n.next\n.env*.local\ndist\ncoverage\n")
-    write_scaffold_file(project_path, "next-env.d.ts", "/// <reference types=\"next\" />\n/// <reference types=\"next/image-types/global\" />\n")
-    write_scaffold_file(
-        project_path,
-        "lib/utils.ts",
-        """import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
-
-export function cn(...inputs: ClassValue[]): string {
-  return twMerge(clsx(inputs));
-}
-""",
-    )
-    write_scaffold_file(
-        project_path,
-        "components/ui/button.tsx",
-        """import * as React from "react";
-import { Slot } from "@radix-ui/react-slot";
-import { cva, type VariantProps } from "class-variance-authority";
-
-import { cn } from "@/lib/utils";
-
-const buttonVariants = cva(
-  "inline-flex h-10 items-center justify-center gap-2 rounded-md border border-transparent px-4 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none disabled:opacity-50",
-  {
-    variants: {
-      variant: {
-        default: "bg-primary text-primary-foreground hover:opacity-90",
-        outline: "border-border bg-transparent hover:bg-foreground/5",
-        ghost: "hover:bg-foreground/5",
-      },
-      size: {
-        default: "h-10 px-4",
-        sm: "h-8 px-3 text-xs",
-        icon: "size-10 p-0",
-      },
-    },
-    defaultVariants: {
-      variant: "default",
-      size: "default",
-    },
-  },
-);
-
-export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof buttonVariants> {
-  asChild?: boolean;
-}
-
-export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
-    const Comp = asChild ? Slot : "button";
-    return <Comp className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...props} />;
-  },
-);
-
-Button.displayName = "Button";
-""",
-    )
-    write_scaffold_file(
-        project_path,
-        "app/layout.tsx",
-        """import type { Metadata } from "next";
-import "./globals.css";
-
-export const metadata: Metadata = {
-  title: "Dualith App",
-  description: "A modern strict TypeScript app scaffolded by Dualith.",
-};
-
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return (
-    <html lang="en">
-      <body>{children}</body>
-    </html>
-  );
-}
-""",
-    )
-    title = task_title(spec) if spec.strip() else "Modern App"
-    title_literal = json.dumps(title)
-    write_scaffold_file(
-        project_path,
-        "app/page.tsx",
-        f"""import {{ ArrowRight }} from "lucide-react";
-
-import {{ Button }} from "@/components/ui/button";
-
-export default function HomePage() {{
-  return (
-    <main className="min-h-screen bg-background text-foreground">
-      <section className="mx-auto flex min-h-screen w-full max-w-5xl flex-col justify-center gap-8 px-6 py-12">
-        <div className="max-w-3xl space-y-4">
-          <p className="text-sm font-medium uppercase tracking-wide text-foreground/60">Dualith starter</p>
-          <h1 className="text-4xl font-semibold tracking-normal sm:text-6xl">{{{title_literal}}}</h1>
-          <p className="max-w-2xl text-lg leading-8 text-foreground/70">
-            A Next.js App Router, React, strict TypeScript, Tailwind, and shadcn-compatible foundation is ready.
-          </p>
-        </div>
-        <div>
-          <Button>
-            Start building
-            <ArrowRight className="size-4" aria-hidden="true" />
-          </Button>
-        </div>
-      </section>
-    </main>
-  );
-}}
-""",
-    )
-    write_scaffold_file(
-        project_path,
-        "app/globals.css",
-        """@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-:root {
-  --background: 210 40% 98%;
-  --foreground: 222 47% 11%;
-  --border: 214 32% 91%;
-  --primary: 222 47% 11%;
-  --primary-foreground: 210 40% 98%;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-  background: hsl(var(--background));
-  color: hsl(var(--foreground));
-  font-family: Arial, Helvetica, sans-serif;
-}
-""",
-    )
-
-
-def write_fastify_scaffold(project_path: Path) -> None:
-    package_json = {
-        "name": project_path.name,
-        "version": "0.1.0",
-        "private": True,
-        "type": "module",
-        "scripts": {
-            "dev": "tsx watch src/server.ts",
-            "build": "tsc -p tsconfig.json",
-            "start": "node dist/server.js",
-            "typecheck": "tsc --noEmit",
-            "check": "npm run typecheck",
-        },
-        "dependencies": {
-            "@fastify/cors": "^10.0.0",
-            "dotenv": "^16.4.7",
-            "fastify": "^5.1.0",
-            "zod": "^3.24.1",
-        },
-        "devDependencies": {
-            "@types/node": "^22.10.0",
-            "tsx": "^4.19.2",
-            "typescript": "^5.7.2",
-        },
-    }
-    write_scaffold_file(project_path, "package.json", json.dumps(package_json, indent=2) + "\n")
-    write_scaffold_file(
-        project_path,
-        "tsconfig.json",
-        """{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "outDir": "dist",
-    "rootDir": "src",
-    "strict": true,
-    "noImplicitAny": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true
-  },
-  "include": ["src/**/*.ts"]
-}
-""",
-    )
-    write_scaffold_file(
-        project_path,
-        "src/server.ts",
-        """import Fastify, { type FastifyInstance } from "fastify";
-import cors from "@fastify/cors";
-import "dotenv/config";
-
-const port = Number(process.env.PORT ?? 3000);
-const host = process.env.HOST ?? "0.0.0.0";
-
-export async function buildServer(): Promise<FastifyInstance> {
-  const app = Fastify({ logger: true });
-  await app.register(cors, { origin: true });
-
-  app.get("/health", async () => ({ ok: true }));
-
-  return app;
-}
-
-const app = await buildServer();
-await app.listen({ port, host });
-""",
-    )
-    write_scaffold_file(project_path, ".env.example", "PORT=3000\nHOST=0.0.0.0\n")
-    write_scaffold_file(project_path, ".gitignore", "node_modules\ndist\n.env\ncoverage\n")
-
-
-def write_fastapi_scaffold(project_path: Path) -> None:
-    write_scaffold_file(
-        project_path,
-        "pyproject.toml",
-        f"""[project]
-name = "{project_path.name}"
-version = "0.1.0"
-requires-python = ">=3.11"
-dependencies = [
-  "fastapi>=0.115.0",
-  "uvicorn[standard]>=0.32.0",
-  "pydantic>=2.10.0",
-]
-
-[project.optional-dependencies]
-dev = ["pytest>=8.3.0", "ruff>=0.8.0"]
-
-[tool.ruff]
-line-length = 100
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-""",
-    )
-    write_scaffold_file(
-        project_path,
-        "app/main.py",
-        """from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict
-
-
-class HealthResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    ok: bool
-
-
-app = FastAPI(title="Dualith API")
-
-
-@app.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
-    return HealthResponse(ok=True)
-""",
-    )
-    write_scaffold_file(
-        project_path,
-        "tests/test_health.py",
-        """from fastapi.testclient import TestClient
-
-from app.main import app
-
-
-def test_health() -> None:
-    client = TestClient(app)
-    response = client.get("/health")
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
-""",
-    )
-    write_scaffold_file(project_path, ".env.example", "PORT=8000\n")
-    write_scaffold_file(project_path, ".gitignore", ".venv\n__pycache__\n.pytest_cache\n.ruff_cache\n.env\n")
-
-
-def scaffold_project_stack(project_path: Path, spec: str, stack_profile: str | None) -> str:
-    selected = infer_stack_profile(spec, stack_profile)
-    if selected == "next-web":
-        write_next_web_scaffold(project_path, spec)
-    elif selected == "fastify-api":
-        write_fastify_scaffold(project_path)
-    elif selected == "fastapi-api":
-        write_fastapi_scaffold(project_path)
-    return selected
-
-
 async def write_project_files(project_path: Path, spec: str, stack_profile: str = "smart") -> None:
     project_path.mkdir(parents=True, exist_ok=False)
     await ensure_dualith_files(project_path, spec, overwrite_spec=True)
     selected_stack = scaffold_project_stack(project_path, spec, stack_profile)
     if selected_stack != "none":
         append_chat_history(project_path, f"### Scaffold - {utc_now()}\n\nStack profile: {selected_stack}.\n\n")
-
-
-def copy_impeccable_skill(project_path: Path) -> None:
-    for harness_dir in (".agents", ".claude"):
-        source = ROOT_DIR / harness_dir / "skills" / "impeccable"
-        dest = project_path / harness_dir / "skills" / "impeccable"
-        if source.exists() and not dest.exists():
-            shutil.copytree(source, dest)
 
 
 async def ensure_dualith_files(project_path: Path, spec: str, *, overwrite_spec: bool) -> None:
@@ -7412,14 +6199,6 @@ def agent_result_error(result: dict[str, Any] | None) -> str:
 def agent_result_runner(result: dict[str, Any] | None, fallback: str) -> str:
     runner = str(result.get("runner", "")) if result else ""
     return runner if runner in RUNNER_COMMANDS else fallback
-
-
-def task_phase_for_agent(agent: str) -> str:
-    if agent in {"teammate", "auditor", "summarizer", *SPECIALIST_REVIEWERS}:
-        return "reviewer"
-    if agent == "builder":
-        return "lead"
-    return agent if agent in TASK_PHASES else ""
 
 
 def runner_limit_failure(result: dict[str, Any] | None, runner: str) -> bool:

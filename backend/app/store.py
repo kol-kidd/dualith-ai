@@ -177,3 +177,59 @@ def write_json_atomic(path: Path, payload: Any) -> None:
     temp_path = path.with_suffix(".json.tmp")
     temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     temp_path.replace(path)
+
+
+# ── Seed content ──────────────────────────────────────────────────────────────
+# What each store file contains before anything has written to it. These live
+# here rather than with the quota logic because they describe the on-disk
+# format, and `ensure_store()` is what puts them there.
+
+DEFAULT_QUOTA_SETTINGS = {
+    # Eco by default: route heavy reasoning (lead/builder) to the pricier/stronger
+    # slot and light roles (tester/reviewers) to the cheaper one — better quality
+    # where it matters, lower spend overall. Env-overridable via the quota panel.
+    "runner_policy": os.environ.get("DUALITH_DEFAULT_RUNNER_POLICY", "eco"),
+    "reserve_percent": 10,
+    "codex_monthly_tokens": 0,
+    "claude_five_hour_tokens": 0,
+    "claude_weekly_tokens": 0,
+}
+
+DEFAULT_STATUS_CACHE = {
+    "codex": {
+        "checked_at": "",
+        "status": "not_checked",
+        "raw": "",
+        "error": "",
+        "exit_code": None,
+        "parsed": {"monthly": None},
+    },
+    "claude": {
+        "checked_at": "",
+        "status": "not_checked",
+        "raw": "",
+        "error": "",
+        "exit_code": None,
+        "parsed": {"five_hour": None, "weekly": None},
+    },
+}
+
+
+def ensure_dualith_store() -> None:
+    """Create the store directories and seed any missing file. Idempotent."""
+    DUALITH_DIR.mkdir(parents=True, exist_ok=True)
+    PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
+
+    seeds: list[tuple[Path, str]] = [
+        (REGISTRY_PATH, '{"projects":[]}\n'),
+        (usage_path(), '{"runs":[]}\n'),
+        (results_path(), '{"results":[]}\n'),
+        (quota_path(), json.dumps(DEFAULT_QUOTA_SETTINGS, indent=2) + "\n"),
+        (status_path(), json.dumps(DEFAULT_STATUS_CACHE, indent=2) + "\n"),
+        (tasks_path(), '{"tasks":[]}\n'),
+        (ideas_path(), '{"ideas":[]}\n'),
+        (central_memory_path(), "{}\n"),
+    ]
+    for path, seed in seeds:
+        if not path.exists():
+            path.write_text(seed, encoding="utf-8")

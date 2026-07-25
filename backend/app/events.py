@@ -17,9 +17,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from datetime import datetime, timezone
 from functools import partial
+from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from .env import env_float
+from .store import relative_path, utc_now
 
 log = logging.getLogger("dualith.events")
 
@@ -36,6 +41,17 @@ DROPPABLE_TYPES = {"agent_output_delta"}
 
 # Keep at most this many tail lines per flush frame.
 DELTA_MAX_LINES = 24
+
+# Trailing window used to collapse a burst of filesystem events into one
+# snapshot. An agent run can touch hundreds of files in a second.
+FS_BROADCAST_DEBOUNCE_SECONDS = env_float("DUALITH_FS_BROADCAST_DEBOUNCE_SECONDS", 0.25)
+
+# Team-room updates coalesce on a shorter window — they are user-visible.
+TEAM_ROOM_DEBOUNCE_SECONDS = 0.12
+
+# Recent activity shown in the UI console. Bounded; this is a display buffer,
+# not an audit log.
+CONSOLE_EVENT_LIMIT = 120
 
 
 def _utc_now() -> str:
@@ -99,6 +115,12 @@ class EventBus:
         # Coalescing buffer: (project, run_id, kind) -> list of pending lines.
         self._pending: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._flush_task: asyncio.Task[None] | None = None
+        # Recent activity, newest last. Read by the snapshot builder.
+        self.console_events: deque[dict[str, str]] = deque(maxlen=CONSOLE_EVENT_LIMIT)
+        # Debounce state for the two coalesced broadcast kinds.
+        self._team_room_pending = False
+        self._fs_pending = False
+        self._fs_latest: dict[str, str] | None = None
 
     def configure(
         self,
@@ -150,6 +172,66 @@ class EventBus:
             payload["event"] = event
 
         self.publish_message({"type": message_type, "payload": payload})
+
+    # ------------------------------------------------------- recording + scheduling
+
+    def record(self, action: str, path: Path | str) -> dict[str, str]:
+        """Append one console event and log it. Returns the entry for callers
+        that want to attach it to a broadcast."""
+        path_value = relative_path(path) if isinstance(path, Path) else path
+        entry = {"timestamp": utc_now(), "action": action, "path": path_value}
+        self.console_events.append(entry)
+        # Error-class actions at WARNING; everything else at DEBUG (high-volume).
+        level = logging.WARNING if action.endswith(("_ERR", "_ERROR", "DENIED")) else logging.DEBUG
+        log.log(level, "%s  %s", action, path_value)
+        return entry
+
+    def schedule_broadcast(self, message_type: str, event: dict[str, str] | None = None) -> None:
+        """Fire a snapshot broadcast from a non-async context (e.g. a watchdog thread)."""
+        if not self._loop:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.broadcast_snapshot(message_type, event), self._loop,
+            )
+        except RuntimeError:
+            pass
+
+    async def _fs_broadcast_soon(self) -> None:
+        try:
+            await asyncio.sleep(FS_BROADCAST_DEBOUNCE_SECONDS)
+            event = self._fs_latest
+        finally:
+            self._fs_pending = False
+            self._fs_latest = None
+        await self.broadcast_snapshot("fs_event", event)
+
+    def schedule_fs_broadcast(self, event: dict[str, str]) -> None:
+        """Queue an fs-driven broadcast, at most one in flight at a time."""
+        self._fs_latest = event
+        if not self._loop or self._fs_pending:
+            return
+        self._fs_pending = True
+        try:
+            asyncio.run_coroutine_threadsafe(self._fs_broadcast_soon(), self._loop)
+        except RuntimeError:
+            self._fs_pending = False
+
+    async def _team_room_broadcast_soon(self) -> None:
+        try:
+            await asyncio.sleep(TEAM_ROOM_DEBOUNCE_SECONDS)
+        finally:
+            self._team_room_pending = False
+        await self.broadcast_snapshot("team_event")
+
+    def schedule_team_room_broadcast(self) -> None:
+        if not self._loop or self._team_room_pending:
+            return
+        self._team_room_pending = True
+        try:
+            asyncio.run_coroutine_threadsafe(self._team_room_broadcast_soon(), self._loop)
+        except RuntimeError:
+            self._team_room_pending = False
 
     async def pump(self, websocket: Any, queue: asyncio.Queue[dict[str, Any]]) -> None:
         """Drain one client's queue into its websocket. Runs until cancelled."""
