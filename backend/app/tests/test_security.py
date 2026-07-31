@@ -16,12 +16,15 @@ import sys
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 main = pytest.importorskip("backend.app.main")
 orchestration = pytest.importorskip("backend.app.orchestration_runs")
 runtime = pytest.importorskip("backend.app.runtime")
+security = pytest.importorskip("backend.app.security")
+projects_io = pytest.importorskip("backend.app.projects_io")
 
 
 # ── Origin allowlist ──────────────────────────────────────────────────────────
@@ -53,37 +56,37 @@ def _matches(pattern: str, origin: str) -> bool:
 
 @pytest.mark.parametrize("origin", LOOPBACK_ORIGINS)
 def test_loopback_origins_always_allowed(origin: str) -> None:
-    assert _matches(main.LOOPBACK_ORIGIN_PATTERN, origin)
+    assert _matches(security.LOOPBACK_ORIGIN_PATTERN, origin)
 
 
 @pytest.mark.parametrize("origin", FOREIGN_ORIGINS)
 def test_foreign_origins_never_allowed(origin: str) -> None:
     """Anchoring matters: `localhost.evil.com` must not slip through."""
-    combined = f"({main.LOOPBACK_ORIGIN_PATTERN}|{main.PRIVATE_NETWORK_ORIGIN_PATTERN})"
-    assert not _matches(main.LOOPBACK_ORIGIN_PATTERN, origin)
+    combined = f"({security.LOOPBACK_ORIGIN_PATTERN}|{security.PRIVATE_NETWORK_ORIGIN_PATTERN})"
+    assert not _matches(security.LOOPBACK_ORIGIN_PATTERN, origin)
     assert not _matches(combined, origin)
 
 
 @pytest.mark.parametrize("origin", PRIVATE_ORIGINS)
 def test_private_origins_rejected_without_lan_mode(origin: str) -> None:
     """The whole point of the fix: LAN origins are not allowed by default."""
-    assert not _matches(main.LOOPBACK_ORIGIN_PATTERN, origin)
+    assert not _matches(security.LOOPBACK_ORIGIN_PATTERN, origin)
 
 
 @pytest.mark.parametrize("origin", PRIVATE_ORIGINS)
 def test_private_origins_allowed_in_lan_mode(origin: str) -> None:
-    combined = f"({main.LOOPBACK_ORIGIN_PATTERN}|{main.PRIVATE_NETWORK_ORIGIN_PATTERN})"
+    combined = f"({security.LOOPBACK_ORIGIN_PATTERN}|{security.PRIVATE_NETWORK_ORIGIN_PATTERN})"
     assert _matches(combined, origin)
 
 
 def test_origin_allowed_permits_missing_origin() -> None:
     """Non-browser clients send no Origin; they aren't the threat here."""
-    assert main.origin_allowed(None) is True
-    assert main.origin_allowed("") is True
+    assert security.origin_allowed(None) is True
+    assert security.origin_allowed("") is True
 
 
 def test_origin_allowed_rejects_foreign_origin() -> None:
-    assert main.origin_allowed("http://evil.example.com") is False
+    assert security.origin_allowed("http://evil.example.com") is False
 
 
 def test_cors_does_not_allow_credentials() -> None:
@@ -131,7 +134,7 @@ def test_api_docs_are_off_by_default() -> None:
 
 
 def test_session_token_is_not_predictable() -> None:
-    assert len(main._SESSION_TOKEN) >= 32
+    assert len(security._SESSION_TOKEN) >= 32
 
 
 # ── Attachment content sniffing ───────────────────────────────────────────────
@@ -144,7 +147,7 @@ def test_session_token_is_not_predictable() -> None:
     b"RIFF\x00\x00\x00\x00WEBP",
 ])
 def test_real_image_headers_accepted(head: bytes) -> None:
-    assert main.looks_like_image(head) is True
+    assert projects_io.looks_like_image(head) is True
 
 
 @pytest.mark.parametrize("head", [
@@ -155,7 +158,7 @@ def test_real_image_headers_accepted(head: bytes) -> None:
     b"",
 ])
 def test_non_image_content_rejected(head: bytes) -> None:
-    assert main.looks_like_image(head) is False
+    assert projects_io.looks_like_image(head) is False
 
 
 # ── Tester runs without a shell ───────────────────────────────────────────────
@@ -182,7 +185,7 @@ def test_capacity_gate_raises_at_the_ceiling(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(orchestration, "active_teams", {})
     monkeypatch.setattr(orchestration, "active_agent_runs", {})
 
-    with pytest.raises(main.HTTPException) as excinfo:
+    with pytest.raises(HTTPException) as excinfo:
         orchestration.enforce_global_run_capacity()
     assert excinfo.value.status_code == 429
 

@@ -39,6 +39,12 @@ active_dev_servers: dict[str, dict[str, Any]] = {}
 # display_path(project) -> (git head fingerprint, commit lines)
 project_commits_cache: dict[str, tuple[str, list[str]]] = {}
 
+# runner id -> {ready, version, error}; refreshed by the health probe at startup
+runner_health: dict[str, dict[str, Any]] = {
+    "codex": {"ready": False, "version": "", "error": ""},
+    "claude": {"ready": False, "version": "", "error": ""},
+}
+
 # watched root key -> last filesystem activity timestamp / watchdog handle
 last_fs_activity: dict[str, str] = {}
 watch_handles: dict[str, Any] = {}
@@ -74,3 +80,16 @@ class StatusRefresh:
 
 
 status_refresh = StatusRefresh()
+
+
+class Watcher:
+    """Holder for the watchdog observer.
+
+    Same reason as StatusRefresh: `main.startup` creates it, `watcher` and
+    `main.shutdown` use it, and `global` does not cross module boundaries.
+    """
+
+    observer: Any = None
+
+
+watcher = Watcher()

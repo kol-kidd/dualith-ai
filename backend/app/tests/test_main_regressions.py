@@ -31,6 +31,7 @@ orchestration = pytest.importorskip("backend.app.orchestration_runs")
 publish = pytest.importorskip("backend.app.publish")
 tasks = pytest.importorskip("backend.app.tasks")
 transcripts = pytest.importorskip("backend.app.transcripts")
+watcher = pytest.importorskip("backend.app.watcher")
 
 
 # ── stop_team_after_failed_step: the NameError ────────────────────────────────
@@ -96,12 +97,12 @@ def test_stop_team_after_failed_step_runs_without_raising(
 def test_read_only_fs_events_are_not_watched() -> None:
     """`opened`/`closed*` are read activity — including our own snapshot reads."""
     for event_type in ("opened", "closed", "closed_no_write"):
-        assert event_type not in main.WATCHED_FS_EVENTS
+        assert event_type not in watcher.WATCHED_FS_EVENTS
 
 
 def test_mutating_fs_events_are_watched() -> None:
     for event_type in ("created", "modified", "deleted", "moved"):
-        assert event_type in main.WATCHED_FS_EVENTS
+        assert event_type in watcher.WATCHED_FS_EVENTS
 
 
 class _FakeEvent:
@@ -114,9 +115,9 @@ class _FakeEvent:
 def test_handler_ignores_read_only_events(monkeypatch: pytest.MonkeyPatch) -> None:
     """A read of CLAUDE_TODO.md must not schedule a broadcast — that was the loop."""
     scheduled: list[dict[str, str]] = []
-    monkeypatch.setattr(main, "schedule_fs_broadcast", scheduled.append)
+    monkeypatch.setattr(watcher.event_bus, "schedule_fs_broadcast", scheduled.append)
 
-    handler = main.WorkspaceEventHandler("root")
+    handler = watcher.WorkspaceEventHandler("root")
     handler.on_any_event(_FakeEvent("opened", "/tmp/proj/CLAUDE_TODO.md"))
     handler.on_any_event(_FakeEvent("closed_no_write", "/tmp/proj/CLAUDE_TODO.md"))
 
@@ -125,9 +126,9 @@ def test_handler_ignores_read_only_events(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_handler_reacts_to_real_changes(monkeypatch: pytest.MonkeyPatch) -> None:
     scheduled: list[dict[str, str]] = []
-    monkeypatch.setattr(main, "schedule_fs_broadcast", scheduled.append)
+    monkeypatch.setattr(watcher.event_bus, "schedule_fs_broadcast", scheduled.append)
 
-    handler = main.WorkspaceEventHandler("root")
+    handler = watcher.WorkspaceEventHandler("root")
     handler.on_any_event(_FakeEvent("modified", "/tmp/proj/app.py"))
 
     assert len(scheduled) == 1
@@ -136,9 +137,9 @@ def test_handler_reacts_to_real_changes(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_handler_still_ignores_git_internals(monkeypatch: pytest.MonkeyPatch) -> None:
     scheduled: list[dict[str, str]] = []
-    monkeypatch.setattr(main, "schedule_fs_broadcast", scheduled.append)
+    monkeypatch.setattr(watcher.event_bus, "schedule_fs_broadcast", scheduled.append)
 
-    handler = main.WorkspaceEventHandler("root")
+    handler = watcher.WorkspaceEventHandler("root")
     handler.on_any_event(_FakeEvent("modified", "/tmp/proj/.git/index"))
 
     assert scheduled == []

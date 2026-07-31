@@ -32,21 +32,27 @@ LEAVES = {
 }
 
 
-def _intra_package_imports(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+def _intra_package_imports(path: Path, level: int = 1) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
     found: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
+        if isinstance(node, ast.ImportFrom) and node.level == level and node.module:
             found.add(node.module.split(".")[0])
     return found
 
 
 def _graph() -> dict[str, set[str]]:
+    """Module -> the package modules it imports, routes/ included."""
     graph: dict[str, set[str]] = {}
     for path in sorted(PACKAGE.glob("*.py")):
         if path.name == "__init__.py":
             continue
         graph[path.stem] = _intra_package_imports(path)
+    for path in sorted((PACKAGE / "routes").glob("*.py")):
+        # routes/x.py imports the package with `..`, which _intra_package_imports
+        # sees as level 2; normalise both to bare module names.
+        deps = _intra_package_imports(path, level=2)
+        graph[f"routes.{path.stem}"] = deps
     return graph
 
 
@@ -94,13 +100,33 @@ def test_nothing_imports_main() -> None:
     assert not offenders, f"these modules import main: {offenders}"
 
 
+def test_only_main_imports_routes() -> None:
+    """Routes are the outermost layer — nothing in the package may depend on
+    a handler module, or the dependency direction has inverted."""
+    offenders = [
+        name for name, deps in _graph().items()
+        if not name.startswith("routes.") and name != "main" and "routes" in deps
+    ]
+    assert not offenders, f"non-main modules importing routes: {offenders}"
+
+
+def test_every_route_module_is_registered() -> None:
+    """A router file nobody includes is dead code that still looks live."""
+    from backend.app.routes import ROUTERS
+
+    files = {p.stem for p in (PACKAGE / "routes").glob("*.py") if p.name != "__init__.py"}
+    assert len(ROUTERS) == len(files), (
+        f"{len(files)} route modules but {len(ROUTERS)} registered routers"
+    )
+
+
 def test_main_is_shrinking() -> None:
     """A ratchet, not a target — lower it as more is extracted.
 
     main.py was 10,538 lines when the split started.
     """
     lines = len((PACKAGE / "main.py").read_text(encoding="utf-8").splitlines())
-    assert lines <= 3_000, (
-        f"main.py is {lines} lines; the ratchet is 3,000. "
+    assert lines <= 500, (
+        f"main.py is {lines} lines; the ratchet is 500. "
         "If this grew, extract before adding — see AUDIT.md."
     )

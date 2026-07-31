@@ -93,3 +93,33 @@ def app_status_snapshot() -> dict[str, Any]:
         "api_url": f"http://{api_host}:{DUALITH_API_PORT}",
         "phone_url": f"http://{lan_ip}:{DUALITH_WEB_PORT}" if LAN_MODE else "",
     }
+
+
+# ── Feature flags ─────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+DYNAMIC_ORCHESTRATION_ENABLED = os.environ.get("DUALITH_DYNAMIC_ORCHESTRATION", "").strip().lower() in {"1", "true", "yes", "on"}
+
+APP_FEATURES = [
+    "status-refresh",
+    "status-refresh-singleflight",
+    "status-refresh-nonblocking",
+    "quota-status",
+    "project-preview",
+    "lan-mode",
+    "unified-chat",
+    "dynamic-orchestration",
+    "chat-clear-results",
+    "task-queue",
+    "typed-events",
+    "workspace-shell",
+    "architect-agent",
+    "specialist-reviewers",
+    "structured-hitl",
+    "project-memory",
+    "ideas-workbench",
+    "agent-idle-watchdog",
+    "explicit-route-mode",
+    "lean-team-mode",
+    "smart-stack-scaffold",
+]
