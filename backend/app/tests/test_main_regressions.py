@@ -27,29 +27,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 main = pytest.importorskip("backend.app.main")
 git_ops = pytest.importorskip("backend.app.git_ops")
+orchestration = pytest.importorskip("backend.app.orchestration_runs")
+publish = pytest.importorskip("backend.app.publish")
+tasks = pytest.importorskip("backend.app.tasks")
+transcripts = pytest.importorskip("backend.app.transcripts")
 
 
 # ── stop_team_after_failed_step: the NameError ────────────────────────────────
 
 def test_stop_team_after_failed_step_accepts_task_id() -> None:
     """The circuit breaker needs task_id passed in, not looked up as a global."""
-    params = list(inspect.signature(main.stop_team_after_failed_step).parameters)
+    params = list(inspect.signature(orchestration.stop_team_after_failed_step).parameters)
     assert "task_id" in params
 
 
 def test_stop_team_after_failed_step_has_no_undefined_globals() -> None:
     """Guard the exact bug: task_id compiled to a LOAD_GLOBAL with no binding."""
+    module = orchestration
     import builtins
     import dis
 
     loaded = {
         instruction.argval
-        for instruction in dis.get_instructions(main.stop_team_after_failed_step.__code__)
+        for instruction in dis.get_instructions(orchestration.stop_team_after_failed_step.__code__)
         if instruction.opname in {"LOAD_GLOBAL", "LOAD_NAME"}
     }
     missing = {
         name for name in loaded
-        if not hasattr(main, name) and not hasattr(builtins, name)
+        if not hasattr(module, name) and not hasattr(builtins, name)
     }
     assert "task_id" not in loaded
     assert not missing, f"references names that don't exist at module scope: {sorted(missing)}"
@@ -61,10 +66,10 @@ def test_stop_team_after_failed_step_runs_without_raising(
     """The whole point of the breaker is to report failure without failing itself."""
     recorded: dict[str, Any] = {}
 
-    monkeypatch.setattr(main, "publish_run_failure", lambda *a, **k: "boom")
-    monkeypatch.setattr(main, "append_chat_history", lambda *a, **k: None)
+    monkeypatch.setattr(orchestration, "publish_run_failure", lambda *a, **k: "boom")
+    monkeypatch.setattr(orchestration, "append_chat_history", lambda *a, **k: None)
     monkeypatch.setattr(
-        main, "set_task_status",
+        orchestration, "set_task_status",
         lambda task_id, status, *a, **k: recorded.update(task_id=task_id, status=status),
     )
 
@@ -74,11 +79,11 @@ def test_stop_team_after_failed_step_runs_without_raising(
     async def _noop_team_state(*a: Any, **k: Any) -> None:
         return None
 
-    monkeypatch.setattr(main, "broadcast", _noop_broadcast)
-    monkeypatch.setattr(main, "set_team_state", _noop_team_state)
+    monkeypatch.setattr(orchestration.event_bus, "broadcast_snapshot", _noop_broadcast)
+    monkeypatch.setattr(orchestration, "set_team_state", _noop_team_state)
 
     asyncio.run(
-        main.stop_team_after_failed_step(
+        orchestration.stop_team_after_failed_step(
             "proj", tmp_path, "lead", "codex", {"error": "boom", "status": "error"}, 1, "task-42",
         )
     )

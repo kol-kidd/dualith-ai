@@ -20,6 +20,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 main = pytest.importorskip("backend.app.main")
+orchestration = pytest.importorskip("backend.app.orchestration_runs")
+runtime = pytest.importorskip("backend.app.runtime")
 
 
 # ── Origin allowlist ──────────────────────────────────────────────────────────
@@ -161,7 +163,7 @@ def test_non_image_content_rejected(head: bytes) -> None:
 def test_check_commands_are_argv_lists(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text('{"scripts":{"test":"echo hi"}}', encoding="utf-8")
     (tmp_path / "Makefile").write_text("test:\n\techo mk\n", encoding="utf-8")
-    commands = main.deterministic_check_commands(tmp_path)
+    commands = orchestration.deterministic_check_commands(tmp_path)
     assert commands
     for command in commands:
         assert isinstance(command, list)
@@ -169,37 +171,37 @@ def test_check_commands_are_argv_lists(tmp_path: Path) -> None:
 
 
 def test_check_commands_empty_for_bare_directory(tmp_path: Path) -> None:
-    assert main.deterministic_check_commands(tmp_path) == []
+    assert orchestration.deterministic_check_commands(tmp_path) == []
 
 
 # ── Concurrency ceiling ───────────────────────────────────────────────────────
 
 def test_capacity_gate_raises_at_the_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main, "MAX_CONCURRENT_ORCHESTRATIONS", 2)
-    monkeypatch.setattr(main, "active_pipelines", {"a": {}, "b": {}})
-    monkeypatch.setattr(main, "active_teams", {})
-    monkeypatch.setattr(main, "active_agent_runs", {})
+    monkeypatch.setattr(orchestration, "MAX_CONCURRENT_ORCHESTRATIONS", 2)
+    monkeypatch.setattr(orchestration, "active_pipelines", {"a": {}, "b": {}})
+    monkeypatch.setattr(orchestration, "active_teams", {})
+    monkeypatch.setattr(orchestration, "active_agent_runs", {})
 
     with pytest.raises(main.HTTPException) as excinfo:
-        main.enforce_global_run_capacity()
+        orchestration.enforce_global_run_capacity()
     assert excinfo.value.status_code == 429
 
 
 def test_capacity_gate_allows_below_the_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main, "MAX_CONCURRENT_ORCHESTRATIONS", 4)
-    monkeypatch.setattr(main, "active_pipelines", {"a": {}})
-    monkeypatch.setattr(main, "active_teams", {})
-    monkeypatch.setattr(main, "active_agent_runs", {"a:lead": {}})
+    monkeypatch.setattr(orchestration, "MAX_CONCURRENT_ORCHESTRATIONS", 4)
+    monkeypatch.setattr(orchestration, "active_pipelines", {"a": {}})
+    monkeypatch.setattr(orchestration, "active_teams", {})
+    monkeypatch.setattr(orchestration, "active_agent_runs", {"a:lead": {}})
 
-    main.enforce_global_run_capacity()  # must not raise
+    orchestration.enforce_global_run_capacity()  # must not raise
 
 
 def test_capacity_counts_projects_not_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Several agents in one project are one busy project, not several."""
-    monkeypatch.setattr(main, "active_pipelines", {})
-    monkeypatch.setattr(main, "active_teams", {})
-    monkeypatch.setattr(main, "active_agent_runs", {"a:lead": {}, "a:tester": {}, "b:lead": {}})
-    assert main.concurrent_orchestration_count() == 2
+    monkeypatch.setattr(orchestration, "active_pipelines", {})
+    monkeypatch.setattr(orchestration, "active_teams", {})
+    monkeypatch.setattr(orchestration, "active_agent_runs", {"a:lead": {}, "a:tester": {}, "b:lead": {}})
+    assert orchestration.concurrent_orchestration_count() == 2
 
 
 # ── Environment validation ────────────────────────────────────────────────────
